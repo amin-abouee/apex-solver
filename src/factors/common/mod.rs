@@ -13,6 +13,7 @@
 //! group's.
 
 pub mod cheirality;
+pub mod group_point;
 pub mod math;
 pub(crate) mod validate;
 

@@ -8,6 +8,7 @@
 use crate::rosbag::error::Result;
 
 use super::deserialize::{Ros1Deserializer, Ros1Serializer};
+use crate::rosbag::messages::PointField;
 
 /// `std_msgs/Header`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -158,6 +159,49 @@ impl PoseStamped {
     }
 }
 
+/// `geometry_msgs/Transform`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Transform {
+    pub translation: Vector3,
+    pub rotation: Quaternion,
+}
+
+impl Transform {
+    pub fn from_ros1(d: &mut Ros1Deserializer<'_>) -> Result<Self> {
+        Ok(Self {
+            translation: Vector3::from_ros1(d)?,
+            rotation: Quaternion::from_ros1(d)?,
+        })
+    }
+    pub fn to_ros1(&self, s: &mut Ros1Serializer) {
+        self.translation.to_ros1(s);
+        self.rotation.to_ros1(s);
+    }
+}
+
+/// `geometry_msgs/TransformStamped`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TransformStamped {
+    pub header: Header,
+    pub child_frame_id: String,
+    pub transform: Transform,
+}
+
+impl TransformStamped {
+    pub fn from_ros1(d: &mut Ros1Deserializer<'_>) -> Result<Self> {
+        Ok(Self {
+            header: Header::from_ros1(d)?,
+            child_frame_id: d.read_string()?,
+            transform: Transform::from_ros1(d)?,
+        })
+    }
+    pub fn to_ros1(&self, s: &mut Ros1Serializer) {
+        self.header.to_ros1(s);
+        s.write_string(&self.child_frame_id);
+        self.transform.to_ros1(s);
+    }
+}
+
 /// `sensor_msgs/Imu`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Imu {
@@ -267,6 +311,79 @@ impl Image {
     }
 }
 
+/// `sensor_msgs/PointCloud2` — the field layout type is shared with ROS2.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PointCloud2 {
+    pub header: Header,
+    pub height: u32,
+    pub width: u32,
+    pub fields: Vec<PointField>,
+    pub is_bigendian: bool,
+    pub point_step: u32,
+    pub row_step: u32,
+    pub data: Vec<u8>,
+    pub is_dense: bool,
+}
+
+impl PointCloud2 {
+    pub fn from_ros1(d: &mut Ros1Deserializer<'_>) -> Result<Self> {
+        Ok(Self {
+            header: Header::from_ros1(d)?,
+            height: d.read_u32()?,
+            width: d.read_u32()?,
+            fields: d.read_seq(|d| {
+                Ok(PointField {
+                    name: d.read_string()?,
+                    offset: d.read_u32()?,
+                    datatype: d.read_u8()?,
+                    count: d.read_u32()?,
+                })
+            })?,
+            is_bigendian: d.read_bool()?,
+            point_step: d.read_u32()?,
+            row_step: d.read_u32()?,
+            data: d.read_bytes()?,
+            is_dense: d.read_bool()?,
+        })
+    }
+
+    pub fn to_ros1(&self, s: &mut Ros1Serializer) {
+        self.header.to_ros1(s);
+        s.write_u32(self.height);
+        s.write_u32(self.width);
+        s.write_u32(self.fields.len() as u32);
+        for field in &self.fields {
+            s.write_string(&field.name);
+            s.write_u32(field.offset);
+            s.write_u8(field.datatype);
+            s.write_u32(field.count);
+        }
+        s.write_u8(u8::from(self.is_bigendian));
+        s.write_u32(self.point_step);
+        s.write_u32(self.row_step);
+        s.write_bytes(&self.data);
+        s.write_u8(u8::from(self.is_dense));
+    }
+
+    /// Number of points, `height · width`.
+    pub fn point_count(&self) -> usize {
+        self.height as usize * self.width as usize
+    }
+
+    /// The values of field `name` for every point, widened to `f64` — see
+    /// [`crate::rosbag::point_cloud::field_values`].
+    pub fn field_values(&self, name: &str) -> Result<Vec<f64>> {
+        crate::rosbag::point_cloud::field_values(
+            &self.fields,
+            name,
+            &self.data,
+            self.point_step as usize,
+            self.point_count(),
+            self.is_bigendian,
+        )
+    }
+}
+
 /// `sensor_msgs/CompressedImage`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompressedImage {
@@ -309,6 +426,53 @@ fn write_f64_9(s: &mut Ros1Serializer, arr: &[f64; 9]) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn point_cloud_round_trip_and_fields() -> Result<()> {
+        let mut data = Vec::new();
+        for (x, t) in [(1.25f32, 10.5f64), (-3.0, 10.6)] {
+            data.extend(x.to_le_bytes());
+            data.extend([0u8; 4]);
+            data.extend(t.to_le_bytes());
+        }
+        let cloud = PointCloud2 {
+            header: Header {
+                seq: 3,
+                stamp_ns: 1_674_818_628_393_743_000,
+                frame_id: "PandarXT-32".into(),
+            },
+            height: 1,
+            width: 2,
+            fields: vec![
+                PointField {
+                    name: "x".into(),
+                    offset: 0,
+                    datatype: 7,
+                    count: 1,
+                },
+                PointField {
+                    name: "timestamp".into(),
+                    offset: 8,
+                    datatype: 8,
+                    count: 1,
+                },
+            ],
+            is_bigendian: false,
+            point_step: 16,
+            row_step: 32,
+            data,
+            is_dense: true,
+        };
+        let mut s = Ros1Serializer::new();
+        cloud.to_ros1(&mut s);
+        let bytes = s.into_bytes();
+        let back = PointCloud2::from_ros1(&mut Ros1Deserializer::new(&bytes))?;
+        assert_eq!(back, cloud);
+        assert_eq!(back.point_count(), 2);
+        assert_eq!(back.field_values("x")?, vec![1.25, -3.0]);
+        assert_eq!(back.field_values("timestamp")?, vec![10.5, 10.6]);
+        Ok(())
+    }
 
     #[test]
     fn imu_round_trip() -> Result<()> {
@@ -453,6 +617,36 @@ mod tests {
         p.to_ros1(&mut s);
         let mut d = Ros1Deserializer::new(s.as_slice());
         assert_eq!(Pose::from_ros1(&mut d)?, p);
+        Ok(())
+    }
+
+    #[test]
+    fn transform_stamped_round_trip() -> Result<()> {
+        let msg = TransformStamped {
+            header: Header {
+                seq: 7,
+                stamp_ns: 1_520_530_308_181_901_469,
+                frame_id: "world".into(),
+            },
+            child_frame_id: "vrpn_marker".into(),
+            transform: Transform {
+                translation: Vector3 {
+                    x: 0.1,
+                    y: -0.2,
+                    z: 1.3,
+                },
+                rotation: Quaternion {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.707,
+                    w: 0.707,
+                },
+            },
+        };
+        let mut s = Ros1Serializer::new();
+        msg.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(TransformStamped::from_ros1(&mut d)?, msg);
         Ok(())
     }
 

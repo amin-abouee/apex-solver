@@ -90,7 +90,7 @@ pub enum ManifoldError {
     NormalizationFailed(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManifoldType {
     RN,
     SE2,
@@ -859,7 +859,7 @@ mod tests {
             ManifoldType::SO3,
         ];
         for t in &all_types {
-            let t2 = t.clone();
+            let t2 = *t;
             assert_eq!(t, &t2);
         }
         // Ensure different variants are not equal

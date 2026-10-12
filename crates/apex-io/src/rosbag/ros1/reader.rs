@@ -430,8 +430,15 @@ impl Ros1Reader {
                 dec.read_to_end(&mut out)?;
                 out
             }
-            Ros1Compression::Lz4 => lz4_flex::block::decompress_size_prepended(&rec.data)
-                .map_err(|e| BagError::compression(format!("lz4 decode: {e}")))?,
+            // ROS 1 (`roslz4`) writes each chunk as an LZ4 *frame*, magic
+            // 0x184D2204, not a bare block.
+            Ros1Compression::Lz4 => {
+                let mut out = Vec::with_capacity(uncompressed_size);
+                lz4_flex::frame::FrameDecoder::new(&rec.data[..])
+                    .read_to_end(&mut out)
+                    .map_err(|e| BagError::compression(format!("lz4 decode: {e}")))?;
+                out
+            }
         };
         if inflated.len() != uncompressed_size {
             return Err(BagError::Ros1IndexCorrupt {
@@ -509,6 +516,38 @@ fn parse_connection_record(header: &RecordHeader, data: &[u8]) -> Result<Connect
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// LZ4 chunks are LZ4 frames, as `roslz4` writes them — a bag from ROS
+    /// (Hilti 2022) carries the frame magic right after the chunk header —
+    /// and read back intact.
+    #[test]
+    fn lz4_chunks_are_frames() -> Result<()> {
+        use crate::rosbag::ros1::format::Ros1Compression;
+        use crate::rosbag::ros1::writer::Ros1Writer;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lz4.bag");
+        let mut w = Ros1Writer::new(&path)?;
+        w.set_compression(Ros1Compression::Lz4)?;
+        w.open()?;
+        let conn = w.add_connection("/t", "std_msgs/String", "hash", "", false)?;
+        let payload: Vec<u8> = (0..4096u32).map(|k| (k % 251) as u8).collect();
+        w.write(&conn, 1_000, &payload)?;
+        w.close()?;
+
+        let bytes = std::fs::read(&path)?;
+        let magic = [0x04, 0x22, 0x4d, 0x18];
+        assert!(
+            bytes.windows(4).any(|window| window == magic),
+            "an LZ4 chunk must be an LZ4 frame"
+        );
+        let mut r = Ros1Reader::new(&path)?;
+        r.open()?;
+        let msgs = r.raw_messages()?;
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].raw_data, payload);
+        Ok(())
+    }
 
     /// The chunk cache must stay bounded while iterating a multi-chunk bag.
     ///

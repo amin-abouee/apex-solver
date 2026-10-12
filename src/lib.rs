@@ -69,10 +69,15 @@ pub use core::variable::Variable;
 pub use error::{ApexSolverError, ApexSolverResult, ErrorLogging};
 
 // Re-export factor types
+pub use core::marginalization::{
+    AppliedMarginal, Marginal, MarginalizationError, MarginalizationResult, Marginalizer,
+    SqrtInformation,
+};
 pub use core::noise::{InformationRepair, NoiseModel, RepairStrategy, RepairSummary};
 pub use factors::Factor;
 pub use factors::pose::{BetweenFactor, EuclideanPriorFactor, PriorFactor};
 pub use factors::visual::ProjectionFactor;
+pub use linearizer::JacobianEvaluation;
 
 // Re-export linear algebra types
 pub use linalg::{

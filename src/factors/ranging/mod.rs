@@ -8,5 +8,5 @@
 pub mod bearing;
 pub mod range;
 
-pub use bearing::BearingFactor;
+pub use bearing::{BearingFactor, BearingFactorSe23};
 pub use range::{BearingRangeFactor, PosePointRangeFactor, PosePoseRangeFactor};

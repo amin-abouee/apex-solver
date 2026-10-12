@@ -9,7 +9,7 @@ binaries. Bag handling, visualization, live DDS, and async ASL are opt-in.
 |---|:---:|---|---|
 | `download` | ✓ | Dataset auto-download (`download_file`, `decompress_bzip2`, `extract_tar_gz`, the `ensure_*_dataset` network fallback) and the `download_datasets` binary | `ureq`, `bzip2`, `flate2`, `tar` |
 | `cli` | ✓ | CLI parsing for `download_datasets`, `bag_filter`, `bag_convert` | `clap` |
-| `rosbag` | ✗ | ROS1/ROS2 bag read/write (SQLite3 & MCAP storage, CDR, message types) and the `bag_info`, `bag_filter`, `bag_convert`, `extract_topic_data`, `write_dummy_bag` binaries | `rusqlite` (bundled SQLite), `mcap`, `zstd`, `lz4_flex`, `serde_yaml`, `byteorder`, `hex`, `bzip2` |
+| `rosbag` | ✗ | ROS1/ROS2 bag read/write (SQLite3 & MCAP storage, CDR, message types) and the `bag_info`, `bag_filter`, `bag_convert`, `extract_topic_data`, `write_dummy_bag` binaries | `rusqlite` (bundled SQLite), `mcap`, `zstd`, `lz4_flex`, `serde_norway`, `byteorder`, `hex`, `bzip2` |
 | `visualization` | ✗ | `to_rerun_*` conversions on `VertexSE2`/`VertexSE3`; solver visualization | `rerun` |
 | `dds` | ✗ | The `dds` module (`DdsSubscriber`, `DdsListener`, QoS mapping) and the `dds_multi_listener` binary | `rustdds`, `tokio`, `futures` |
 | `asl-async` | ✗ | Async ASL streaming | `tokio` |

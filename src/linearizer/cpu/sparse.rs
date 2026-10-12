@@ -10,8 +10,8 @@ use slotmap::{SecondaryMap, SlotMap};
 use crate::core::VarKey;
 use crate::error::ErrorLogging;
 use crate::linearizer::{
-    AssemblyWorkspace, LinearizerError, LinearizerResult, compute_block_into,
-    split_by_row_offsets_mut,
+    AssemblyWorkspace, JacobianEvaluation, LinearizerError, LinearizerResult,
+    compute_block_into_with, split_by_row_offsets_mut,
 };
 
 use crate::core::problem::Problem;
@@ -227,12 +227,34 @@ fn csc_from_triples(
 ///
 /// Reuses the block ordering, slice offsets and scratch buffers cached in
 /// `workspace` — nothing static is rebuilt or reallocated per call.
+/// [`assemble_sparse_with`] using the problem's own
+/// [`Problem::jacobian_evaluation`] setting.
 pub fn assemble_sparse(
+    problem: &Problem,
+    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    variable_index_map: &SecondaryMap<VarKey, usize>,
+    symbolic_structure: &SymbolicStructure,
+    workspace: &mut AssemblyWorkspace,
+) -> LinearizerResult<(Mat<f64>, SparseColMat<usize, f64>)> {
+    assemble_sparse_with(
+        problem,
+        variables,
+        variable_index_map,
+        symbolic_structure,
+        workspace,
+        problem.jacobian_evaluation(),
+    )
+}
+
+/// Assemble the residual and sparse Jacobian, evaluating Jacobians as
+/// `evaluation` says.
+pub fn assemble_sparse_with(
     problem: &Problem,
     variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     _variable_index_map: &SecondaryMap<VarKey, usize>,
     symbolic_structure: &SymbolicStructure,
     workspace: &mut AssemblyWorkspace,
+    evaluation: JacobianEvaluation,
 ) -> LinearizerResult<(Mat<f64>, SparseColMat<usize, f64>)> {
     let total_nnz = symbolic_structure.pattern.compute_nnz();
 
@@ -253,7 +275,8 @@ pub fn assemble_sparse(
         .map(|((res_slice, jac_buf), key)| {
             let block = &residual_blocks[*key];
             jac_buf.fill(0.0);
-            compute_block_into(block, variables, res_slice, Some(jac_buf)).map(|_| ())
+            compute_block_into_with(block, variables, res_slice, Some(jac_buf), evaluation)
+                .map(|_| ())
         })
         .collect::<LinearizerResult<()>>()?;
 

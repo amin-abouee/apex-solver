@@ -16,7 +16,9 @@
 #![allow(clippy::print_stderr)]
 
 mod common;
-use common::{Trajectory, anchor_rn, anchor_se3, build_imu_dataset, imu_params, lm_solver};
+use common::{
+    Trajectory, anchor_rn, anchor_se3, anchor_se23, build_imu_dataset, imu_params, lm_solver,
+};
 
 use apex_solver::JacobianMode;
 use apex_solver::apex_manifolds::se3::{SE3, SE3Tangent};
@@ -30,16 +32,22 @@ use apex_solver::factors::imu::{
     se23, sgal3,
 };
 use apex_solver::factors::lidar::{
-    IcpFactor, LidarEdgeFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
+    DistanceField, IcpFactor, LidarEdgeFactor, LidarMapPlaneFactor, LidarMapPlanesFactor,
+    LidarPlaneBundleFactor, LidarPlaneMomentFactor, LidarSubmapFieldFactor, Plane, PlaneMatch,
+    PointMoments, PrecomputedPlane, SubmapAlignmentFactor, lidar_plane_factor_isotropic,
 };
 use apex_solver::factors::navigation::{GpsAsyncFactor, GpsFactor};
-use apex_solver::factors::ranging::bearing::BearingFactor;
+use apex_solver::factors::ranging::bearing::{BearingFactor, BearingFactorSe23};
 use apex_solver::factors::ranging::range::PosePoseRangeFactor;
 use apex_solver::factors::visual::{
     DepthFactor, EssentialMatrixConstraint, EssentialMatrixFactor, HomogeneousPointFactor,
     OneSidedDepthFactor,
 };
-use nalgebra::{DVector, UnitQuaternion, Vector3, Vector4};
+use apex_solver::factors::visual::{IntensityImage, PhotometricPatchFactor};
+use apex_solver::factors::visual::{InverseDepthBearingSe23Factor, InverseDepthSe23Factor};
+use apex_solver::factors::visual::{InverseRangeProjectionSe23Factor, StereoInverseRangeFactor};
+use apex_solver::factors::visual::{PhotometricTwoViewFactor, PlanePoint, ReferenceView};
+use nalgebra::{DVector, UnitQuaternion, Vector2, Vector3, Vector4};
 
 /// Perturb an SE3 pose in its tangent so the optimizer has work to do.
 fn nudge_se3(pose: &SE3, tangent: [f64; 6]) -> DVector<f64> {
@@ -66,6 +74,178 @@ fn state_of(pose: &SE3, sb: &SpeedAndBias) -> SE23 {
 /// walk edge; `se23::CombinedImuFactor` embeds that walk. Both formulations
 /// should land on the same trajectory — that equivalence is the whole reason
 /// two factors exist, so it is worth asserting rather than documenting.
+/// A trajectory expressed in a world tilted against gravity — what a map
+/// started with a slightly wrong tilt is. With the states and biases held,
+/// the gravity-frame IMU factor recovers gravity's direction in that world.
+#[test]
+fn gravity_frame_imu_factor_recovers_a_tilted_world() {
+    use apex_solver::apex_manifolds::so3::SO3;
+    use apex_solver::factors::imu::{ImuMeasurement, ImuSensorReadings};
+    // A rig yawing at 0.4 rad/s while accelerating at a constant rate, in a
+    // world whose gravity is tilted: the specific force is `Rᵀ(a − g_w)`.
+    let tilt = UnitQuaternion::from_euler_angles(0.015, -0.01, 0.0);
+    let gravity = tilt * Vector3::new(0.0, 0.0, -imu_params().g);
+    let accel = Vector3::new(0.3, -0.2, 0.05);
+    let rate = Vector3::new(0.0, 0.0, 0.4);
+    let attitude = |t: f64| UnitQuaternion::from_scaled_axis(rate * t);
+    let state_at = |t: f64| SE23::new(accel * (0.5 * t * t), accel * t, attitude(t));
+    let key_times: Vec<f64> = (0..=6).map(|k| k as f64 * 0.5).collect();
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let rotation = problem.add_variable(
+        ManifoldType::SO3,
+        DVector::from_column_slice(SO3::identity().as_param_slice()),
+    );
+    let keys: Vec<_> = key_times
+        .iter()
+        .map(|t| {
+            let state = problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(state_at(*t).as_param_slice()),
+            );
+            let bias = problem.add_variable(ManifoldType::RN, DVector::zeros(6));
+            for i in 0..9 {
+                problem.fix_variable(state, i);
+            }
+            for i in 0..6 {
+                problem.fix_variable(bias, i);
+            }
+            (state, bias)
+        })
+        .collect();
+    for k in 0..keys.len() - 1 {
+        let (t0, t1) = (key_times[k], key_times[k + 1]);
+        let samples: Vec<ImuMeasurement> = (0..=500)
+            .map(|i| {
+                let t = t0 + (t1 - t0) * f64::from(i) / 500.0;
+                ImuMeasurement::new(
+                    t,
+                    ImuSensorReadings {
+                        gyroscopes: rate,
+                        accelerometers: attitude(t).inverse() * (accel - gravity),
+                    },
+                )
+            })
+            .collect();
+        let preint = ImuPreintegration::new(samples, imu_params(), t0, t1, &SpeedAndBias::zeros());
+        problem.add_residual_block(
+            &[keys[k].0, keys[k].1, keys[k + 1].0, keys[k + 1].1, rotation],
+            Box::new(se23::GravityFrameImuFactor::new(
+                se23::CombinedImuFactor::new(preint),
+            )),
+            None,
+        );
+    }
+    let mut solver = lm_solver(100);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("gravity estimation failed: {e}"));
+    let estimated = SO3::from_param_slice(result.parameters[rotation].as_param_slice());
+    let up = estimated.rotation_matrix() * Vector3::z();
+    let error = up.angle(&(tilt * Vector3::z()));
+    assert!(error < 2e-5, "gravity direction error {error:.2e} rad");
+}
+
+/// Two views of a textured wall through one camera extrinsic: from a nudged
+/// start, the current body pose comes back, the extrinsic held.
+#[test]
+fn photometric_two_view_factor_recovers_a_pose() {
+    use apex_solver::apex_camera_models::{CameraModel, PinholeCamera};
+    use std::sync::Arc;
+    let camera = PinholeCamera::from([400.0, 400.0, 320.0, 240.0]);
+    let t_sc = SE3::new(
+        Vector3::new(0.05, -0.02, 0.03),
+        UnitQuaternion::from_euler_angles(0.01, -0.02, 0.015),
+    );
+    let texture = |x: f64, y: f64| {
+        128.0 + 50.0 * (40.0 * x).sin() * (35.0 * y).cos() + 30.0 * (70.0 * x + 50.0 * y).sin()
+    };
+    let render = |body: &SE23| {
+        let pose =
+            SE3::new(body.translation(), body.rotation_quaternion()).compose(&t_sc, None, None);
+        let rotation = pose.rotation_so3().rotation_matrix();
+        Arc::new(
+            IntensityImage::from_fn(640, 480, |x, y| {
+                let Ok(ray) = camera.unproject(&Vector2::new(x as f64, y as f64)) else {
+                    return 0.0;
+                };
+                let ray = rotation * ray;
+                let hit = pose.translation() + ray * ((3.0 - pose.translation().z) / ray.z);
+                texture(hit.x, hit.y) as f32
+            })
+            .unwrap_or_else(|e| panic!("{e}")),
+        )
+    };
+    let reference = SE23::new(
+        Vector3::new(0.0, 0.05, 0.0),
+        Vector3::zeros(),
+        UnitQuaternion::from_euler_angles(0.02, -0.03, 0.0),
+    );
+    let truth = SE23::new(
+        Vector3::new(0.12, 0.05, 0.0),
+        Vector3::zeros(),
+        UnitQuaternion::from_euler_angles(0.02, -0.03, 0.05),
+    );
+    let (reference_image, current_image) = (render(&reference), render(&truth));
+    let start = truth.right_plus(
+        &SE23Tangent::from_slice(&[0.004, -0.003, 0.002, 0.002, -0.001, 0.002, 0.0, 0.0, 0.0]),
+        None,
+        None,
+    );
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let x = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(start.as_param_slice()),
+    );
+    for i in 6..9 {
+        problem.fix_variable(x, i);
+    }
+    let e = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(t_sc.as_param_slice()),
+    );
+    for i in 0..6 {
+        problem.fix_variable(e, i);
+    }
+    for i in 0..6 {
+        for j in 0..4 {
+            let point = Vector3::new(f64::from(i) * 0.25 - 0.6, f64::from(j) * 0.25 - 0.4, 3.0);
+            problem.add_residual_block_with_noise(
+                &[x, e],
+                Box::new(
+                    PhotometricTwoViewFactor::<SE23, PinholeCamera>::new(
+                        camera,
+                        current_image.clone(),
+                        ReferenceView {
+                            image: reference_image.clone(),
+                            body: reference.clone(),
+                        },
+                        PlanePoint {
+                            point,
+                            normal: Vector3::new(0.0, 0.0, -1.0),
+                        },
+                        PhotometricTwoViewFactor::<SE23, PinholeCamera>::offsets_square(8),
+                        1.0,
+                        10.0,
+                    )
+                    .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                None,
+                NoiseModel::null(),
+            );
+        }
+    }
+    let mut solver = lm_solver(50);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("two-view solve failed: {e}"));
+    let hat = SE23::from_param_slice(result.parameters[x].as_param_slice());
+    let position_err = (hat.translation() - truth.translation()).norm();
+    let rotation_err = (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+    assert!(position_err < 1e-3, "position error {position_err:.2e}");
+    assert!(rotation_err < 2e-4, "rotation error {rotation_err:.2e}");
+}
+
 #[test]
 fn shared_bias_imu_form_matches_the_combined_form() {
     let key_times: Vec<f64> = (0..=5).map(|k| k as f64 * 0.5).collect();
@@ -598,6 +778,332 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
     assert!(err < 0.05, "landmark error {err:.4} from bearing-only rays");
 }
 
+/// The same landmark, seen by `SE23` navigation states instead of `SE3` poses —
+/// the shape a visual-inertial window actually has, where the state the IMU
+/// factor constrains is the one the vision factor must attach to.
+///
+/// The states carry non-zero velocity, which the bearing measurements say
+/// nothing about; the test asserts it is left alone.
+#[test]
+fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
+    let states: Vec<SE23> = (0..4)
+        .map(|k| {
+            SE23::new(
+                Vector3::new(k as f64 * 1.5, 0.0, 0.0),
+                Vector3::new(1.5, 0.2 * k as f64, -0.1),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.1 * k as f64),
+            )
+        })
+        .collect();
+    let landmark = Vector3::new(3.0, 5.0, 1.5);
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let state_keys: Vec<_> = states
+        .iter()
+        .map(|s| {
+            problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(s.as_param_slice()),
+            )
+        })
+        .collect();
+    for (k, key) in state_keys.iter().enumerate() {
+        anchor_se23(&mut problem, *key, &states[k]);
+    }
+    let lm_key = problem.add_variable(
+        ManifoldType::RN,
+        DVector::from_vec(vec![2.0, 3.0, 0.5]), // deliberately off
+    );
+
+    for (k, key) in state_keys.iter().enumerate() {
+        let delta = landmark - states[k].translation();
+        let bearing = states[k].rotation_matrix().transpose() * (delta / delta.norm());
+        problem.add_residual_block(
+            &[*key, lm_key],
+            Box::new(BearingFactorSe23::new_isotropic(bearing, 0.01)),
+            None,
+        );
+    }
+
+    let mut solver = lm_solver(150);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("SE23 bearing graph failed: {e}"));
+
+    let hat = result.parameters[lm_key].as_param_slice();
+    let err = (Vector3::new(hat[0], hat[1], hat[2]) - landmark).norm();
+    assert!(err < 0.05, "landmark error {err:.4} from SE23 bearing rays");
+
+    for (k, key) in state_keys.iter().enumerate() {
+        let solved = SE23::from_param_slice(result.parameters[*key].as_param_slice());
+        let drift = (solved.velocity() - states[k].velocity()).norm();
+        assert!(
+            drift < 1e-6,
+            "state {k} velocity moved by {drift:.3e}; bearing carries no velocity information"
+        );
+    }
+}
+
+/// Inverse-depth landmarks anchored in a host keyframe, reprojected into two
+/// others through a fixed camera-IMU extrinsic — the shape a sliding-window VIO
+/// carries, where a landmark is one scalar rather than three coordinates.
+///
+/// Keyframes 0 and 1 are anchored (that pins the gauge *and* the scale, which a
+/// monocular graph cannot otherwise see); keyframe 2 and every inverse depth
+/// start perturbed and must be recovered.
+#[test]
+fn inverse_depth_se23_recovers_a_pose_and_its_depths() {
+    let states: Vec<SE23> = [0.0, 0.6, 1.25]
+        .iter()
+        .enumerate()
+        .map(|(k, x)| {
+            SE23::new(
+                Vector3::new(*x, 0.05 * k as f64, 0.0),
+                Vector3::new(0.6, 0.0, 0.0),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.03 * k as f64),
+            )
+        })
+        .collect();
+    let extrinsic = SE3::new(
+        Vector3::new(0.02, -0.065, 0.01),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 0.0),
+    );
+
+    // Ground-truth chain, mirroring the factor's own.
+    let project = |host: &SE23, observer: &SE23, bearing: Vector3<f64>, rho: f64| -> Vector3<f64> {
+        let r_bc = extrinsic.rotation_so3().rotation_matrix();
+        let p_bc = extrinsic.translation();
+        let p_bk = r_bc * (bearing / rho) + p_bc;
+        let p_w = host.rotation_matrix() * p_bk + host.translation();
+        let p_bi = observer.rotation_matrix().transpose() * (p_w - observer.translation());
+        r_bc.transpose() * (p_bi - p_bc)
+    };
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let state_keys: Vec<_> = states
+        .iter()
+        .map(|s| {
+            problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(s.as_param_slice()),
+            )
+        })
+        .collect();
+    // Keyframe 2 starts wrong; 0 and 1 are held.
+    problem
+        .set_variable_params(
+            state_keys[2],
+            SE23::new(
+                Vector3::new(1.05, -0.03, 0.04),
+                Vector3::new(0.6, 0.0, 0.0),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.10),
+            )
+            .as_param_slice(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    anchor_se23(&mut problem, state_keys[0], &states[0]);
+    anchor_se23(&mut problem, state_keys[1], &states[1]);
+
+    let extrinsic_key = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(extrinsic.as_param_slice()),
+    );
+    anchor_se3(&mut problem, extrinsic_key, &extrinsic);
+
+    let noise = NoiseModel::from_sigmas(&[1.0 / 460.0; 2]).unwrap_or_else(|e| panic!("{e}"));
+    let mut depth_keys = Vec::new();
+    let mut truth = Vec::new();
+    for j in 0..8 {
+        let f = j as f64;
+        let bearing = Vector3::new(0.25 * (f * 0.9).sin(), 0.2 * (f * 1.7).cos(), 1.0);
+        let rho = 1.0 / (3.0 + 0.4 * f);
+        truth.push(rho);
+
+        // Deliberately off, and by a different amount per landmark.
+        let key = problem.add_variable(
+            ManifoldType::RN,
+            DVector::from_vec(vec![rho * (1.0 + 0.25 * (f * 0.5).sin())]),
+        );
+        depth_keys.push(key);
+
+        for observer in 1..3 {
+            let point = project(&states[0], &states[observer], bearing, rho);
+            let measurement = Vector2::new(point.x / point.z, point.y / point.z);
+            problem.add_residual_block_with_noise(
+                &[state_keys[0], state_keys[observer], extrinsic_key, key],
+                Box::new(InverseDepthSe23Factor::new(bearing, measurement)),
+                None,
+                noise.clone(),
+            );
+        }
+    }
+
+    let mut solver = lm_solver(200);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("inverse-depth graph failed: {e}"));
+
+    for (key, expected) in depth_keys.iter().zip(truth.iter()) {
+        let got = result.parameters[*key].as_param_slice()[0];
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "inverse depth {got:.6} != {expected:.6}"
+        );
+    }
+    let pose = SE23::from_param_slice(result.parameters[state_keys[2]].as_param_slice());
+    let error = (pose.translation() - states[2].translation()).norm();
+    assert!(error < 1e-3, "keyframe 2 translation error {error:.3e}");
+}
+
+/// The same window as above, but with the landmarks spread across a 182° field
+/// and the residual on the unit sphere.
+///
+/// Incidence sweeps to 91°, which is what a double-sphere lens images. Two
+/// things break the normalized-plane factor out there and only one of them is
+/// the obvious one:
+///
+/// - Past 90° the anchor has `z < 0`, so rescaling it to `z = 1` mirrors the
+///   ray through the origin. That is a thin annulus of the image.
+/// - Everywhere outside the centre, the gnomonic Jacobian stretches by
+///   `1/cos²θ` — 4× at 60°, 33× at 80°, 131× at 85° — against a whitening of
+///   `1 px / f` that is uniform. That is most of the image, and it is the term
+///   that actually deforms the Hessian.
+///
+/// Here neither happens: the residual is an angle everywhere.
+#[test]
+fn inverse_depth_bearing_se23_recovers_depths_across_a_fisheye_field() {
+    let states: Vec<SE23> = [0.0, 0.6, 1.25]
+        .iter()
+        .enumerate()
+        .map(|(k, x)| {
+            SE23::new(
+                Vector3::new(*x, 0.05 * k as f64, 0.0),
+                Vector3::new(0.6, 0.0, 0.0),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.03 * k as f64),
+            )
+        })
+        .collect();
+    let extrinsic = SE3::new(
+        Vector3::new(0.02, -0.065, 0.01),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 0.0),
+    );
+
+    let project = |host: &SE23, observer: &SE23, bearing: Vector3<f64>, rho: f64| -> Vector3<f64> {
+        let r_bc = extrinsic.rotation_so3().rotation_matrix();
+        let p_bc = extrinsic.translation();
+        let p_bk = r_bc * (bearing / rho) + p_bc;
+        let p_w = host.rotation_matrix() * p_bk + host.translation();
+        let p_bi = observer.rotation_matrix().transpose() * (p_w - observer.translation());
+        r_bc.transpose() * (p_bi - p_bc)
+    };
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let state_keys: Vec<_> = states
+        .iter()
+        .map(|s| {
+            problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(s.as_param_slice()),
+            )
+        })
+        .collect();
+    problem
+        .set_variable_params(
+            state_keys[2],
+            SE23::new(
+                Vector3::new(1.05, -0.03, 0.04),
+                Vector3::new(0.6, 0.0, 0.0),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.10),
+            )
+            .as_param_slice(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    anchor_se23(&mut problem, state_keys[0], &states[0]);
+    anchor_se23(&mut problem, state_keys[1], &states[1]);
+
+    let extrinsic_key = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(extrinsic.as_param_slice()),
+    );
+    anchor_se3(&mut problem, extrinsic_key, &extrinsic);
+
+    // One pixel at f = 190, in radians — the TUM VI fisheye's scale.
+    let sigma = 1.0 / 190.0;
+    let mut depth_keys = Vec::new();
+    let mut truth = Vec::new();
+    let mut past_the_equator = 0usize;
+    let mut steep = 0usize;
+
+    for j in 0..10 {
+        let f = j as f64;
+        // Incidence sweeping 0° → 91° off the host optical axis, the field a
+        // 182° double sphere actually covers. The sweep is `sqrt`-spaced
+        // because image area on a spherical cap grows with `sin θ`: a linear
+        // sweep under-samples exactly the rim this factor exists for.
+        let theta = (f / 9.0).sqrt() * 91.0_f64.to_radians();
+        let phi = f * 1.3;
+        let bearing = Vector3::new(
+            theta.sin() * phi.cos(),
+            theta.sin() * phi.sin(),
+            theta.cos(),
+        );
+        let rho = 1.0 / (3.0 + 0.4 * f);
+        truth.push(rho);
+
+        let key = problem.add_variable(
+            ManifoldType::RN,
+            DVector::from_vec(vec![rho * (1.0 + 0.25 * (f * 0.5).sin())]),
+        );
+        depth_keys.push(key);
+
+        for observer in 1..3 {
+            let point = project(&states[0], &states[observer], bearing, rho);
+            if point.z < 0.0 {
+                past_the_equator += 1;
+            }
+            if point.z < 0.18 * point.norm() {
+                steep += 1;
+            }
+            let factor = InverseDepthBearingSe23Factor::new_isotropic(bearing, point, sigma)
+                .unwrap_or_else(|e| panic!("{e}"));
+            problem.add_residual_block_with_noise(
+                &[state_keys[0], state_keys[observer], extrinsic_key, key],
+                Box::new(factor),
+                None,
+                NoiseModel::null(),
+            );
+        }
+    }
+
+    // Without these the scenario could silently degrade into a narrow-FOV one
+    // and keep passing while testing nothing this factor exists for. `steep` is
+    // `cos θ < 0.18`, i.e. beyond 80°, where the gnomonic stretch exceeds 30×.
+    assert!(
+        steep >= 6,
+        "expected a genuinely wide field, only {steep} observations were beyond 80°"
+    );
+    assert!(
+        past_the_equator >= 1,
+        "expected at least one observation past the equator, got {past_the_equator}"
+    );
+
+    let mut solver = lm_solver(200);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("bearing inverse-depth graph failed: {e}"));
+
+    for (key, expected) in depth_keys.iter().zip(truth.iter()) {
+        let got = result.parameters[*key].as_param_slice()[0];
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "inverse range {got:.6} != {expected:.6}"
+        );
+    }
+    let pose = SE23::from_param_slice(result.parameters[state_keys[2]].as_param_slice());
+    let error = (pose.translation() - states[2].translation()).norm();
+    assert!(error < 1e-3, "keyframe 2 translation error {error:.3e}");
+}
+
 // ── 5. Epipolar geometry ─────────────────────────────────────────────────────
 
 /// Both essential-matrix factors constrain a relative pose from 2D–2D matches.
@@ -834,6 +1340,695 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
     let hat = se3_of(result.parameters[key_b].as_param_slice());
     let err = (hat.translation() - t_wb.translation()).norm();
     assert!(err < 0.02, "scan pose translation error {err:.4}");
+}
+
+/// A LiDAR scan registered to a map of planes on a navigation state: points
+/// on the six walls of a room pull a perturbed `SE₂(3)` state back to truth
+/// through a fixed LiDAR extrinsic. The velocity sees no LiDAR constraint and
+/// is held fixed.
+#[test]
+fn lidar_map_plane_factor_registers_a_scan_on_a_navigation_state() {
+    let truth = SE23::new(
+        Vector3::new(0.4, -0.3, 1.2),
+        Vector3::new(0.5, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.05, -0.02, 0.6),
+    );
+    let t_sl = SE3::new(
+        Vector3::new(0.02, -0.01, 0.08),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 1.5),
+    );
+    // Walls of a 6 × 4 × 3 m room: (unit normal, offset) with nᵀx + d = 0.
+    let walls = [
+        (Vector3::x(), 3.0),
+        (-Vector3::x(), 3.0),
+        (Vector3::y(), 2.0),
+        (-Vector3::y(), 2.0),
+        (Vector3::z(), 0.0),
+        (-Vector3::z(), 3.0),
+    ];
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let start = truth.right_plus(
+        &SE23Tangent::from_slice(&[0.2, -0.15, 0.1, 0.03, -0.02, 0.05, 0.0, 0.0, 0.0]),
+        None,
+        None,
+    );
+    let key_x = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(start.as_param_slice()),
+    );
+    for velocity_axis in 6..9 {
+        problem.fix_variable(key_x, velocity_axis);
+    }
+    let key_e = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(t_sl.as_param_slice()),
+    );
+    anchor_se3(&mut problem, key_e, &t_sl);
+
+    let world_to_lidar = |w: &Vector3<f64>| {
+        let s = truth.rotation_matrix().transpose() * (w - truth.translation());
+        t_sl.inverse(None).act(&s, None, None)
+    };
+    let mut count = 0;
+    for (normal, offset) in &walls {
+        let plane = Plane::new(*normal, *offset).unwrap_or_else(|e| panic!("{e}"));
+        let foot = -*offset * *normal;
+        let tangent_a = normal.cross(&Vector3::new(0.3, 0.5, 0.7)).normalize();
+        let tangent_b = normal.cross(&tangent_a);
+        for i in 0..4 {
+            for j in 0..4 {
+                let on_wall = foot
+                    + tangent_a * (0.4 * f64::from(i) - 0.6)
+                    + tangent_b * (0.4 * f64::from(j) - 0.6);
+                problem.add_residual_block(
+                    &[key_x, key_e],
+                    Box::new(
+                        LidarMapPlaneFactor::<SE23>::new(
+                            world_to_lidar(&on_wall),
+                            plane.clone(),
+                            0.02,
+                        )
+                        .unwrap_or_else(|e| panic!("{e}")),
+                    ),
+                    None,
+                );
+                count += 1;
+            }
+        }
+    }
+    assert_eq!(count, 96);
+
+    let mut solver = lm_solver(50);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("LiDAR map registration failed: {e}"));
+
+    let hat = SE23::from_param_slice(result.parameters[key_x].as_param_slice());
+    let position_err = (hat.translation() - truth.translation()).norm();
+    let rotation_err = (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+    assert!(position_err < 1e-6, "position error {position_err:.2e}");
+    assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
+    assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
+}
+
+/// `L(p) = pᵀ·A·p − 1`: an ellipsoid with semi-axes 3, 2, 1 m, standing in
+/// for an occupancy submap (negative inside, positive outside).
+struct EllipsoidField;
+
+impl DistanceField for EllipsoidField {
+    fn query(&self, point: &Vector3<f64>) -> Option<(f64, Vector3<f64>)> {
+        let ap = Vector3::new(1.0 / 9.0, 1.0 / 4.0, 1.0).component_mul(point);
+        (point.norm() < 10.0).then(|| (point.dot(&ap) - 1.0, 2.0 * ap))
+    }
+}
+
+/// OKVIS2-X LiDAR factors on navigation states: a submap anchored at a fixed
+/// keyframe `X_a`; a scan at `X_k` (frame-to-submap, through `T_SL`) and a
+/// second submap anchored at `X_b` (submap-to-submap) both start perturbed and
+/// are pulled back onto the field's zero level set.
+#[test]
+fn lidar_submap_field_factors_register_a_scan_and_a_submap() {
+    let x_a = SE23::new(
+        Vector3::new(0.1, 0.2, 0.0),
+        Vector3::new(0.4, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 0.2),
+    );
+    let x_k = SE23::new(
+        Vector3::new(0.3, 0.1, 0.05),
+        Vector3::new(0.4, 0.1, 0.0),
+        UnitQuaternion::from_euler_angles(0.02, -0.01, 0.35),
+    );
+    let x_b = SE23::new(
+        Vector3::new(0.5, -0.1, 0.1),
+        Vector3::new(0.3, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(-0.03, 0.02, 0.5),
+    );
+    let t_sl = SE3::new(
+        Vector3::new(0.02, -0.01, 0.08),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 1.5),
+    );
+    let field = std::sync::Arc::new(EllipsoidField);
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let add_state = |problem: &mut Problem, state: &SE23, nudge: [f64; 9]| {
+        let start = state.right_plus(&SE23Tangent::from_slice(&nudge), None, None);
+        let key = problem.add_variable(
+            ManifoldType::SE23,
+            DVector::from_column_slice(start.as_param_slice()),
+        );
+        for velocity_axis in 6..9 {
+            problem.fix_variable(key, velocity_axis);
+        }
+        key
+    };
+    let key_a = add_state(&mut problem, &x_a, [0.0; 9]);
+    anchor_se23(&mut problem, key_a, &x_a);
+    let key_k = add_state(
+        &mut problem,
+        &x_k,
+        [0.08, -0.05, 0.04, 0.02, -0.015, 0.03, 0.0, 0.0, 0.0],
+    );
+    let key_b = add_state(
+        &mut problem,
+        &x_b,
+        [-0.06, 0.05, -0.03, -0.02, 0.02, -0.025, 0.0, 0.0, 0.0],
+    );
+    let key_e = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(t_sl.as_param_slice()),
+    );
+    anchor_se3(&mut problem, key_e, &t_sl);
+
+    for i in 0..12 {
+        for j in 1..6 {
+            let azimuth = std::f64::consts::TAU * f64::from(i) / 12.0;
+            let polar = std::f64::consts::PI * f64::from(j) / 6.0;
+            // A point on the surface, in the submap (anchor) frame.
+            let surface = Vector3::new(
+                3.0 * azimuth.cos() * polar.sin(),
+                2.0 * azimuth.sin() * polar.sin(),
+                polar.cos(),
+            );
+            let world = x_a.act(&surface, None, None);
+            let body_k = x_k.inverse(None).act(&world, None, None);
+            let point_l = t_sl.inverse(None).act(&body_k, None, None);
+            problem.add_residual_block(
+                &[key_a, key_k, key_e],
+                Box::new(
+                    LidarSubmapFieldFactor::<SE23, _>::new(field.clone(), point_l, 0.05)
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                None,
+            );
+            let point_b = x_b.inverse(None).act(&world, None, None);
+            problem.add_residual_block(
+                &[key_a, key_b],
+                Box::new(
+                    SubmapAlignmentFactor::<SE23, _>::new(field.clone(), point_b, 0.05)
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                None,
+            );
+        }
+    }
+
+    let mut solver = lm_solver(100);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("submap registration failed: {e}"));
+
+    for (name, key, truth) in [("scan", key_k, &x_k), ("submap", key_b, &x_b)] {
+        let hat = SE23::from_param_slice(result.parameters[key].as_param_slice());
+        let position_err = (hat.translation() - truth.translation()).norm();
+        let rotation_err =
+            (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+        assert!(
+            position_err < 1e-6,
+            "{name} position error {position_err:.2e}"
+        );
+        assert!(
+            rotation_err < 1e-6,
+            "{name} rotation error {rotation_err:.2e}"
+        );
+        assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
+    }
+}
+
+/// FAST-LIVO2's visual update: LiDAR map points with reference patches pull a
+/// perturbed navigation state back through direct photometric residuals in one
+/// textured image (a photometric PnP). The reference patches carry a
+/// brightness offset the zero-mean residual must ignore.
+#[test]
+fn photometric_patch_factor_recovers_a_navigation_state() {
+    use apex_camera_models::{CameraModel, PinholeCamera};
+
+    let texture = |x: f64, y: f64| {
+        100.0 + 40.0 * (0.15 * x).sin() + 30.0 * (0.11 * y).cos() + 20.0 * (0.05 * (x + y)).sin()
+    };
+    let image = std::sync::Arc::new(
+        IntensityImage::from_fn(640, 480, |x, y| texture(x as f64, y as f64) as f32)
+            .unwrap_or_else(|e| panic!("{e}")),
+    );
+    let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
+    let truth = SE23::new(
+        Vector3::new(1.0, -0.5, 0.3),
+        Vector3::new(0.4, 0.1, 0.0),
+        UnitQuaternion::from_euler_angles(0.1, -0.2, 0.4),
+    );
+    let t_sc = SE3::new(
+        Vector3::new(0.05, -0.02, 0.01),
+        UnitQuaternion::from_euler_angles(0.01, -0.02, 0.03),
+    );
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let start = truth.right_plus(
+        &SE23Tangent::from_slice(&[0.01, -0.008, 0.006, 0.003, -0.002, 0.004, 0.0, 0.0, 0.0]),
+        None,
+        None,
+    );
+    let key_x = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(start.as_param_slice()),
+    );
+    for velocity_axis in 6..9 {
+        problem.fix_variable(key_x, velocity_axis);
+    }
+    let key_c = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(t_sc.as_param_slice()),
+    );
+    anchor_se3(&mut problem, key_c, &t_sc);
+
+    let offsets = PhotometricPatchFactor::<SE23, PinholeCamera>::square_offsets(4, 1.0);
+    for i in 0..6 {
+        for j in 0..5 {
+            // A LiDAR map point at 3–5 m, spread over the image.
+            let depth = 3.0 + 0.4 * f64::from((i + j) % 5);
+            let c = Vector3::new(
+                (f64::from(i) - 2.5) * 0.12 * depth,
+                (f64::from(j) - 2.0) * 0.12 * depth,
+                depth,
+            );
+            let centre = camera.project(&c).unwrap_or_else(|e| panic!("{e}"));
+            let reference: Vec<f64> = offsets
+                .iter()
+                .map(|o| {
+                    let (value, _) = image
+                        .sample(centre.x + o.x, centre.y + o.y)
+                        .unwrap_or_else(|| panic!("reference patch off the image"));
+                    value + 12.0
+                })
+                .collect();
+            let point_w = truth.act(&t_sc.act(&c, None, None), None, None);
+            problem.add_residual_block(
+                &[key_x, key_c],
+                Box::new(
+                    PhotometricPatchFactor::<SE23, _>::new(
+                        camera,
+                        image.clone(),
+                        point_w,
+                        offsets.clone(),
+                        &reference,
+                        2.0,
+                    )
+                    .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                None,
+            );
+        }
+    }
+
+    let mut solver = lm_solver(100);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("photometric alignment failed: {e}"));
+
+    let hat = SE23::from_param_slice(result.parameters[key_x].as_param_slice());
+    let position_err = (hat.translation() - truth.translation()).norm();
+    let rotation_err = (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+    assert!(position_err < 1e-5, "position error {position_err:.2e}");
+    assert!(rotation_err < 1e-5, "rotation error {rotation_err:.2e}");
+    assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
+}
+
+/// BALM-style LiDAR bundle adjustment: three navigation states see the six
+/// walls of a room; one is anchored, two start perturbed, and the walls —
+/// each one plane shared by all three frames, eliminated in closed form —
+/// pull them back with no map and no plane variable.
+#[test]
+fn lidar_plane_bundle_factor_aligns_frames_through_shared_planes() {
+    let t_sl = SE3::new(
+        Vector3::new(0.02, -0.01, 0.08),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 1.5),
+    );
+    let truths = [
+        SE23::new(
+            Vector3::new(0.0, 0.0, 1.2),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.1),
+        ),
+        SE23::new(
+            Vector3::new(0.6, 0.2, 1.25),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(0.02, -0.01, 0.4),
+        ),
+        SE23::new(
+            Vector3::new(1.1, -0.3, 1.15),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(-0.02, 0.01, 0.8),
+        ),
+    ];
+    let nudges = [
+        [0.0; 9],
+        [0.06, -0.04, 0.03, 0.01, -0.015, 0.02, 0.0, 0.0, 0.0],
+        [-0.05, 0.05, -0.02, -0.02, 0.01, -0.025, 0.0, 0.0, 0.0],
+    ];
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let keys: Vec<_> = truths
+        .iter()
+        .zip(&nudges)
+        .map(|(truth, nudge)| {
+            let start = truth.right_plus(&SE23Tangent::from_slice(nudge), None, None);
+            let key = problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(start.as_param_slice()),
+            );
+            for velocity_axis in 6..9 {
+                problem.fix_variable(key, velocity_axis);
+            }
+            key
+        })
+        .collect();
+    anchor_se23(&mut problem, keys[0], &truths[0]);
+
+    // Walls of a 6 × 4 × 3 m room, each sampled on a patch every frame sees.
+    let walls = [
+        (Vector3::x(), 3.0),
+        (-Vector3::x(), 3.0),
+        (Vector3::y(), 2.0),
+        (-Vector3::y(), 2.0),
+        (Vector3::z(), 0.0),
+        (-Vector3::z(), 3.0),
+    ];
+    for (normal, offset) in &walls {
+        let foot = -*offset * *normal;
+        let a = normal.cross(&Vector3::new(0.3, 0.5, 0.7)).normalize();
+        let b = normal.cross(&a);
+        let per_frame: Vec<Vec<Vector3<f64>>> = truths
+            .iter()
+            .enumerate()
+            .map(|(f, truth)| {
+                (0..9)
+                    .map(|k| {
+                        let w = foot
+                            + a * (0.3 * f64::from(k % 3) - 0.3 + 0.05 * f as f64)
+                            + b * (0.3 * f64::from(k / 3) - 0.3);
+                        let body = truth.rotation_matrix().transpose() * (w - truth.translation());
+                        t_sl.inverse(None).act(&body, None, None)
+                    })
+                    .collect()
+            })
+            .collect();
+        problem.add_residual_block(
+            &keys,
+            Box::new(
+                LidarPlaneBundleFactor::<SE23>::new(t_sl.clone(), per_frame, Vec::new(), 0.02)
+                    .unwrap_or_else(|e| panic!("{e}")),
+            ),
+            None,
+        );
+    }
+
+    let mut solver = lm_solver(100);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("plane bundle adjustment failed: {e}"));
+    for (key, truth) in keys.iter().zip(&truths) {
+        let hat = SE23::from_param_slice(result.parameters[*key].as_param_slice());
+        let position_err = (hat.translation() - truth.translation()).norm();
+        let rotation_err =
+            (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+        assert!(position_err < 1e-6, "position error {position_err:.2e}");
+        assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
+    }
+}
+
+/// A whole sweep's point-to-plane matches in one factor: a nudged pose
+/// comes back exactly from points on the six walls of a room.
+#[test]
+fn lidar_map_planes_factor_registers_a_sweep_to_a_room() {
+    let truth = SE23::new(
+        Vector3::new(0.4, -0.3, 1.2),
+        Vector3::new(0.5, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.03, -0.02, 0.6),
+    );
+    let walls = [
+        (Vector3::x(), -3.0),
+        (-Vector3::x(), -3.0),
+        (Vector3::y(), -2.0),
+        (-Vector3::y(), -2.0),
+        (Vector3::z(), 0.0),
+        (-Vector3::z(), 3.0),
+    ];
+    let mut matches = Vec::new();
+    for (normal, offset) in &walls {
+        let foot = -*offset * *normal;
+        let a = normal.cross(&Vector3::new(0.3, 0.5, 0.7)).normalize();
+        let b = normal.cross(&a);
+        for k in 0..9 {
+            let w = foot + a * (0.4 * f64::from(k % 3) - 0.4) + b * (0.4 * f64::from(k / 3) - 0.4);
+            matches.push(PlaneMatch {
+                point: truth.inverse(None).act(&w, None, None),
+                plane: Plane::new(*normal, *offset).unwrap_or_else(|e| panic!("{e}")),
+                sigma: 0.01,
+            });
+        }
+    }
+    let start = truth.right_plus(
+        &SE23Tangent::from_slice(&[0.05, -0.04, 0.03, 0.02, -0.01, 0.015, 0.0, 0.0, 0.0]),
+        None,
+        None,
+    );
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let key = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(start.as_param_slice()),
+    );
+    for velocity_axis in 6..9 {
+        problem.fix_variable(key, velocity_axis);
+    }
+    problem.add_residual_block_with_noise(
+        &[key],
+        Box::new(LidarMapPlanesFactor::<SE23>::new(matches).unwrap_or_else(|e| panic!("{e}"))),
+        None,
+        NoiseModel::null(),
+    );
+    let mut solver = lm_solver(50);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("sweep registration failed: {e}"));
+    let hat = SE23::from_param_slice(result.parameters[key].as_param_slice());
+    let position_err = (hat.translation() - truth.translation()).norm();
+    let rotation_err = (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+    assert!(position_err < 1e-8, "position error {position_err:.2e}");
+    assert!(rotation_err < 1e-8, "rotation error {rotation_err:.2e}");
+}
+
+/// The moment form of the plane bundle: the same three frames in a room,
+/// each wall a plane over every frame's point moments, anchored by a few
+/// fixed world points — the nudged frames come back exactly.
+#[test]
+fn lidar_plane_moment_factor_aligns_frames_through_shared_planes() {
+    let truths = [
+        SE23::new(
+            Vector3::new(0.0, 0.0, 1.2),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.1),
+        ),
+        SE23::new(
+            Vector3::new(0.6, 0.2, 1.25),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(0.02, -0.01, 0.4),
+        ),
+        SE23::new(
+            Vector3::new(1.1, -0.3, 1.15),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(-0.02, 0.01, 0.8),
+        ),
+    ];
+    let nudges = [
+        [0.0; 9],
+        [0.06, -0.04, 0.03, 0.01, -0.015, 0.02, 0.0, 0.0, 0.0],
+        [-0.05, 0.05, -0.02, -0.02, 0.01, -0.025, 0.0, 0.0, 0.0],
+    ];
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let keys: Vec<_> = truths
+        .iter()
+        .zip(&nudges)
+        .map(|(truth, nudge)| {
+            let start = truth.right_plus(&SE23Tangent::from_slice(nudge), None, None);
+            let key = problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(start.as_param_slice()),
+            );
+            for velocity_axis in 6..9 {
+                problem.fix_variable(key, velocity_axis);
+            }
+            key
+        })
+        .collect();
+    anchor_se23(&mut problem, keys[0], &truths[0]);
+
+    let walls = [
+        (Vector3::x(), 3.0),
+        (-Vector3::x(), 3.0),
+        (Vector3::y(), 2.0),
+        (-Vector3::y(), 2.0),
+        (Vector3::z(), 0.0),
+        (-Vector3::z(), 3.0),
+    ];
+    for (normal, offset) in &walls {
+        let foot = -*offset * *normal;
+        let a = normal.cross(&Vector3::new(0.3, 0.5, 0.7)).normalize();
+        let b = normal.cross(&a);
+        let patch = |shift: f64| -> Vec<Vector3<f64>> {
+            (0..9)
+                .map(|k| {
+                    foot + a * (0.3 * f64::from(k % 3) - 0.3 + shift)
+                        + b * (0.3 * f64::from(k / 3) - 0.3)
+                })
+                .collect()
+        };
+        let frames: Vec<PointMoments> = truths
+            .iter()
+            .enumerate()
+            .map(|(f, truth)| {
+                let body: Vec<Vector3<f64>> = patch(0.05 * f as f64)
+                    .iter()
+                    .map(|w| truth.rotation_matrix().transpose() * (w - truth.translation()))
+                    .collect();
+                PointMoments::from_points(&body)
+            })
+            .collect();
+        problem.add_residual_block(
+            &keys,
+            Box::new(
+                LidarPlaneMomentFactor::<SE23>::new(
+                    frames,
+                    PointMoments::from_points(&patch(-0.2)),
+                    0.02,
+                )
+                .unwrap_or_else(|e| panic!("{e}")),
+            ),
+            None,
+        );
+    }
+
+    let mut solver = lm_solver(100);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("plane moment adjustment failed: {e}"));
+    for (key, truth) in keys.iter().zip(&truths) {
+        let hat = SE23::from_param_slice(result.parameters[*key].as_param_slice());
+        let position_err = (hat.translation() - truth.translation()).norm();
+        let rotation_err =
+            (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+        assert!(position_err < 1e-6, "position error {position_err:.2e}");
+        assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
+    }
+}
+
+/// The plane moment factors of a room, summed into one aggregate factor:
+/// the solve is the same, from a fraction of the rows.
+#[test]
+fn aggregated_plane_moment_factors_align_frames_like_the_parts() {
+    use apex_solver::factors::aggregate::{AggregateFactor, AggregatePart};
+    let mut parts = Vec::new();
+    let truths = [
+        SE23::new(
+            Vector3::new(0.0, 0.0, 1.2),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.1),
+        ),
+        SE23::new(
+            Vector3::new(0.6, 0.2, 1.25),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(0.02, -0.01, 0.4),
+        ),
+        SE23::new(
+            Vector3::new(1.1, -0.3, 1.15),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(-0.02, 0.01, 0.8),
+        ),
+    ];
+    let nudges = [
+        [0.0; 9],
+        [0.06, -0.04, 0.03, 0.01, -0.015, 0.02, 0.0, 0.0, 0.0],
+        [-0.05, 0.05, -0.02, -0.02, 0.01, -0.025, 0.0, 0.0, 0.0],
+    ];
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let keys: Vec<_> = truths
+        .iter()
+        .zip(&nudges)
+        .map(|(truth, nudge)| {
+            let start = truth.right_plus(&SE23Tangent::from_slice(nudge), None, None);
+            let key = problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(start.as_param_slice()),
+            );
+            for velocity_axis in 6..9 {
+                problem.fix_variable(key, velocity_axis);
+            }
+            key
+        })
+        .collect();
+    anchor_se23(&mut problem, keys[0], &truths[0]);
+
+    let walls = [
+        (Vector3::x(), 3.0),
+        (-Vector3::x(), 3.0),
+        (Vector3::y(), 2.0),
+        (-Vector3::y(), 2.0),
+        (Vector3::z(), 0.0),
+        (-Vector3::z(), 3.0),
+    ];
+    for (normal, offset) in &walls {
+        let foot = -*offset * *normal;
+        let a = normal.cross(&Vector3::new(0.3, 0.5, 0.7)).normalize();
+        let b = normal.cross(&a);
+        let patch = |shift: f64| -> Vec<Vector3<f64>> {
+            (0..9)
+                .map(|k| {
+                    foot + a * (0.3 * f64::from(k % 3) - 0.3 + shift)
+                        + b * (0.3 * f64::from(k / 3) - 0.3)
+                })
+                .collect()
+        };
+        let frames: Vec<PointMoments> = truths
+            .iter()
+            .enumerate()
+            .map(|(f, truth)| {
+                let body: Vec<Vector3<f64>> = patch(0.05 * f as f64)
+                    .iter()
+                    .map(|w| truth.rotation_matrix().transpose() * (w - truth.translation()))
+                    .collect();
+                PointMoments::from_points(&body)
+            })
+            .collect();
+        parts.push(AggregatePart {
+            factor: Box::new(
+                LidarPlaneMomentFactor::<SE23>::new(
+                    frames,
+                    PointMoments::from_points(&patch(-0.2)),
+                    0.02,
+                )
+                .unwrap_or_else(|e| panic!("{e}")),
+            ),
+            blocks: (0..keys.len()).collect(),
+        });
+    }
+    problem.add_residual_block_with_noise(
+        &keys,
+        Box::new(
+            AggregateFactor::new(parts, vec![9; keys.len()]).unwrap_or_else(|e| panic!("{e}")),
+        ),
+        None,
+        NoiseModel::null(),
+    );
+
+    let mut solver = lm_solver(100);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("plane moment adjustment failed: {e}"));
+    for (key, truth) in keys.iter().zip(&truths) {
+        let hat = SE23::from_param_slice(result.parameters[*key].as_param_slice());
+        let position_err = (hat.translation() - truth.translation()).norm();
+        let rotation_err =
+            (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+        assert!(position_err < 1e-6, "position error {position_err:.2e}");
+        assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
+    }
 }
 
 // ── 9. Motion constraints: a stopped, ground-bound vehicle ───────────────────
@@ -1178,6 +2373,136 @@ fn time_offset_projection_recovers_the_clock_offset() {
 /// The list is not hand-maintained: it is read from the modules' own `pub use`
 /// lines at compile time, so exporting a new factor without adding a scenario
 /// fails here rather than going unnoticed.
+/// A stereo rig: landmarks hosted in camera 0 at keyframe 0, seen by camera
+/// 1 at the same instant ([`StereoInverseRangeFactor`]) and at keyframe 1
+/// ([`InverseRangeProjectionSe23Factor`]). The stereo pixels alone fix every
+/// inverse range from the 11 cm baseline — the body state cancels — and the
+/// later views then recover keyframe 1, which starts 8 cm and 3° off.
+#[test]
+fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
+    use apex_solver::apex_camera_models::{
+        CameraModel, DistortionModel, KannalaBrandtCamera, PinholeParams,
+    };
+
+    let camera = KannalaBrandtCamera::new(
+        PinholeParams::new(190.4, 190.4, 252.6, 254.9).unwrap_or_else(|e| panic!("{e}")),
+        DistortionModel::KannalaBrandt {
+            k1: 0.0034,
+            k2: 0.0018,
+            k3: -0.0027,
+            k4: 0.00033,
+        },
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let intrinsics: DVector<f64> = (&camera).into();
+    // Both cameras look along body +z; camera 1 sits 11 cm to the right.
+    let t_b0 = SE3::new(Vector3::new(-0.055, 0.0, 0.0), UnitQuaternion::identity());
+    let t_b1 = SE3::new(
+        Vector3::new(0.055, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.002, -0.003, 0.001),
+    );
+    let host = SE23::new(
+        Vector3::zeros(),
+        Vector3::new(0.3, 0.0, 0.0),
+        UnitQuaternion::identity(),
+    );
+    let observer = SE23::new(
+        Vector3::new(0.3, 0.05, 0.1),
+        Vector3::new(0.3, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.02, -0.04, 0.03),
+    );
+
+    // Pixel of world point `w` in camera `t_bc` of `state`.
+    let pixel = |state: &SE23, t_bc: &SE3, w: Vector3<f64>| -> Vector2<f64> {
+        let in_body = state.rotation_matrix().transpose() * (w - state.translation());
+        let in_camera =
+            t_bc.rotation_so3().rotation_matrix().transpose() * (in_body - t_bc.translation());
+        camera.project(&in_camera).unwrap_or_else(|e| panic!("{e}"))
+    };
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let host_key = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(host.as_param_slice()),
+    );
+    anchor_se23(&mut problem, host_key, &host);
+    let start = SE23::new(
+        Vector3::new(0.36, 0.0, 0.15),
+        Vector3::new(0.3, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.0, -0.01, 0.06),
+    );
+    let observer_key = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(start.as_param_slice()),
+    );
+    let mut extrinsic = |pose: &SE3| {
+        let key = problem.add_variable(
+            ManifoldType::SE3,
+            DVector::from_column_slice(pose.as_param_slice()),
+        );
+        anchor_se3(&mut problem, key, pose);
+        key
+    };
+    let (b0_key, b1_key) = (extrinsic(&t_b0), extrinsic(&t_b1));
+    let k_key = problem.add_variable(ManifoldType::RN, intrinsics.clone());
+    anchor_rn(&mut problem, k_key, intrinsics.as_slice());
+
+    let mut range_keys = Vec::new();
+    let mut truth = Vec::new();
+    for j in 0..12 {
+        let f = f64::from(j);
+        let world = Vector3::new(1.6 * (f * 0.7).sin(), 0.9 * (f * 1.3).cos(), 3.0 + 0.5 * f);
+        let in_host = t_b0.rotation_so3().rotation_matrix().transpose()
+            * (host.rotation_matrix().transpose() * (world - host.translation())
+                - t_b0.translation());
+        let (bearing, rho) = (in_host.normalize(), 1.0 / in_host.norm());
+        truth.push(rho);
+        let key = problem.add_variable(
+            ManifoldType::RN,
+            DVector::from_vec(vec![rho * (1.0 + 0.3 * (f * 0.9).cos())]),
+        );
+        range_keys.push(key);
+
+        let stereo = StereoInverseRangeFactor::<KannalaBrandtCamera>::new(
+            bearing,
+            pixel(&host, &t_b1, world),
+            0.5,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        problem.add_residual_block(&[b0_key, b1_key, key, k_key], Box::new(stereo), None);
+
+        let moving = InverseRangeProjectionSe23Factor::<KannalaBrandtCamera>::new(
+            bearing,
+            pixel(&observer, &t_b1, world),
+            0.5,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        problem.add_residual_block(
+            &[host_key, observer_key, b0_key, b1_key, key, k_key],
+            Box::new(moving),
+            None,
+        );
+    }
+
+    let mut solver = lm_solver(200);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("stereo inverse-range graph failed: {e}"));
+
+    for (key, expected) in range_keys.iter().zip(&truth) {
+        let got = result.parameters[*key].as_param_slice()[0];
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "inverse range {got:.8} != {expected:.8}"
+        );
+    }
+    let solved = SE23::from_param_slice(result.parameters[observer_key].as_param_slice());
+    let error = (solved.translation() - observer.translation()).norm();
+    assert!(error < 1e-4, "keyframe 1 translation error {error:.3e}");
+    let angle = (solved.rotation_quaternion().inverse() * observer.rotation_quaternion()).angle();
+    assert!(angle < 1e-5, "keyframe 1 rotation error {angle:.3e}");
+}
+
 #[test]
 fn every_exported_factor_is_exercised_by_an_integration_test() {
     const MODULES: &[&str] = &[

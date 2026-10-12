@@ -18,7 +18,6 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use apex_manifolds::so3::SO3;
 use nalgebra::Vector3;
 
 use super::super::trajectory::{
@@ -136,13 +135,14 @@ impl AslTrajectoryLoader {
             let qy = parse_field(row, 6, "q_y", path, line)?;
             let qz = parse_field(row, 7, "q_z", path, line)?;
             // ASL stores w FIRST.
-            let orientation = SO3::try_from_quaternion_wxyz(qw, qx, qy, qz).ok_or_else(|| {
-                TrajectoryError::InvalidQuaternion {
-                    path: path.to_path_buf(),
-                    line,
-                    norm: (qw * qw + qx * qx + qy * qy + qz * qz).sqrt(),
-                }
-            })?;
+            let orientation =
+                crate::trajectory::text_orientation(qw, qx, qy, qz).ok_or_else(|| {
+                    TrajectoryError::InvalidQuaternion {
+                        path: path.to_path_buf(),
+                        line,
+                        norm: (qw * qw + qx * qx + qy * qy + qz * qz).sqrt(),
+                    }
+                })?;
 
             poses.push(TrajectoryPose::new(
                 timestamp_ns,

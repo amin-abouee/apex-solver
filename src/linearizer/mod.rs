@@ -29,7 +29,7 @@ use slotmap::{SecondaryMap, SlotMap};
 
 use faer::Mat;
 use faer::sparse::SparseColMat;
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 use thiserror::Error;
 
 use crate::core::problem::Problem;
@@ -191,6 +191,38 @@ impl AssemblyWorkspace {
     }
 }
 
+/// Where a factor's Jacobian is evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JacobianEvaluation {
+    /// Jacobian and residual both at the current estimate — ordinary
+    /// Gauss-Newton.
+    #[default]
+    CurrentEstimate,
+    /// Residual at the current estimate, Jacobian at each variable's frozen
+    /// linearization point where one exists: first-estimate Jacobians.
+    ///
+    /// Costs one extra `Factor::linearize` call per block that touches a frozen
+    /// variable, and only when a Jacobian is actually requested. A block whose
+    /// variables are all unfrozen takes the ordinary path unchanged.
+    FirstEstimate,
+}
+
+/// [`compute_block_into_with`] at the current estimate.
+pub(crate) fn compute_block_into(
+    residual_block: &ResidualBlock,
+    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    residual_slice: &mut [f64],
+    jacobian_buf: Option<&mut [f64]>,
+) -> LinearizerResult<(BlockLinearization, f64)> {
+    compute_block_into_with(
+        residual_block,
+        variables,
+        residual_slice,
+        jacobian_buf,
+        JacobianEvaluation::CurrentEstimate,
+    )
+}
+
 /// Evaluate a single residual block: call `factor.linearize()`, apply loss correction,
 /// write the corrected residual into the provided slice, return the Jacobian buffer.
 ///
@@ -199,11 +231,12 @@ impl AssemblyWorkspace {
 /// 2. Calls `factor.linearize()` — writes into `residual_slice` and a local Jacobian buffer
 /// 3. Applies the robust loss function correction (if any)
 /// 4. Returns the corrected Jacobian buffer and metadata for the caller to scatter
-pub(crate) fn compute_block_into(
+pub(crate) fn compute_block_into_with(
     residual_block: &ResidualBlock,
     variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     residual_slice: &mut [f64],
     mut jacobian_buf: Option<&mut [f64]>,
+    evaluation: JacobianEvaluation,
 ) -> LinearizerResult<(BlockLinearization, f64)> {
     let mut param_slices: SmallVec<[&[f64]; 8]> = SmallVec::new();
     let mut variable_local_idx_size_list: SmallVec<[(usize, usize); 8]> = SmallVec::new();
@@ -227,14 +260,55 @@ pub(crate) fn compute_block_into(
         count_variable_local_idx += var_size;
     }
 
+    // First-estimate Jacobians: evaluate the *Jacobian* at each frozen
+    // linearization point while the *residual* stays at the current estimate.
+    // Two `linearize` calls, so the `Factor` trait needs no hook and every
+    // existing factor gets FEJ for free.
+    //
+    // A block none of whose variables are frozen takes the ordinary path
+    // unchanged, which keeps this off the hot path for problems that never
+    // marginalize.
+    let frozen = evaluation == JacobianEvaluation::FirstEstimate
+        && residual_block.variable_keys.iter().any(|key| {
+            variables
+                .get(*key)
+                .is_some_and(|v| v.linearization_point().is_some())
+        });
+
     let (rows, cols) = residual_block.factor.jacobian_shape();
     match jacobian_buf.as_deref_mut() {
         Some(buf) => {
             debug_assert_eq!(buf.len(), rows * cols);
-            let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(buf, rows, cols);
-            residual_block
-                .factor
-                .linearize(&param_slices, residual_slice, Some(jac_mut));
+            if frozen {
+                residual_block
+                    .factor
+                    .linearize(&param_slices, residual_slice, None);
+
+                let fej_slices: SmallVec<[&[f64]; 8]> = residual_block
+                    .variable_keys
+                    .iter()
+                    .zip(param_slices.iter())
+                    .map(|(key, current)| {
+                        variables
+                            .get(*key)
+                            .and_then(|v| v.linearization_point())
+                            .unwrap_or(current)
+                    })
+                    .collect();
+
+                // The Jacobian pass needs somewhere to write its residual; that
+                // value is discarded, since the one above is the live estimate's.
+                let mut scratch: SmallVec<[f64; 32]> = smallvec![0.0; rows];
+                let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(buf, rows, cols);
+                residual_block
+                    .factor
+                    .linearize(&fej_slices, &mut scratch, Some(jac_mut));
+            } else {
+                let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(buf, rows, cols);
+                residual_block
+                    .factor
+                    .linearize(&param_slices, residual_slice, Some(jac_mut));
+            }
         }
         None => residual_block
             .factor

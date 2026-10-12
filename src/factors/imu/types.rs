@@ -4,7 +4,7 @@
 //! self-contained inside apex-solver with no cross-workspace dependency.
 
 use apex_manifolds::se3::SE3;
-use nalgebra::{SVector, Vector3};
+use nalgebra::{Matrix3, SVector, Vector3};
 
 // ── SpeedAndBias ─────────────────────────────────────────────────────────────
 
@@ -73,6 +73,42 @@ pub struct ImuParameters {
     pub a0: Vector3<f64>,
     /// Accelerometer scale factors (diagonal of scale matrix).
     pub s_a: Vector3<f64>,
+}
+
+impl ImuParameters {
+    /// `R_bs`, the rotation taking a sensor-frame vector to the body frame.
+    ///
+    /// `t_bs` is **body-from-sensor**, which is the opposite of what its name
+    /// suggests to most readers; the accessor exists so the convention is
+    /// stated once instead of at every call site.
+    pub fn rotation_body_from_sensor(&self) -> Matrix3<f64> {
+        self.t_bs
+            .rotation_quaternion()
+            .to_rotation_matrix()
+            .into_inner()
+    }
+}
+
+// Hand-written because `SE3` has no `Debug`.
+impl std::fmt::Debug for ImuParameters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImuParameters")
+            .field("use_imu", &self.use_imu)
+            .field("t_bs_translation", &self.t_bs.translation())
+            .field("a_max", &self.a_max)
+            .field("g_max", &self.g_max)
+            .field("sigma_g_c", &self.sigma_g_c)
+            .field("sigma_a_c", &self.sigma_a_c)
+            .field("sigma_gw_c", &self.sigma_gw_c)
+            .field("sigma_aw_c", &self.sigma_aw_c)
+            .field("sigma_bg", &self.sigma_bg)
+            .field("sigma_ba", &self.sigma_ba)
+            .field("g", &self.g)
+            .field("g0", &self.g0)
+            .field("a0", &self.a0)
+            .field("s_a", &self.s_a)
+            .finish()
+    }
 }
 
 impl Default for ImuParameters {
@@ -171,4 +207,53 @@ mod tests {
             readings.accelerometers
         );
     }
+}
+
+/// Why a preintegration could not be built over an interval.
+///
+/// [`ImuPreintegration::new`](crate::factors::imu::ImuPreintegration::new)
+/// integrates whatever it is given; `try_new` rejects the inputs that integrate
+/// to something misleading rather than to an error.
+// No `PartialEq`: `NonPositiveInterval` deliberately carries NaN bounds, and
+// `err == err` is false for those — a non-reflexive comparison is a trap.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+pub enum PreintegrationError {
+    /// No measurement pair overlapped `[t0, t1]`, so nothing was integrated.
+    ///
+    /// Both boundaries zero-order-hold the nearest reading when no sample
+    /// brackets them, which is exact for constant specific force and degrades
+    /// with jerk. That is acceptable across the sub-IMU-period gap a missing
+    /// bracket leaves, and unacceptable across an arbitrary one: a buffer lying
+    /// wholly outside the interval would otherwise be extrapolated over the
+    /// entire span and returned as though it had been measured. Overlap is what
+    /// bounds the extrapolation.
+    #[error(
+        "no IMU measurement pair overlaps [{t0}, {t1}] s; \
+         {got} sample(s) span [{first}, {last}] s"
+    )]
+    EmptyIntegration {
+        /// Number of samples supplied.
+        got: usize,
+        /// Timestamp of the first sample \[s\].
+        first: f64,
+        /// Timestamp of the last sample \[s\].
+        last: f64,
+        /// Interval start \[s\].
+        t0: f64,
+        /// Interval end \[s\].
+        t1: f64,
+    },
+
+    /// The interval is empty or runs backwards.
+    ///
+    /// The IMU factors compensate gravity over `delta_t()`, so a non-positive
+    /// span does not merely integrate to zero — it applies a zero or
+    /// sign-flipped gravity correction to a residual that is still evaluated.
+    #[error("preintegration interval must satisfy t1 > t0, got t0 = {t0} s, t1 = {t1} s")]
+    NonPositiveInterval {
+        /// Interval start \[s\].
+        t0: f64,
+        /// Interval end \[s\].
+        t1: f64,
+    },
 }

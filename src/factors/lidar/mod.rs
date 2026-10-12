@@ -6,16 +6,31 @@
 //! ([`plane`], [`point_to_point`], [`gicp`]) treats the body-frame point as a
 //! variable.
 
+mod action;
 pub mod distance_field;
 pub mod edge;
 pub mod gicp;
+pub mod map_plane;
+pub mod map_planes;
 pub mod plane;
+pub mod plane_bundle;
+pub mod plane_moments;
 pub mod point_to_point;
+pub mod submap_field;
 
 pub use distance_field::{DistanceField, IcpFactor};
 pub use edge::LidarEdgeFactor;
 pub use gicp::GicpFactor;
+pub use map_plane::LidarMapPlaneFactor;
+pub use map_plane::{LidarPointChain, lidar_point_chain, point_to_plane_sigma};
+pub use map_planes::{LidarMapPlanesFactor, PlaneMatch};
 pub use plane::{
     LidarPlaneFactor, Plane, PointToPlaneFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
 };
+pub use plane_bundle::LidarPlaneBundleFactor;
+pub use plane_bundle::fit_plane_pca;
+pub use plane_moments::{LidarPlaneMomentFactor, PointMoments};
 pub use point_to_point::PoseToPointFactor;
+pub use submap_field::LidarSubmapFieldFactor;
+pub use submap_field::SubmapAlignmentFactor;
+pub use submap_field::occupancy_sigma;

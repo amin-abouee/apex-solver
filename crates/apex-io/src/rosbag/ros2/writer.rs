@@ -287,7 +287,7 @@ impl Writer {
         let metadata = BagMetadata {
             rosbag2_bagfile_information: bag_info,
         };
-        let metadata_yaml = serde_yaml::to_string(&metadata)?;
+        let metadata_yaml = serde_norway::to_string(&metadata)?;
 
         if let Some(mut storage) = self.storage.take() {
             storage.close(self.version, &metadata_yaml)?;
@@ -399,7 +399,7 @@ impl Writer {
             return Ok(String::new());
         }
 
-        let yaml = serde_yaml::to_string(profiles)?;
+        let yaml = serde_norway::to_string(profiles)?;
         Ok(yaml.trim().to_string())
     }
 

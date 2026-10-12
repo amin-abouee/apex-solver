@@ -114,7 +114,7 @@ workspace = true
 optional = true
 
 # ROS1/ROS2 bag I/O — `rosbag` feature, opt-in.
-[dependencies.serde_yaml]
+[dependencies.serde_norway]
 workspace = true
 optional = true
 
@@ -178,7 +178,7 @@ rosbag = [
     "dep:mcap",
     "dep:zstd",
     "dep:lz4_flex",
-    "dep:serde_yaml",
+    "dep:serde_norway",
     "dep:byteorder",
     "dep:hex",
     "dep:bzip2",

@@ -586,6 +586,10 @@ pub(crate) fn build_variable_index_map(
 /// non-trivial bound (`lower > -inf` or `upper < inf`) is rejected here with
 /// a typed error rather than silently ignored.
 pub fn initialize_optimization_state(problem: &mut Problem) -> OptimizerResult<InitializedState> {
+    // A removed residual block leaves a hole in the row layout, and every
+    // assembly path below assumes there is none. Closing it here rather than at
+    // each removal keeps it O(#blocks) per solve instead of per removal.
+    problem.compact_residual_rows();
     if let Some((var_key, idx, lower, upper)) = problem.variable_bounds.iter().find_map(|(k, m)| {
         m.iter()
             .find(|&(_, &(lower, upper))| lower > f64::NEG_INFINITY || upper < f64::INFINITY)

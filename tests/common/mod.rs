@@ -168,6 +168,20 @@ pub fn anchor_rn(problem: &mut Problem, key: VarKey, params: &[f64]) {
     );
 }
 
+/// Tight tangent-space prior anchoring an SE23 navigation state.
+pub fn anchor_se23(
+    problem: &mut Problem,
+    key: VarKey,
+    state: &apex_solver::apex_manifolds::se23::SE23,
+) {
+    problem.add_residual_block_with_noise(
+        &[key],
+        Box::new(PriorFactor::new(state.clone())),
+        None,
+        NoiseModel::from_sigmas(&[1e-6; 9]).unwrap_or_else(|e| panic!("{e}")),
+    );
+}
+
 /// Tight tangent-space prior anchoring an SE3 pose.
 pub fn anchor_se3(problem: &mut Problem, key: VarKey, pose: &SE3) {
     problem.add_residual_block_with_noise(

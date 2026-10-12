@@ -33,6 +33,13 @@ pub struct Problem {
     pub(crate) fixed_variable_indexes: SecondaryMap<VarKey, HashSet<usize>>,
     pub(crate) variable_bounds: SecondaryMap<VarKey, HashMap<usize, (f64, f64)>>,
     pub(crate) schur_landmark_keys: HashSet<VarKey>,
+    /// Manifold type per variable, so a variable's value can be replaced
+    /// without the caller having to remember what it was.
+    manifold_types: SecondaryMap<VarKey, ManifoldType>,
+    /// Set when a removal leaves a hole in the residual row layout.
+    rows_dirty: bool,
+    /// Where Jacobians are evaluated for this problem.
+    jacobian_evaluation: crate::linearizer::JacobianEvaluation,
 }
 
 impl Default for Problem {
@@ -51,6 +58,9 @@ impl Problem {
             fixed_variable_indexes: SecondaryMap::new(),
             variable_bounds: SecondaryMap::new(),
             schur_landmark_keys: HashSet::new(),
+            manifold_types: SecondaryMap::new(),
+            rows_dirty: false,
+            jacobian_evaluation: crate::linearizer::JacobianEvaluation::CurrentEstimate,
         }
     }
 
@@ -92,7 +102,9 @@ impl Problem {
     /// Returns a stable `VarKey` handle for use in `add_residual_block`, `fix_variable`, etc.
     pub fn add_variable(&mut self, manifold_type: ManifoldType, params: DVector<f64>) -> VarKey {
         let var = Self::create_variable(&manifold_type, &params);
-        self.variables.insert(var)
+        let key = self.variables.insert(var);
+        self.manifold_types.insert(key, manifold_type);
+        key
     }
 
     /// Add a residual block (factor + optional loss) connecting the given variables.
@@ -302,13 +314,281 @@ impl Problem {
         moved
     }
 
+    /// Remove a residual block.
+    ///
+    /// The row layout is left with a hole, which every assembly path assumes is
+    /// absent; [`Self::compact_residual_rows`] closes it, and is run for you
+    /// before the next solve.
     pub fn remove_residual_block(&mut self, block_id: FactorKey) -> Option<ResidualBlock> {
         if let Some(block) = self.residual_blocks.remove(block_id) {
             self.total_residual_dimension -= block.factor.residual_dim();
+            self.rows_dirty = true;
             Some(block)
         } else {
             None
         }
+    }
+
+    /// Remove several residual blocks, returning how many existed.
+    ///
+    /// A sliding window drops a whole factor set at once; doing it in one call
+    /// keeps the row layout compacted once rather than once per block.
+    pub fn remove_residual_blocks(&mut self, blocks: &[FactorKey]) -> usize {
+        blocks
+            .iter()
+            .filter(|key| self.remove_residual_block(**key).is_some())
+            .count()
+    }
+
+    /// Renumber `residual_row_start_idx` so the rows are gapless and start at
+    /// zero, preserving relative order, and recompute the total from the walk.
+    ///
+    /// [`Self::remove_residual_block`] leaves a hole. Every assembly path
+    /// assumes a compact layout: `AssemblyWorkspace` sizes its residual buffer
+    /// from `total_residual_dimension` while `offsets_lens` still holds offsets
+    /// past the end, and `split_by_row_offsets_mut` then splits past the end of
+    /// a zero-length remainder. Idempotent; a no-op when nothing was removed.
+    ///
+    /// Returns whether any offset moved.
+    pub(crate) fn compact_residual_rows(&mut self) -> bool {
+        if !self.rows_dirty {
+            return false;
+        }
+
+        let mut ordered: Vec<(usize, FactorKey)> = self
+            .residual_blocks
+            .iter()
+            .map(|(key, block)| (block.residual_row_start_idx, key))
+            .collect();
+        ordered.sort_unstable();
+
+        let mut moved = false;
+        let mut row = 0usize;
+        for (_, key) in &ordered {
+            if let Some(block) = self.residual_blocks.get_mut(*key) {
+                if block.residual_row_start_idx != row {
+                    block.residual_row_start_idx = row;
+                    moved = true;
+                }
+                row += block.factor.residual_dim();
+            }
+        }
+        // Recomputed from the walk rather than trusted: the running counter is
+        // what a mismatched removal would have corrupted in the first place.
+        self.total_residual_dimension = row;
+        self.rows_dirty = false;
+        moved
+    }
+
+    /// The variable behind `key`.
+    pub fn variable(&self, key: VarKey) -> Option<&dyn ManifoldVariable> {
+        self.variables.get(key).map(|v| v.as_ref())
+    }
+
+    /// A variable's ambient parameters, zero-copy.
+    pub fn variable_params(&self, key: VarKey) -> Option<&[f64]> {
+        self.variables.get(key).map(|v| v.as_param_slice())
+    }
+
+    /// The manifold a variable lives on.
+    pub fn manifold_type(&self, key: VarKey) -> Option<ManifoldType> {
+        self.manifold_types.get(key).copied()
+    }
+
+    /// Every variable key, in column order.
+    pub fn variable_keys(&self) -> impl Iterator<Item = VarKey> + '_ {
+        self.variables.keys()
+    }
+
+    /// Number of variables.
+    pub fn num_variables(&self) -> usize {
+        self.variables.len()
+    }
+
+    /// Overwrite a variable's ambient parameters.
+    ///
+    /// Constraints survive: [`Self::fix_variable`] and
+    /// [`Self::set_variable_bounds`] record into the problem, not into the
+    /// variable, and are re-applied to the working copy at the start of each
+    /// solve. Fixed indices, bounds and any frozen linearization point are
+    /// carried over; the covariance is not, since it describes the old value.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Variable`] for an unknown key, or
+    /// [`CoreError::DimensionMismatch`] if `params` is the wrong length for the
+    /// variable's manifold.
+    pub fn set_variable_params(&mut self, key: VarKey, params: &[f64]) -> CoreResult<()> {
+        let manifold_type = self
+            .manifold_types
+            .get(key)
+            .copied()
+            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?;
+        let existing = self
+            .variables
+            .get(key)
+            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?;
+        if existing.as_param_slice().len() != params.len() {
+            return Err(CoreError::DimensionMismatch(format!(
+                "variable {key:?} takes {} parameters, got {}",
+                existing.as_param_slice().len(),
+                params.len()
+            )));
+        }
+
+        let fixed = existing.get_fixed_indices().clone();
+        let bounds = existing.get_bounds().clone();
+        // The frozen linearization point survives a value update, and must.
+        // `update_values_from` is built on this method, so a window that writes
+        // its solve result back would otherwise clear every freeze it had just
+        // set — first-estimate Jacobians would silently degrade to current-
+        // estimate ones after the first step, which is exactly the failure FEJ
+        // exists to prevent and is invisible in the cost.
+        let frozen = existing.linearization_point().map(<[f64]>::to_vec);
+        let mut replacement =
+            Self::create_variable(&manifold_type, &DVector::from_column_slice(params));
+        replacement.set_fixed_indices(fixed);
+        replacement.set_bounds(bounds);
+        if let Some(point) = frozen {
+            replacement
+                .set_linearization_point(&point)
+                .map_err(CoreError::Variable)?;
+        }
+        self.variables[key] = replacement;
+        Ok(())
+    }
+
+    /// Copy solved values back in, keyed by `VarKey`.
+    ///
+    /// [`crate::optimizer::Optimizer::optimize`] works on a clone and returns it
+    /// in `SolverResult::parameters`; the problem's own variables are never
+    /// touched. A sliding window that keeps one problem alive across steps has
+    /// to write the result back, or every step re-linearizes from the values it
+    /// started with. Keys absent from `solved` are left alone.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::DimensionMismatch`] if a solved variable's parameter count
+    /// disagrees with the one it replaces.
+    pub fn update_values_from(
+        &mut self,
+        solved: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    ) -> CoreResult<()> {
+        for (key, value) in solved {
+            if !self.variables.contains_key(key) {
+                continue;
+            }
+            self.set_variable_params(key, value.as_param_slice())?;
+        }
+        Ok(())
+    }
+
+    /// Where Jacobians are evaluated. Default
+    /// [`JacobianEvaluation::CurrentEstimate`](crate::linearizer::JacobianEvaluation::CurrentEstimate).
+    pub fn jacobian_evaluation(&self) -> crate::linearizer::JacobianEvaluation {
+        self.jacobian_evaluation
+    }
+
+    /// Evaluate Jacobians at the current estimate, or at frozen linearization
+    /// points where they exist.
+    ///
+    /// Setting [`FirstEstimate`](crate::linearizer::JacobianEvaluation::FirstEstimate)
+    /// alone changes nothing: it takes effect for the variables that have been
+    /// frozen with [`Self::freeze_linearization_point`].
+    pub fn set_jacobian_evaluation(&mut self, evaluation: crate::linearizer::JacobianEvaluation) {
+        self.jacobian_evaluation = evaluation;
+    }
+
+    /// Freeze `key`'s linearization point at its current value.
+    ///
+    /// Freeze exactly the states a marginal prior touches, and nothing else:
+    /// a frozen Jacobian is a *stale* Jacobian, and paying that cost anywhere
+    /// it is not buying consistency is simply accuracy given away.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Variable`] if the key is unknown or the variable does not
+    /// support freezing.
+    pub fn freeze_linearization_point(&mut self, key: VarKey) -> CoreResult<()> {
+        self.variables
+            .get_mut(key)
+            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?
+            .freeze_linearization_point()
+            .map_err(CoreError::Variable)
+    }
+
+    /// Freeze `key`'s linearization point at an **explicit** value.
+    ///
+    /// See [`crate::core::variable::ManifoldVariable::set_linearization_point`]:
+    /// a caller that rebuilds its `Problem` every step has to restore `x₀` from
+    /// its stored marginal, because by then the variable holds the solved value
+    /// and [`Self::freeze_linearization_point`] would pin a moving target.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Variable`] if the key is unknown, the variable does not
+    /// support freezing, or `params` is the wrong length.
+    pub fn set_linearization_point(&mut self, key: VarKey, params: &[f64]) -> CoreResult<()> {
+        self.variables
+            .get_mut(key)
+            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?
+            .set_linearization_point(params)
+            .map_err(CoreError::Variable)
+    }
+
+    /// Release `key`'s frozen linearization point.
+    ///
+    /// Call this whenever the quantity the Jacobian was frozen against is
+    /// re-derived — repropagating an IMU edge at a new bias, for instance,
+    /// re-linearizes its own bias correction and invalidates the freeze.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Variable`] if the key is unknown.
+    pub fn clear_linearization_point(&mut self, key: VarKey) -> CoreResult<()> {
+        self.variables
+            .get_mut(key)
+            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?
+            .clear_linearization_point();
+        Ok(())
+    }
+
+    /// Whether `key` has a frozen linearization point.
+    pub fn is_linearization_point_frozen(&self, key: VarKey) -> bool {
+        self.variables
+            .get(key)
+            .is_some_and(|v| v.linearization_point().is_some())
+    }
+
+    /// Remove a variable, returning it.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Variable`] if the key is unknown, or if a residual block
+    /// still references it — a dangling key would otherwise surface far away,
+    /// inside the parallel assembly, as a variable lookup failure.
+    pub fn try_remove_variable(&mut self, key: VarKey) -> CoreResult<Box<dyn ManifoldVariable>> {
+        if !self.variables.contains_key(key) {
+            return Err(CoreError::Variable(format!("unknown variable key {key:?}")));
+        }
+        if let Some((factor, _)) = self
+            .residual_blocks
+            .iter()
+            .find(|(_, block)| block.variable_keys.contains(&key))
+        {
+            return Err(CoreError::Variable(format!(
+                "variable {key:?} is still referenced by residual block {factor:?}; \
+                 remove the block first"
+            )));
+        }
+
+        self.fixed_variable_indexes.remove(key);
+        self.variable_bounds.remove(key);
+        self.manifold_types.remove(key);
+        self.schur_landmark_keys.remove(&key);
+        self.variables
+            .remove(key)
+            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))
     }
 
     /// Hold tangent-space component `idx` of `var_key` fixed during solving.
@@ -470,6 +750,12 @@ impl Problem {
     /// This is the row count `m` of the assembled Jacobian.
     pub fn total_residual_dimension(&self) -> usize {
         self.total_residual_dimension
+    }
+
+    /// The variable map, for in-crate consumers that assemble their own
+    /// linear system (marginalization, covariance).
+    pub(crate) fn variables(&self) -> &SlotMap<VarKey, Box<dyn ManifoldVariable>> {
+        &self.variables
     }
 
     pub(crate) fn residual_blocks(&self) -> &SlotMap<FactorKey, ResidualBlock> {
@@ -1545,5 +1831,167 @@ mod tests {
             )?;
             Ok(())
         }
+    }
+    // ── window management ───────────────────────────────────────────────────
+
+    fn se3_at(x: f64) -> DVector<f64> {
+        dvector![x, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    }
+
+    fn three_pose_chain() -> (Problem, Vec<VarKey>, Vec<FactorKey>) {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let keys: Vec<VarKey> = (0..3)
+            .map(|k| problem.add_variable(ManifoldType::SE3, se3_at(k as f64)))
+            .collect();
+        let mut blocks = vec![problem.add_residual_block(
+            &[keys[0]],
+            Box::new(PriorFactor::new(SE3::identity())),
+            None,
+        )];
+        for pair in keys.windows(2) {
+            blocks.push(problem.add_residual_block(
+                &[pair[0], pair[1]],
+                Box::new(BetweenFactor::new(SE3::new(
+                    Vector3::new(1.0, 0.0, 0.0),
+                    nalgebra::UnitQuaternion::identity(),
+                ))),
+                None,
+            ));
+        }
+        (problem, keys, blocks)
+    }
+
+    /// Removing a non-last block leaves a hole in the row layout, and every
+    /// assembly path assumes there is none. Before `compact_residual_rows` this
+    /// panicked inside `split_by_row_offsets_mut`.
+    #[test]
+    fn remove_middle_block_then_solve() -> TestResult {
+        let (mut problem, _keys, blocks) = three_pose_chain();
+        let before = problem.total_residual_dimension();
+        problem.remove_residual_block(blocks[1]);
+        assert_eq!(problem.num_residual_blocks(), 2);
+
+        problem.compact_residual_rows();
+        assert_eq!(problem.total_residual_dimension(), before - 6);
+
+        let mut solver = crate::optimizer::levenberg_marquardt::LevenbergMarquardt::new();
+        crate::optimizer::Optimizer::optimize(&mut solver, &mut problem)?;
+        Ok(())
+    }
+
+    #[test]
+    fn compacting_is_idempotent() -> TestResult {
+        let (mut problem, _keys, blocks) = three_pose_chain();
+        problem.remove_residual_block(blocks[0]);
+        assert!(problem.compact_residual_rows());
+        let total = problem.total_residual_dimension();
+        // Second call is a no-op: nothing is dirty and nothing moves.
+        assert!(!problem.compact_residual_rows());
+        assert_eq!(problem.total_residual_dimension(), total);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_residual_blocks_counts_only_what_existed() {
+        let (mut problem, _keys, blocks) = three_pose_chain();
+        let removed = problem.remove_residual_blocks(&[blocks[0], blocks[0], blocks[2]]);
+        assert_eq!(removed, 2, "a repeated key must not be counted twice");
+        assert_eq!(problem.num_residual_blocks(), 1);
+    }
+
+    #[test]
+    fn remove_variable_rejects_a_referenced_key() {
+        let (mut problem, keys, _blocks) = three_pose_chain();
+        let Err(CoreError::Variable(message)) = problem.try_remove_variable(keys[0]) else {
+            panic!("expected a Variable error for a still-referenced key");
+        };
+        assert!(message.contains("still referenced"), "{message}");
+    }
+
+    #[test]
+    fn remove_variable_succeeds_once_its_blocks_are_gone() -> TestResult {
+        let (mut problem, keys, blocks) = three_pose_chain();
+        problem.remove_residual_blocks(&blocks);
+        problem.try_remove_variable(keys[2])?;
+        assert_eq!(problem.num_variables(), 2);
+        assert!(problem.variable(keys[2]).is_none());
+        assert!(problem.manifold_type(keys[2]).is_none());
+        Ok(())
+    }
+
+    /// Slot reuse makes key order disagree with column order after a
+    /// remove-and-re-add cycle. Nothing may depend on the two matching.
+    #[test]
+    fn remove_then_add_reuses_a_slot_and_still_solves() -> TestResult {
+        let (mut problem, keys, blocks) = three_pose_chain();
+        problem.remove_residual_blocks(&blocks);
+        problem.try_remove_variable(keys[2])?;
+        let fresh = problem.add_variable(ManifoldType::SE3, se3_at(5.0));
+        problem.add_residual_block(
+            &[fresh],
+            Box::new(PriorFactor::new(SE3::new(
+                Vector3::new(5.0, 0.0, 0.0),
+                nalgebra::UnitQuaternion::identity(),
+            ))),
+            None,
+        );
+        let mut solver = crate::optimizer::levenberg_marquardt::LevenbergMarquardt::new();
+        crate::optimizer::Optimizer::optimize(&mut solver, &mut problem)?;
+        Ok(())
+    }
+
+    #[test]
+    fn set_variable_params_preserves_fixed_indices() -> TestResult {
+        let (mut problem, keys, _blocks) = three_pose_chain();
+        problem.fix_variable(keys[1], 2);
+        problem.set_variable_params(keys[1], se3_at(9.0).as_slice())?;
+
+        let Some(var) = problem.variable(keys[1]) else {
+            panic!("variable vanished");
+        };
+        assert!((var.as_param_slice()[0] - 9.0).abs() < 1e-12);
+        // The constraint lives on the problem, not the variable — replacing the
+        // variable must not drop it.
+        let Some(fixed) = problem.fixed_variable_indexes.get(keys[1]) else {
+            panic!("the fixed-index record was dropped");
+        };
+        assert!(fixed.contains(&2));
+        Ok(())
+    }
+
+    #[test]
+    fn set_variable_params_rejects_a_wrong_length() {
+        let (mut problem, keys, _blocks) = three_pose_chain();
+        let Err(CoreError::DimensionMismatch(_)) =
+            problem.set_variable_params(keys[0], &[1.0, 2.0])
+        else {
+            panic!("expected DimensionMismatch");
+        };
+    }
+
+    /// `optimize` works on a clone; without writing the result back a window
+    /// would re-linearize from its original values on every step.
+    #[test]
+    fn update_values_from_writes_a_solve_back() -> TestResult {
+        let (mut problem, keys, _blocks) = three_pose_chain();
+        // Start away from the solution, or the solve moves nothing and the
+        // assertion below passes for the wrong reason.
+        problem.set_variable_params(keys[2], se3_at(5.0).as_slice())?;
+
+        let mut solver = crate::optimizer::levenberg_marquardt::LevenbergMarquardt::new();
+        let result = crate::optimizer::Optimizer::optimize(&mut solver, &mut problem)?;
+
+        let solved_x = result.parameters[keys[2]].as_param_slice()[0];
+        assert!(
+            (solved_x - 2.0).abs() < 1e-6,
+            "the chain should pull pose 2 back to x = 2, got {solved_x}"
+        );
+        let before = problem.variable_params(keys[2]).map(|p| p[0]);
+        problem.update_values_from(&result.parameters)?;
+        let after = problem.variable_params(keys[2]).map(|p| p[0]);
+
+        assert_ne!(before, after, "the problem was not updated");
+        assert_eq!(after, Some(solved_x));
+        Ok(())
     }
 }

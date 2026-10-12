@@ -842,6 +842,26 @@ impl FromCdr for PointField {
     }
 }
 
+impl PointCloud2 {
+    /// Number of points, `height · width`.
+    pub fn point_count(&self) -> usize {
+        self.height as usize * self.width as usize
+    }
+
+    /// The values of field `name` for every point, widened to `f64` — see
+    /// [`crate::rosbag::point_cloud::field_values`].
+    pub fn field_values(&self, name: &str) -> Result<Vec<f64>> {
+        crate::rosbag::point_cloud::field_values(
+            &self.fields,
+            name,
+            &self.data,
+            self.point_step as usize,
+            self.point_count(),
+            self.is_bigendian,
+        )
+    }
+}
+
 impl FromCdr for PointCloud2 {
     fn from_cdr(deserializer: &mut CdrDeserializer) -> Result<Self> {
         Ok(Self {

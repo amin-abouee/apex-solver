@@ -21,7 +21,7 @@ pub enum BagError {
 
     /// Error parsing YAML metadata
     #[error("Failed to parse metadata YAML: {0}")]
-    YamlParse(#[from] serde_yaml::Error),
+    YamlParse(#[from] serde_norway::Error),
 
     /// Database error when reading SQLite files
     #[error("Database error: {0}")]

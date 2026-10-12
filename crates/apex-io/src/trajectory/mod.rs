@@ -390,6 +390,27 @@ pub(crate) fn parse_u64_field(raw: &str, name: &str, path: &Path, line: usize) -
 }
 
 // ---------------------------------------------------------------------------
+// Orientation from a text file
+// ---------------------------------------------------------------------------
+
+/// Largest deviation from unit norm accepted for a quaternion read from a
+/// text file. Real ground truth is not exactly unit: EuRoC's
+/// `state_groundtruth_estimate0` files are off by up to `3.3e-4` (MH_03),
+/// TUM VI's by under `1e-6`. A scaled, truncated or garbage row is off by far
+/// more than this. (A permuted unit quaternion is still unit; no norm check
+/// can catch a wrong column order.)
+pub const TEXT_QUATERNION_NORM_TOLERANCE: f64 = 1e-2;
+
+/// The rotation of a `[w, x, y, z]` quaternion read from a text file,
+/// normalized, or `None` when its norm is not within
+/// [`TEXT_QUATERNION_NORM_TOLERANCE`] of one (or is not finite).
+pub fn text_orientation(w: f64, x: f64, y: f64, z: f64) -> Option<apex_manifolds::so3::SO3> {
+    let norm = (w * w + x * x + y * y + z * z).sqrt();
+    (norm.is_finite() && (norm - 1.0).abs() <= TEXT_QUATERNION_NORM_TOLERANCE)
+        .then(|| apex_manifolds::so3::SO3::from_quaternion_wxyz(w, x, y, z))
+}
+
+// ---------------------------------------------------------------------------
 // Bridge to the ASL dataset reader's pose type
 // ---------------------------------------------------------------------------
 
@@ -451,6 +472,19 @@ mod tests {
 
     fn pose(ns: u64, x: f64) -> TrajectoryPose {
         TrajectoryPose::new(ns, Vector3::new(x, 0.0, 0.0), SO3::identity())
+    }
+
+    /// EuRoC-sized deviations are accepted and normalized, while a far-off
+    /// norm is still refused.
+    #[test]
+    fn text_quaternions_tolerate_rounding_but_not_corruption() {
+        let euroc = (0.1673, -0.017_582_1, -0.020_316_5, 0.985_498);
+        let rotation = text_orientation(euroc.0, euroc.1, euroc.2, euroc.3);
+        assert!(rotation.is_some());
+        assert!(text_orientation(1.000_33, 0.0, 0.0, 0.0).is_some());
+        assert!(text_orientation(1.1, 0.0, 0.0, 0.0).is_none());
+        assert!(text_orientation(2.0, 0.0, 0.0, 0.0).is_none());
+        assert!(text_orientation(f64::NAN, 0.0, 0.0, 0.0).is_none());
     }
 
     fn two_sample() -> Trajectory {
