@@ -87,7 +87,7 @@ apex-io = { version = "0.4.0", features = ["dds"] }
 |---|:---:|---|---|
 | `download` | ✓ | Dataset auto-download (`download_file`, `decompress_bzip2`, `extract_tar_gz`, `ensure_*_dataset` network fallback, `download_datasets` binary) | `ureq`, `bzip2`, `flate2`, `tar` |
 | `cli` | ✓ | CLI parsing for `download_datasets`, `bag_filter`, `bag_convert` | `clap` |
-| `rosbag` | ✗ | ROS1/ROS2 bag read/write, `bag_*` binaries | `rusqlite` (bundled SQLite), `mcap`, `zstd`, `lz4_flex`, `serde_yaml`, `byteorder`, `hex`, `bzip2` |
+| `rosbag` | ✗ | ROS1/ROS2 bag read/write, `bag_*` binaries | `rusqlite` (bundled SQLite), `mcap`, `zstd`, `lz4_flex`, `serde_norway`, `byteorder`, `hex`, `bzip2` |
 | `visualization` | ✗ | `to_rerun_*` conversions | `rerun` |
 | `dds` | ✗ | Live DDS subscription, `dds_multi_listener` binary | `rustdds`, `tokio`, `futures` |
 
@@ -719,7 +719,7 @@ let (position, rotation): (Vec3, Quat) = vertex_se3.to_rerun_transform(scale);
 | `thiserror` | Error type derivation |
 | `tracing` | Structured logging |
 | `serde`, `serde_json` | Serialization |
-| `serde_yaml` | YAML metadata parsing (ROS2 bags) |
+| `serde_norway` | YAML metadata parsing (ROS2 bags) |
 | `chrono` | Timestamps in file headers |
 | `byteorder` | CDR byte-order handling |
 | `bytes` | Efficient byte buffers |

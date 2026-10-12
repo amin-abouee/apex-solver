@@ -47,7 +47,7 @@ tar = "0.4"
 toml = "0.8"
 
 # rosbag optional dependencies
-serde_yaml = "0.9"
+serde_norway = "0.9.42"
 byteorder  = "1.5"
 bytes      = "1.11"
 hex        = "0.4"

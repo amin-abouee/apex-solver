@@ -29,7 +29,7 @@ For the old behaviour on an `Rn` variable, use
 
 `apex-io`'s `rosbag` feature is now **opt-in** (it was built unconditionally).
 Depending on `apex-io` no longer compiles `rusqlite` (bundled SQLite), `mcap`,
-`zstd`, `lz4_flex`, `serde_yaml`, `byteorder`, `hex`. Bag I/O users must opt in:
+`zstd`, `lz4_flex`, `serde_norway`, `byteorder`, `hex`. Bag I/O users must opt in:
 
 ```toml
 apex-io = { version = "0.4", features = ["rosbag"] }
