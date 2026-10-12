@@ -335,7 +335,13 @@ impl Ros1Writer {
                 enc.finish()?;
                 out
             }
-            Ros1Compression::Lz4 => lz4_flex::block::compress_prepend_size(&uncompressed),
+            // An LZ4 frame, as `roslz4` writes and reads it.
+            Ros1Compression::Lz4 => {
+                let mut enc = lz4_flex::frame::FrameEncoder::new(Vec::new());
+                enc.write_all(&uncompressed)?;
+                enc.finish()
+                    .map_err(|e| BagError::compression(format!("lz4 encode: {e}")))?
+            }
         };
 
         let mut chunk_header = RecordHeader::new();
