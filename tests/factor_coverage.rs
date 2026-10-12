@@ -45,6 +45,7 @@ use apex_solver::factors::visual::{
 };
 use apex_solver::factors::visual::{IntensityImage, PhotometricPatchFactor};
 use apex_solver::factors::visual::{InverseDepthBearingSe23Factor, InverseDepthSe23Factor};
+use apex_solver::factors::visual::{InverseRangeProjectionSe23Factor, StereoInverseRangeFactor};
 use apex_solver::factors::visual::{PhotometricTwoViewFactor, PlanePoint, ReferenceView};
 use nalgebra::{DVector, UnitQuaternion, Vector2, Vector3, Vector4};
 
@@ -2372,6 +2373,136 @@ fn time_offset_projection_recovers_the_clock_offset() {
 /// The list is not hand-maintained: it is read from the modules' own `pub use`
 /// lines at compile time, so exporting a new factor without adding a scenario
 /// fails here rather than going unnoticed.
+/// A stereo rig: landmarks hosted in camera 0 at keyframe 0, seen by camera
+/// 1 at the same instant ([`StereoInverseRangeFactor`]) and at keyframe 1
+/// ([`InverseRangeProjectionSe23Factor`]). The stereo pixels alone fix every
+/// inverse range from the 11 cm baseline — the body state cancels — and the
+/// later views then recover keyframe 1, which starts 8 cm and 3° off.
+#[test]
+fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
+    use apex_solver::apex_camera_models::{
+        CameraModel, DistortionModel, KannalaBrandtCamera, PinholeParams,
+    };
+
+    let camera = KannalaBrandtCamera::new(
+        PinholeParams::new(190.4, 190.4, 252.6, 254.9).unwrap_or_else(|e| panic!("{e}")),
+        DistortionModel::KannalaBrandt {
+            k1: 0.0034,
+            k2: 0.0018,
+            k3: -0.0027,
+            k4: 0.00033,
+        },
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let intrinsics: DVector<f64> = (&camera).into();
+    // Both cameras look along body +z; camera 1 sits 11 cm to the right.
+    let t_b0 = SE3::new(Vector3::new(-0.055, 0.0, 0.0), UnitQuaternion::identity());
+    let t_b1 = SE3::new(
+        Vector3::new(0.055, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.002, -0.003, 0.001),
+    );
+    let host = SE23::new(
+        Vector3::zeros(),
+        Vector3::new(0.3, 0.0, 0.0),
+        UnitQuaternion::identity(),
+    );
+    let observer = SE23::new(
+        Vector3::new(0.3, 0.05, 0.1),
+        Vector3::new(0.3, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.02, -0.04, 0.03),
+    );
+
+    // Pixel of world point `w` in camera `t_bc` of `state`.
+    let pixel = |state: &SE23, t_bc: &SE3, w: Vector3<f64>| -> Vector2<f64> {
+        let in_body = state.rotation_matrix().transpose() * (w - state.translation());
+        let in_camera =
+            t_bc.rotation_so3().rotation_matrix().transpose() * (in_body - t_bc.translation());
+        camera.project(&in_camera).unwrap_or_else(|e| panic!("{e}"))
+    };
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let host_key = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(host.as_param_slice()),
+    );
+    anchor_se23(&mut problem, host_key, &host);
+    let start = SE23::new(
+        Vector3::new(0.36, 0.0, 0.15),
+        Vector3::new(0.3, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.0, -0.01, 0.06),
+    );
+    let observer_key = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(start.as_param_slice()),
+    );
+    let mut extrinsic = |pose: &SE3| {
+        let key = problem.add_variable(
+            ManifoldType::SE3,
+            DVector::from_column_slice(pose.as_param_slice()),
+        );
+        anchor_se3(&mut problem, key, pose);
+        key
+    };
+    let (b0_key, b1_key) = (extrinsic(&t_b0), extrinsic(&t_b1));
+    let k_key = problem.add_variable(ManifoldType::RN, intrinsics.clone());
+    anchor_rn(&mut problem, k_key, intrinsics.as_slice());
+
+    let mut range_keys = Vec::new();
+    let mut truth = Vec::new();
+    for j in 0..12 {
+        let f = f64::from(j);
+        let world = Vector3::new(1.6 * (f * 0.7).sin(), 0.9 * (f * 1.3).cos(), 3.0 + 0.5 * f);
+        let in_host = t_b0.rotation_so3().rotation_matrix().transpose()
+            * (host.rotation_matrix().transpose() * (world - host.translation())
+                - t_b0.translation());
+        let (bearing, rho) = (in_host.normalize(), 1.0 / in_host.norm());
+        truth.push(rho);
+        let key = problem.add_variable(
+            ManifoldType::RN,
+            DVector::from_vec(vec![rho * (1.0 + 0.3 * (f * 0.9).cos())]),
+        );
+        range_keys.push(key);
+
+        let stereo = StereoInverseRangeFactor::<KannalaBrandtCamera>::new(
+            bearing,
+            pixel(&host, &t_b1, world),
+            0.5,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        problem.add_residual_block(&[b0_key, b1_key, key, k_key], Box::new(stereo), None);
+
+        let moving = InverseRangeProjectionSe23Factor::<KannalaBrandtCamera>::new(
+            bearing,
+            pixel(&observer, &t_b1, world),
+            0.5,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        problem.add_residual_block(
+            &[host_key, observer_key, b0_key, b1_key, key, k_key],
+            Box::new(moving),
+            None,
+        );
+    }
+
+    let mut solver = lm_solver(200);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("stereo inverse-range graph failed: {e}"));
+
+    for (key, expected) in range_keys.iter().zip(&truth) {
+        let got = result.parameters[*key].as_param_slice()[0];
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "inverse range {got:.8} != {expected:.8}"
+        );
+    }
+    let solved = SE23::from_param_slice(result.parameters[observer_key].as_param_slice());
+    let error = (solved.translation() - observer.translation()).norm();
+    assert!(error < 1e-4, "keyframe 1 translation error {error:.3e}");
+    let angle = (solved.rotation_quaternion().inverse() * observer.rotation_quaternion()).angle();
+    assert!(angle < 1e-5, "keyframe 1 rotation error {angle:.3e}");
+}
+
 #[test]
 fn every_exported_factor_is_exercised_by_an_integration_test() {
     const MODULES: &[&str] = &[
