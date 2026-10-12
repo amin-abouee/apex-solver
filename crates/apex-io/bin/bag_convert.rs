@@ -60,6 +60,11 @@ struct Args {
     /// Verbose timing output
     #[arg(short, long)]
     verbose: bool,
+
+    /// ROS1 → ROS2: read the input this many seconds at a time, so memory
+    /// holds one window of messages rather than the whole bag
+    #[arg(long, default_value_t = 2.0)]
+    window_seconds: f64,
 }
 
 // ── Supported type registry ───────────────────────────────────────────────────
@@ -77,6 +82,7 @@ fn ros1_to_cdr_fn(ros1_type: &str) -> Option<ConvertFn> {
         "sensor_msgs/Imu" => Some(conv_imu_ros1_cdr),
         "sensor_msgs/Image" => Some(conv_image_ros1_cdr),
         "sensor_msgs/CompressedImage" => Some(conv_compressed_image_ros1_cdr),
+        "sensor_msgs/PointCloud2" => Some(conv_point_cloud2_ros1_cdr),
         _ => None,
     }
 }
@@ -92,6 +98,7 @@ fn cdr_to_ros1_fn(ros1_type: &str) -> Option<ConvertFn> {
         "sensor_msgs/Imu" => Some(conv_imu_cdr_ros1),
         "sensor_msgs/Image" => Some(conv_image_cdr_ros1),
         "sensor_msgs/CompressedImage" => Some(conv_compressed_image_cdr_ros1),
+        "sensor_msgs/PointCloud2" => Some(conv_point_cloud2_cdr_ros1),
         _ => None,
     }
 }
@@ -190,7 +197,11 @@ fn convert_ros1_to_ros2(args: &Args) -> Result<()> {
             } else {
                 "✗ (unsupported)"
             };
-            println!("  {} ({}) {}", c.topic, c.message_type, support);
+            let count = ros1.topics().get(&c.topic).map_or(0, |t| t.message_count);
+            println!(
+                "  {} ({}) {count} messages {}",
+                c.topic, c.message_type, support
+            );
         }
         return Ok(());
     }
@@ -237,38 +248,52 @@ fn convert_ros1_to_ros2(args: &Args) -> Result<()> {
         conn_map.insert(c.id, w_conn);
     }
 
-    // Single I/O read pass
-    let raw = ros1
-        .raw_messages_filtered(Some(&supported), None, None)
-        .map_err(|e| format!("Failed to read ROS1 messages: {e}"))?;
-
-    if args.verbose {
-        println!("Read {} messages in {:?}", raw.len(), t0.elapsed());
+    // Read in time windows ([start, stop) each, so none is read twice):
+    // memory holds one window, not the whole bag.
+    if !(args.window_seconds.is_finite() && args.window_seconds > 0.0) {
+        return Err(format!("--window-seconds must be > 0, got {}", args.window_seconds).into());
     }
+    let window_ns = (args.window_seconds * 1e9) as u64;
+    let (first_ns, last_ns) = (ros1.start_time(), ros1.end_time());
 
     let t1 = std::time::Instant::now();
     let mut batch: Vec<(Connection, u64, Vec<u8>)> = Vec::with_capacity(500);
     let mut converted = 0u64;
     let mut skipped = 0u64;
 
-    for msg in raw {
-        let convert = match ros1_to_cdr_fn(&msg.connection.message_type) {
-            Some(f) => f,
-            None => continue,
-        };
-        match convert(&msg.raw_data) {
-            Some(cdr) => {
-                let w_conn = conn_map[&msg.connection.id].clone();
-                batch.push((w_conn, msg.timestamp, cdr));
-                converted += 1;
-                if batch.len() >= 500 {
-                    ros2.write_raw_messages_batch(&batch)
-                        .map_err(|e| format!("Batch write failed: {e}"))?;
-                    batch.clear();
+    let mut window_start = first_ns;
+    while window_start <= last_ns {
+        let window_stop = window_start.saturating_add(window_ns.max(1));
+        let raw = ros1
+            .raw_messages_filtered(Some(&supported), Some(window_start), Some(window_stop))
+            .map_err(|e| format!("Failed to read ROS1 messages: {e}"))?;
+        for msg in raw {
+            let convert = match ros1_to_cdr_fn(&msg.connection.message_type) {
+                Some(f) => f,
+                None => continue,
+            };
+            match convert(&msg.raw_data) {
+                Some(cdr) => {
+                    let w_conn = conn_map[&msg.connection.id].clone();
+                    batch.push((w_conn, msg.timestamp, cdr));
+                    converted += 1;
+                    if batch.len() >= 500 {
+                        ros2.write_raw_messages_batch(&batch)
+                            .map_err(|e| format!("Batch write failed: {e}"))?;
+                        batch.clear();
+                    }
                 }
+                None => skipped += 1,
             }
-            None => skipped += 1,
         }
+        if args.verbose {
+            println!(
+                "  {:.0} / {:.0} s, {converted} messages",
+                (window_stop.min(last_ns) - first_ns) as f64 * 1e-9,
+                (last_ns - first_ns) as f64 * 1e-9
+            );
+        }
+        window_start = window_stop;
     }
     if !batch.is_empty() {
         ros2.write_raw_messages_batch(&batch)
@@ -675,6 +700,53 @@ fn read_header_ros1(d: &mut CdrDeserializer<'_>) -> Option<ros1_msg::Header> {
     })
 }
 
+fn conv_point_cloud2_ros1_cdr(data: &[u8]) -> Option<Vec<u8>> {
+    let mut d = Ros1Deserializer::new(data);
+    let cloud = ros1_msg::PointCloud2::from_ros1(&mut d).ok()?;
+    let mut s = CdrSerializer::new();
+    write_header_cdr(&mut s, &cloud.header);
+    s.write_u32(cloud.height);
+    s.write_u32(cloud.width);
+    s.write_u32(cloud.fields.len() as u32);
+    for field in &cloud.fields {
+        s.write_string(&field.name);
+        s.write_u32(field.offset);
+        s.write_u8(field.datatype);
+        s.write_u32(field.count);
+    }
+    s.write_u8(u8::from(cloud.is_bigendian));
+    s.write_u32(cloud.point_step);
+    s.write_u32(cloud.row_step);
+    s.write_byte_sequence(&cloud.data);
+    s.write_u8(u8::from(cloud.is_dense));
+    Some(s.into_bytes())
+}
+
+fn conv_point_cloud2_cdr_ros1(data: &[u8]) -> Option<Vec<u8>> {
+    use apex_io::rosbag::messages::FromCdr;
+    let mut d = CdrDeserializer::new(data).ok()?;
+    let cloud = apex_io::rosbag::messages::PointCloud2::from_cdr(&mut d).ok()?;
+    let header = ros1_msg::Header {
+        seq: 0,
+        stamp_ns: cloud.header.stamp.sec as u64 * 1_000_000_000 + cloud.header.stamp.nanosec as u64,
+        frame_id: cloud.header.frame_id,
+    };
+    let msg = ros1_msg::PointCloud2 {
+        header,
+        height: cloud.height,
+        width: cloud.width,
+        fields: cloud.fields,
+        is_bigendian: cloud.is_bigendian,
+        point_step: cloud.point_step,
+        row_step: cloud.row_step,
+        data: cloud.data,
+        is_dense: cloud.is_dense,
+    };
+    let mut s = Ros1Serializer::new();
+    msg.to_ros1(&mut s);
+    Some(s.into_bytes())
+}
+
 fn conv_image_ros1_cdr(data: &[u8]) -> Option<Vec<u8>> {
     let mut d = Ros1Deserializer::new(data);
     let img = ros1_msg::Image::from_ros1(&mut d).ok()?;
@@ -735,4 +807,60 @@ fn conv_compressed_image_cdr_ros1(data: &[u8]) -> Option<Vec<u8>> {
     let mut s = Ros1Serializer::new();
     img.to_ros1(&mut s);
     Some(s.into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apex_io::rosbag::messages::{FromCdr, PointField};
+
+    fn cloud() -> ros1_msg::PointCloud2 {
+        let field = |name: &str, offset: u32| PointField {
+            name: name.to_string(),
+            offset,
+            datatype: 7,
+            count: 1,
+        };
+        ros1_msg::PointCloud2 {
+            header: ros1_msg::Header {
+                seq: 0,
+                stamp_ns: 1_649_764_528_163_469_000,
+                frame_id: "PandarXT-32".to_string(),
+            },
+            height: 1,
+            width: 3,
+            fields: vec![field("x", 0), field("y", 4), field("z", 8)],
+            is_bigendian: false,
+            point_step: 12,
+            row_step: 36,
+            data: (0..36u8).collect(),
+            is_dense: true,
+        }
+    }
+
+    /// A ROS1 cloud becomes a CDR cloud apex-io's ROS2 reader parses to the
+    /// same fields, and comes back byte for byte.
+    #[test]
+    fn point_clouds_convert_both_ways() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        cloud().to_ros1(&mut s);
+        let ros1 = s.into_bytes();
+        let cdr = conv_point_cloud2_ros1_cdr(&ros1).ok_or("ROS1 to CDR failed")?;
+        let mut d = CdrDeserializer::new(&cdr)?;
+        let parsed = apex_io::rosbag::messages::PointCloud2::from_cdr(&mut d)?;
+        let original = cloud();
+        assert_eq!(parsed.width, original.width);
+        assert_eq!(parsed.fields, original.fields);
+        assert_eq!(parsed.data, original.data);
+        assert_eq!(parsed.header.frame_id, original.header.frame_id);
+        assert_eq!(
+            parsed.header.stamp.sec as u64 * 1_000_000_000 + parsed.header.stamp.nanosec as u64,
+            original.header.stamp_ns
+        );
+        let back = conv_point_cloud2_cdr_ros1(&cdr).ok_or("CDR to ROS1 failed")?;
+        assert_eq!(back, ros1);
+        assert!(ros1_to_cdr_fn("sensor_msgs/PointCloud2").is_some());
+        assert!(cdr_to_ros1_fn("sensor_msgs/PointCloud2").is_some());
+        Ok(())
+    }
 }
