@@ -19,7 +19,6 @@ use std::path::Path;
 
 use nalgebra::Vector3;
 
-
 use super::error::{Result, TrajectoryError};
 use super::types::{NANOS_PER_SEC, NANOS_PER_SECOND};
 use super::{Trajectory, TrajectoryLoader, TrajectoryPose, parse_field, read_file, write_file};
