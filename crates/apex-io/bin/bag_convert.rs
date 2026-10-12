@@ -83,6 +83,7 @@ fn ros1_to_cdr_fn(ros1_type: &str) -> Option<ConvertFn> {
         "sensor_msgs/Image" => Some(conv_image_ros1_cdr),
         "sensor_msgs/CompressedImage" => Some(conv_compressed_image_ros1_cdr),
         "sensor_msgs/PointCloud2" => Some(conv_point_cloud2_ros1_cdr),
+        "tf2_msgs/TFMessage" => Some(conv_tf_message_ros1_cdr),
         _ => None,
     }
 }
@@ -99,6 +100,7 @@ fn cdr_to_ros1_fn(ros1_type: &str) -> Option<ConvertFn> {
         "sensor_msgs/Image" => Some(conv_image_cdr_ros1),
         "sensor_msgs/CompressedImage" => Some(conv_compressed_image_cdr_ros1),
         "sensor_msgs/PointCloud2" => Some(conv_point_cloud2_cdr_ros1),
+        "tf2_msgs/TFMessage" => Some(conv_tf_message_cdr_ros1),
         _ => None,
     }
 }
@@ -700,6 +702,61 @@ fn read_header_ros1(d: &mut CdrDeserializer<'_>) -> Option<ros1_msg::Header> {
     })
 }
 
+/// `tf2_msgs/TFMessage`: a sequence of `geometry_msgs/TransformStamped`.
+fn conv_tf_message_ros1_cdr(data: &[u8]) -> Option<Vec<u8>> {
+    let mut d = Ros1Deserializer::new(data);
+    let transforms = d
+        .read_seq(|d| ros1_msg::TransformStamped::from_ros1(d))
+        .ok()?;
+    let mut s = CdrSerializer::new();
+    s.write_u32(transforms.len() as u32);
+    for t in &transforms {
+        write_header_cdr(&mut s, &t.header);
+        s.write_string(&t.child_frame_id);
+        let (v, q) = (&t.transform.translation, &t.transform.rotation);
+        for value in [v.x, v.y, v.z, q.x, q.y, q.z, q.w] {
+            s.write_f64(value);
+        }
+    }
+    Some(s.into_bytes())
+}
+
+fn conv_tf_message_cdr_ros1(data: &[u8]) -> Option<Vec<u8>> {
+    use apex_io::rosbag::messages::FromCdr;
+    let mut d = CdrDeserializer::new(data).ok()?;
+    let transforms = d
+        .read_sequence(|d| apex_io::rosbag::messages::TransformStamped::from_cdr(d))
+        .ok()?;
+    let mut s = Ros1Serializer::new();
+    s.write_u32(transforms.len() as u32);
+    for t in transforms {
+        let (v, q) = (t.transform.translation, t.transform.rotation);
+        ros1_msg::TransformStamped {
+            header: ros1_msg::Header {
+                seq: 0,
+                stamp_ns: t.header.stamp.sec as u64 * 1_000_000_000 + t.header.stamp.nanosec as u64,
+                frame_id: t.header.frame_id,
+            },
+            child_frame_id: t.child_frame_id,
+            transform: ros1_msg::Transform {
+                translation: ros1_msg::Vector3 {
+                    x: v.x,
+                    y: v.y,
+                    z: v.z,
+                },
+                rotation: ros1_msg::Quaternion {
+                    x: q.x,
+                    y: q.y,
+                    z: q.z,
+                    w: q.w,
+                },
+            },
+        }
+        .to_ros1(&mut s);
+    }
+    Some(s.into_bytes())
+}
+
 fn conv_point_cloud2_ros1_cdr(data: &[u8]) -> Option<Vec<u8>> {
     let mut d = Ros1Deserializer::new(data);
     let cloud = ros1_msg::PointCloud2::from_ros1(&mut d).ok()?;
@@ -836,6 +893,54 @@ mod tests {
             data: (0..36u8).collect(),
             is_dense: true,
         }
+    }
+
+    /// A ROS1 `TFMessage` becomes a CDR one apex-io parses to the same
+    /// transforms, and comes back byte for byte.
+    #[test]
+    fn tf_messages_convert_both_ways() -> Result<()> {
+        let transform = |child: &str, x: f64| ros1_msg::TransformStamped {
+            header: ros1_msg::Header {
+                seq: 0,
+                stamp_ns: 1_674_207_747_863_851_000,
+                frame_id: "imu_sensor_frame".to_string(),
+            },
+            child_frame_id: child.to_string(),
+            transform: ros1_msg::Transform {
+                translation: ros1_msg::Vector3 {
+                    x,
+                    y: -0.5,
+                    z: 0.25,
+                },
+                rotation: ros1_msg::Quaternion {
+                    x: 0.0,
+                    y: 0.0,
+                    z: std::f64::consts::FRAC_1_SQRT_2,
+                    w: std::f64::consts::FRAC_1_SQRT_2,
+                },
+            },
+        };
+        let transforms = [transform("cam0", 0.1), transform("pandar", -0.001)];
+        let mut s = Ros1Serializer::new();
+        s.write_u32(transforms.len() as u32);
+        for t in &transforms {
+            t.to_ros1(&mut s);
+        }
+        let ros1 = s.into_bytes();
+        let cdr = conv_tf_message_ros1_cdr(&ros1).ok_or("ROS1 to CDR failed")?;
+        let mut d = CdrDeserializer::new(&cdr)?;
+        let parsed =
+            d.read_sequence(|d| apex_io::rosbag::messages::TransformStamped::from_cdr(d))?;
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].child_frame_id, "pandar");
+        assert_eq!(parsed[1].transform.translation.x, -0.001);
+        assert_eq!(
+            parsed[0].transform.rotation.w,
+            std::f64::consts::FRAC_1_SQRT_2
+        );
+        let back = conv_tf_message_cdr_ros1(&cdr).ok_or("CDR to ROS1 failed")?;
+        assert_eq!(back, ros1);
+        Ok(())
     }
 
     /// A ROS1 cloud becomes a CDR cloud apex-io's ROS2 reader parses to the
