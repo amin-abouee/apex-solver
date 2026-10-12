@@ -9,7 +9,6 @@ use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage};
 use mcap::MessageStream;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// MCAP storage reader implementation
@@ -332,21 +331,28 @@ impl StorageReader for McapStorageReader {
     }
 }
 
-/// MCAP storage writer (minimal placeholder — MCAP reading is fully supported)
+/// MCAP storage writer: ROS 2 messages (`cdr`) on one channel per topic,
+/// each with its `ros2msg` schema, in chunks, with the summary section `mcap`
+/// readers index by. Under [`CompressionMode::Message`] each chunk is
+/// zstd-compressed — MCAP's per-message compression; under `File` the bag
+/// writer compresses the finished file itself, so the chunks stay plain.
+///
+/// [`CompressionMode::Message`]: crate::rosbag::types::CompressionMode::Message
+///
+/// Streams: memory holds the open chunk, not the file.
 pub struct McapWriter {
     mcap_path: PathBuf,
-    writer: Option<File>,
-    _compression_mode: crate::rosbag::types::CompressionMode,
-    is_open: bool,
-    schemas: Vec<Schema>,
-    channels: Vec<Channel>,
-    next_schema_id: u64,
-    next_channel_id: u64,
-    channel_id_map: HashMap<String, u64>,
+    compression_mode: crate::rosbag::types::CompressionMode,
+    writer: Option<mcap::Writer<'static, std::io::BufWriter<File>>>,
+    /// Schemas added, by message type.
+    schemas: HashMap<String, std::sync::Arc<mcap::Schema<'static>>>,
+    /// Channel ID and next sequence number, by topic.
+    channels: HashMap<String, (u16, u32)>,
 }
 
 impl McapWriter {
-    /// Create a new MCAP writer
+    /// Create a new MCAP writer for the bag directory `path`; the file is
+    /// `<path>/<name>.mcap`.
     pub fn new(
         path: &Path,
         compression_mode: crate::rosbag::types::CompressionMode,
@@ -359,72 +365,62 @@ impl McapWriter {
 
         Ok(Self {
             mcap_path,
+            compression_mode,
             writer: None,
-            _compression_mode: compression_mode,
-            is_open: false,
-            schemas: Vec::new(),
-            channels: Vec::new(),
-            next_schema_id: 1,
-            next_channel_id: 1,
-            channel_id_map: HashMap::new(),
+            schemas: HashMap::new(),
+            channels: HashMap::new(),
         })
     }
+}
 
-    fn write_header(&mut self) -> Result<()> {
-        if let Some(writer) = &mut self.writer {
-            writer.write_all(b"\x89MCAP0\r\n")?;
-        }
-        Ok(())
-    }
+fn mcap_error(error: mcap::McapError) -> BagError {
+    BagError::writer(format!("mcap: {error}"))
 }
 
 impl crate::rosbag::storage::StorageWriter for McapWriter {
     fn open(&mut self) -> Result<()> {
-        if self.is_open {
+        if self.writer.is_some() {
             return Err(BagError::BagAlreadyOpen);
         }
-
-        let file = File::create(&self.mcap_path)?;
-        self.writer = Some(file);
-        self.write_header()?;
-        self.is_open = true;
+        let file = std::io::BufWriter::new(File::create(&self.mcap_path)?);
+        let compression = match self.compression_mode {
+            crate::rosbag::types::CompressionMode::Message => Some(mcap::Compression::Zstd),
+            _ => None,
+        };
+        let writer = mcap::WriteOptions::new()
+            .compression(compression)
+            .profile("ros2")
+            .create(file)
+            .map_err(mcap_error)?;
+        self.writer = Some(writer);
         Ok(())
     }
 
     fn close(&mut self, _version: u32, _metadata: &str) -> Result<()> {
-        if !self.is_open {
+        let Some(mut writer) = self.writer.take() else {
             return Ok(());
-        }
-
-        if let Some(writer) = &mut self.writer {
-            writer.flush()?;
-        }
-
-        self.writer = None;
-        self.is_open = false;
+        };
+        writer.finish().map_err(mcap_error)?;
         self.schemas.clear();
         self.channels.clear();
-        self.channel_id_map.clear();
-        self.next_schema_id = 1;
-        self.next_channel_id = 1;
-
         Ok(())
     }
 
     fn add_msgtype(&mut self, connection: &Connection) -> Result<()> {
-        if !self.is_open {
+        if self.writer.is_none() {
             return Err(BagError::BagNotOpen);
         }
-
-        let schema = Schema {
-            id: self.next_schema_id,
-            name: connection.message_type.clone(),
-            _encoding: "ros2msg".to_string(),
-            _data: connection.message_definition.data.as_bytes().to_vec(),
-        };
-
-        self.schemas.push(schema);
-        self.next_schema_id += 1;
+        self.schemas
+            .entry(connection.message_type.clone())
+            .or_insert_with(|| {
+                std::sync::Arc::new(mcap::Schema {
+                    name: connection.message_type.clone(),
+                    encoding: "ros2msg".to_string(),
+                    data: std::borrow::Cow::Owned(
+                        connection.message_definition.data.as_bytes().to_vec(),
+                    ),
+                })
+            });
         Ok(())
     }
 
@@ -433,51 +429,42 @@ impl crate::rosbag::storage::StorageWriter for McapWriter {
         connection: &Connection,
         _offered_qos_profiles: &str,
     ) -> Result<()> {
-        if !self.is_open {
+        let Some(writer) = self.writer.as_mut() else {
             return Err(BagError::BagNotOpen);
-        }
-
-        let schema_id = self
-            .schemas
-            .iter()
-            .find(|s| s.name == connection.message_type)
-            .map(|s| s.id)
-            .unwrap_or(0);
-
-        let channel = Channel {
-            _id: self.next_channel_id,
-            _schema_id: schema_id,
-            _topic: connection.topic.clone(),
-            _message_encoding: connection.message_type.clone(),
-            _metadata: HashMap::new(),
         };
-
-        self.channel_id_map
-            .insert(connection.topic.clone(), self.next_channel_id);
-        self.channels.push(channel);
-        self.next_channel_id += 1;
+        let channel = mcap::Channel {
+            topic: connection.topic.clone(),
+            schema: self.schemas.get(&connection.message_type).cloned(),
+            message_encoding: "cdr".to_string(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        let id = writer.add_channel(&channel).map_err(mcap_error)?;
+        self.channels.insert(connection.topic.clone(), (id, 0));
         Ok(())
     }
 
-    fn write(&mut self, connection: &Connection, _timestamp: u64, _data: &[u8]) -> Result<()> {
-        if !self.is_open {
+    fn write(&mut self, connection: &Connection, timestamp: u64, data: &[u8]) -> Result<()> {
+        let Some(writer) = self.writer.as_mut() else {
             return Err(BagError::BagNotOpen);
-        }
-
-        let _channel_id = self
-            .channel_id_map
-            .get(&connection.topic)
+        };
+        let (channel_id, sequence) = self
+            .channels
+            .get_mut(&connection.topic)
             .ok_or_else(|| BagError::connection_not_found(&connection.topic))?;
-
-        if self.writer.is_none() {
-            return Err(BagError::BagNotOpen);
-        }
-
-        Ok(())
+        let header = mcap::records::MessageHeader {
+            channel_id: *channel_id,
+            sequence: *sequence,
+            log_time: timestamp,
+            publish_time: timestamp,
+        };
+        *sequence = sequence.wrapping_add(1);
+        writer
+            .write_to_known_channel(&header, data)
+            .map_err(mcap_error)
     }
 
     fn is_open(&self) -> bool {
-        self.is_open
+        self.writer.is_some()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -489,10 +476,10 @@ impl crate::rosbag::storage::StorageWriter for McapWriter {
 /// `geometry_msgs/TransformStamped` — falling back to the encoding for a
 /// channel recorded without a schema.
 fn channel_type(channel: &mcap::Channel<'_>) -> String {
-    channel
-        .schema
-        .as_ref()
-        .map_or_else(|| channel.message_encoding.clone(), |schema| schema.name.clone())
+    channel.schema.as_ref().map_or_else(
+        || channel.message_encoding.clone(),
+        |schema| schema.name.clone(),
+    )
 }
 
 #[cfg(test)]
@@ -700,6 +687,62 @@ mod tests {
         Ok(())
     }
 
+    /// What the writer writes, the reader reads back: every message, on its
+    /// topic, at its time, byte for byte — across several chunks, and with
+    /// or without compression.
+    #[test]
+    fn written_messages_are_read_back() -> TestResult {
+        use crate::rosbag::types::{CompressionFormat, CompressionMode, StoragePlugin};
+        use crate::rosbag::{Reader, Writer};
+
+        for compression in [CompressionMode::None, CompressionMode::Message] {
+            let dir = tempfile::tempdir()?;
+            let bag = dir.path().join("round_trip");
+            let mut writer = Writer::new(&bag, None, Some(StoragePlugin::Mcap))?;
+            writer.set_compression(compression, CompressionFormat::None)?;
+            writer.open()?;
+            let imu = writer.add_connection(
+                "/imu".to_string(),
+                "sensor_msgs/msg/Imu".to_string(),
+                None,
+                None,
+                None,
+                None,
+            )?;
+            let cloud = writer.add_connection(
+                "/cloud".to_string(),
+                "sensor_msgs/msg/PointCloud2".to_string(),
+                None,
+                None,
+                None,
+                None,
+            )?;
+            let mut written = Vec::new();
+            for k in 0..400u64 {
+                let (connection, size) = match k % 4 {
+                    0 => (&cloud, 4096),
+                    _ => (&imu, 64),
+                };
+                let data: Vec<u8> = (0..size).map(|i| ((i as u64 + k) % 251) as u8).collect();
+                writer.write(connection, 1_000 + k, &data)?;
+                written.push((connection.topic.clone(), 1_000 + k, data));
+            }
+            writer.close()?;
+
+            let mut reader = Reader::new(&bag)?;
+            reader.open()?;
+            let read: Vec<(String, u64, Vec<u8>)> = reader
+                .messages()?
+                .map(|m| m.map(|m| (m.topic, m.timestamp, m.data)))
+                .collect::<std::result::Result<_, _>>()?;
+            assert_eq!(read.len(), written.len(), "{compression:?}");
+            let mut read = read;
+            read.sort_by_key(|(_, t, _)| *t);
+            assert_eq!(read, written, "{compression:?}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn mcap_reader_is_open_initially_false() -> TestResult {
         let path = std::path::PathBuf::from("test.mcap");
@@ -707,21 +750,4 @@ mod tests {
         assert!(!reader.is_open());
         Ok(())
     }
-}
-
-#[derive(Debug, Clone)]
-struct Schema {
-    id: u64,
-    name: String,
-    _encoding: String,
-    _data: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-struct Channel {
-    _id: u64,
-    _schema_id: u64,
-    _topic: String,
-    _message_encoding: String,
-    _metadata: HashMap<String, String>,
 }
