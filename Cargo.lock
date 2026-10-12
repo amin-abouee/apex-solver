@@ -301,7 +301,7 @@ dependencies = [
  "hex",
  "image",
  "lz4_flex",
- "mcap 0.8.0",
+ "mcap",
  "nalgebra",
  "rayon",
  "rerun",
@@ -318,7 +318,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -546,7 +546,7 @@ dependencies = [
  "arrow-schema",
  "flatbuffers",
  "lz4_flex",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -5875,24 +5875,6 @@ dependencies = [
 
 [[package]]
 name = "mcap"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95e307e73a795fca55cba3be1d20447cb3029626a084ddf3cf90462c6065ff83"
-dependencies = [
- "binrw",
- "byteorder",
- "crc32fast",
- "enumset",
- "log",
- "lz4",
- "num_cpus",
- "paste",
- "thiserror 1.0.69",
- "zstd 0.11.2+zstd.1.5.2",
-]
-
-[[package]]
-name = "mcap"
 version = "0.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a3ca583fed649ed7cd8c976b59422996472c6b08067308443e0b60c56e0a4ca"
@@ -5908,7 +5890,7 @@ dependencies = [
  "paste",
  "static_assertions",
  "thiserror 1.0.69",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -8461,7 +8443,7 @@ dependencies = [
  "image",
  "indexmap",
  "itertools 0.14.0",
- "mcap 0.23.4",
+ "mcap",
  "memmap2 0.9.11",
  "notify",
  "parking_lot",
@@ -8864,7 +8846,7 @@ dependencies = [
  "arrow",
  "byteorder",
  "cdr-encoding",
- "mcap 0.23.4",
+ "mcap",
  "prost-reflect",
  "re_chunk",
  "re_log",
@@ -13597,30 +13579,11 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
-version = "0.11.2+zstd.1.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20cc960326ece64f010d2d2107537f26dc589a6573a316bd5b1dba685fa5fde4"
-dependencies = [
- "zstd-safe 5.0.2+zstd.1.5.2",
-]
-
-[[package]]
-name = "zstd"
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
 dependencies = [
- "zstd-safe 7.2.4",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "5.0.2+zstd.1.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d2a5585e04f9eea4b2a3d1eca508c4dee9592a89ef6f450c11719da0726f4db"
-dependencies = [
- "libc",
- "zstd-sys",
+ "zstd-safe",
 ]
 
 [[package]]
