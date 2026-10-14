@@ -127,7 +127,8 @@ fn gravity_frame_imu_factor_recovers_a_tilted_world() {
                 )
             })
             .collect();
-        let preint = ImuPreintegration::new(samples, imu_params(), t0, t1, &SpeedAndBias::zeros());
+        let preint =
+            ImuPreintegration::new(samples.into(), imu_params(), t0, t1, &SpeedAndBias::zeros());
         problem.add_residual_block(
             &[keys[k].0, keys[k].1, keys[k + 1].0, keys[k + 1].1, rotation],
             Box::new(se23::GravityFrameImuFactor::new(
@@ -320,7 +321,7 @@ fn shared_bias_imu_form_matches_the_combined_form() {
                 sb_ref[3 + i] = bias_truth[i];
             }
             let preint = ImuPreintegration::new(
-                segments[k].clone(),
+                segments[k].clone().into(),
                 params.clone(),
                 key_times[k],
                 key_times[k + 1],
@@ -479,7 +480,7 @@ fn run_sgal3_interval(combined: bool) {
         sb_ref[3 + i] = bias_truth[i];
     }
     let preint = ImuPreintegration::new(
-        segments[0].clone(),
+        segments[0].clone().into(),
         params.clone(),
         key_times[0],
         key_times[1],
@@ -645,7 +646,7 @@ fn gps_async_factor_uses_a_fix_between_keyframes() {
         sb_ref[6 + i] = common::BA_TRUE[i];
     }
     let preint = ImuPreintegration::new(
-        partial.clone(),
+        partial.clone().into(),
         params.clone(),
         key_times[0],
         t_gps,

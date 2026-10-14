@@ -175,7 +175,7 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
             sb
         };
         let preint = ImuPreintegration::new(
-            samples,
+            samples.into(),
             imu_params(),
             key_times[k],
             key_times[k + 1],
