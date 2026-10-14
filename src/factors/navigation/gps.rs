@@ -676,7 +676,7 @@ mod tests {
         sb[1] = v_world.y;
         sb[2] = v_world.z;
 
-        ImuPreintegration::new(measurements, params, 0.0, dt, &sb)
+        ImuPreintegration::new(measurements.into(), params, 0.0, dt, &sb)
     }
 
     fn perturb_sb(sb: &[f64], idx: usize, eps: f64) -> DVector<f64> {

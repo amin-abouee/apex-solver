@@ -53,7 +53,13 @@ fn scenario() -> (ImuPreintegration, SE3, SpeedAndBias, f64) {
         .collect();
 
     let sb_zero = SpeedAndBias::zeros();
-    let preint = ImuPreintegration::new(measurements.clone(), params.clone(), 0.0, t1, &sb_zero);
+    let preint = ImuPreintegration::new(
+        measurements.clone().into(),
+        params.clone(),
+        0.0,
+        t1,
+        &sb_zero,
+    );
 
     let mut pose_j = SE3::identity();
     let mut sb_j = SpeedAndBias::zeros();

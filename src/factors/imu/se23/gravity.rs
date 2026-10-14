@@ -166,7 +166,8 @@ mod tests {
                 )
             })
             .collect();
-        let preint = ImuPreintegration::new(samples, params, 0.0, 1.0, &SpeedAndBias::zeros());
+        let preint =
+            ImuPreintegration::new(samples.into(), params, 0.0, 1.0, &SpeedAndBias::zeros());
         let state_i = SE23::new(
             Vector3::zeros(),
             Vector3::zeros(),

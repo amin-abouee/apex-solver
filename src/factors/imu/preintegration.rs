@@ -9,6 +9,8 @@
 //! `P = σ_g²·P₀ + σ_a²·P₁ + σ_gw²·P₂ + σ_aw²·P₃`,
 //! matching the `dPdsigma_` decomposition of OKVIS2-X exactly.
 
+use std::sync::Arc;
+
 use apex_manifolds::Tangent;
 use apex_manifolds::se23::SE23;
 use apex_manifolds::sgal3::SGal3;
@@ -25,7 +27,7 @@ use crate::factors::common::math::{sinc, skew, symm_sqrt_inverse};
 pub struct ImuPreintegration {
     // Configuration
     imu_params: ImuParameters,
-    measurements: Vec<ImuMeasurement>,
+    measurements: Arc<[ImuMeasurement]>,
     t0: f64,
     t1: f64,
 
@@ -80,13 +82,18 @@ impl ImuPreintegration {
     ///
     /// [`PreintegrationError::NonPositiveInterval`] or
     /// [`PreintegrationError::EmptyIntegration`].
+    ///
+    /// The samples are stored behind a shared `Arc<[ImuMeasurement]>`: a
+    /// caller that already holds the samples in a shared buffer can pass it
+    /// by refcount instead of cloning the collection.
     pub fn try_new(
-        measurements: Vec<ImuMeasurement>,
+        measurements: impl Into<Arc<[ImuMeasurement]>>,
         imu_params: ImuParameters,
         t0: f64,
         t1: f64,
         speed_and_biases: &SpeedAndBias,
     ) -> Result<Self, PreintegrationError> {
+        let measurements: Arc<[ImuMeasurement]> = measurements.into();
         if !t0.is_finite() || !t1.is_finite() || t1 <= t0 {
             return Err(PreintegrationError::NonPositiveInterval { t0, t1 });
         }
@@ -110,8 +117,11 @@ impl ImuPreintegration {
         ))
     }
 
+    /// Create and integrate, integrating over `[t0, t1]` without the span
+    /// validation of [`Self::try_new`].  Holds the samples behind a shared
+    /// `Arc<[ImuMeasurement]>`.
     pub fn new(
-        measurements: Vec<ImuMeasurement>,
+        measurements: Arc<[ImuMeasurement]>,
         imu_params: ImuParameters,
         t0: f64,
         t1: f64,
@@ -165,10 +175,15 @@ impl ImuPreintegration {
         speed_and_biases: &SpeedAndBias,
     ) -> usize {
         let start_idx = self.measurements.len();
-        for m in new_measurements {
-            if m.timestamp > self.t1 + 1e-12 {
-                self.measurements.push(m.clone());
-            }
+        let appended: Vec<ImuMeasurement> = new_measurements
+            .iter()
+            .filter(|m| m.timestamp > self.t1 + 1e-12)
+            .cloned()
+            .collect();
+        if !appended.is_empty() {
+            let mut updated = self.measurements.to_vec();
+            updated.extend(appended);
+            self.measurements = updated.into();
         }
         self.t1 = t1_new;
         if start_idx > 0 {
@@ -854,7 +869,8 @@ mod tests {
         let dt = 0.005_f64;
         let n = 200_usize;
         let measurements: Vec<_> = (0..n).map(|i| make_meas(i as f64 * dt, gyr, acc)).collect();
-        let preint = ImuPreintegration::new(measurements, params, 0.0, (n - 1) as f64 * dt, &sb);
+        let preint =
+            ImuPreintegration::new(measurements.into(), params, 0.0, (n - 1) as f64 * dt, &sb);
 
         assert!(
             preint.delta_q().angle() < 1e-10,
@@ -874,7 +890,7 @@ mod tests {
         let n = 200_usize;
         let t1 = (n - 1) as f64 * dt;
         let measurements: Vec<_> = (0..n).map(|i| make_meas(i as f64 * dt, gyr, acc)).collect();
-        let preint = ImuPreintegration::new(measurements, params, 0.0, t1, &sb);
+        let preint = ImuPreintegration::new(measurements.into(), params, 0.0, t1, &sb);
 
         let angle = preint.delta_q().angle();
         assert!(
@@ -914,7 +930,7 @@ mod tests {
         let n = 100_usize;
         let t1 = (n - 1) as f64 * dt;
         let measurements: Vec<_> = (0..n).map(|i| make_meas(i as f64 * dt, gyr, acc)).collect();
-        let preint = ImuPreintegration::new(measurements, params, 0.0, t1, &sb);
+        let preint = ImuPreintegration::new(measurements.into(), params, 0.0, t1, &sb);
 
         let se23 = preint.delta_se23();
         assert!(
@@ -942,10 +958,11 @@ mod tests {
         let t_mid = (n / 2) as f64 * dt;
         let measurements: Vec<_> = (0..n).map(|i| make_meas(i as f64 * dt, gyr, acc)).collect();
 
-        let one_shot = ImuPreintegration::new(measurements.clone(), params.clone(), 0.0, t1, &sb);
+        let one_shot =
+            ImuPreintegration::new(measurements.clone().into(), params.clone(), 0.0, t1, &sb);
 
         let first_half: Vec<_> = measurements.iter().take(n / 2 + 1).cloned().collect();
-        let mut split = ImuPreintegration::new(first_half, params.clone(), 0.0, t_mid, &sb);
+        let mut split = ImuPreintegration::new(first_half.into(), params.clone(), 0.0, t_mid, &sb);
         let second_half: Vec<_> = measurements.iter().skip(n / 2).cloned().collect();
         split.append(&second_half, t1, &sb);
 
@@ -1105,7 +1122,13 @@ mod tests {
     }
 
     fn integrate(params: ImuParameters) -> ImuPreintegration {
-        ImuPreintegration::new(rotating_samples(), params, 0.0, 0.1, &SpeedAndBias::zeros())
+        ImuPreintegration::new(
+            rotating_samples().into(),
+            params,
+            0.0,
+            0.1,
+            &SpeedAndBias::zeros(),
+        )
     }
 
     /// `t_bs` and `s_a` were declared, documented and read by nothing: any
