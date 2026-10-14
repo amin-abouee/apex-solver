@@ -13,6 +13,7 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
+use crate::core::{CoreError, CoreResult};
 use crate::factors::Factor;
 
 /// Attitude constraint from a measured reference direction (gravity via
@@ -42,14 +43,13 @@ pub struct AttitudeFactor {
 impl AttitudeFactor {
     /// Create the factor; both directions are normalized, and near-zero
     /// directions are rejected.
-    pub fn new(
-        direction_world: Vector3<f64>,
-        direction_body: Vector3<f64>,
-    ) -> Result<Self, String> {
+    pub fn new(direction_world: Vector3<f64>, direction_body: Vector3<f64>) -> CoreResult<Self> {
         let nw = direction_world.norm();
         let nb = direction_body.norm();
         if !(nw.is_finite() && nw > 1e-12 && nb.is_finite() && nb > 1e-12) {
-            return Err("AttitudeFactor requires non-zero, finite directions".into());
+            return Err(CoreError::InvalidInput(
+                "AttitudeFactor requires non-zero, finite directions".into(),
+            ));
         }
         Ok(Self {
             direction_world: direction_world / nw,

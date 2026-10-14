@@ -20,6 +20,7 @@ use rayon::prelude::*;
 use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
+use crate::core::{CoreError, CoreResult};
 use crate::factors::common::group_point::acts_on_points;
 use crate::factors::common::validate::expect_manifolds;
 use crate::factors::{Factor, NormalBlocks};
@@ -58,24 +59,27 @@ impl<G: LieGroup> LidarMapPlanesFactor<G> {
     ///
     /// A group without a 3-D point action, no match, a non-finite point or
     /// a sigma that is not finite and positive.
-    pub fn new(matches: impl Into<Arc<[PlaneMatch]>>) -> Result<Self, String> {
+    pub fn new(matches: impl Into<Arc<[PlaneMatch]>>) -> CoreResult<Self> {
         let matches = matches.into();
         let name = "LidarMapPlanesFactor";
         if !acts_on_points::<G>() || G::TangentVector::DIM > MAX_DOF {
-            return Err(format!("{name}: {} does not act on 3-D points", G::NAME));
+            return Err(CoreError::InvalidInput(format!(
+                "{name}: {} does not act on 3-D points",
+                G::NAME
+            )));
         }
         if matches.is_empty() {
-            return Err(format!("{name}: no match"));
+            return Err(CoreError::InvalidInput(format!("{name}: no match")));
         }
         for m in matches.iter() {
             if !m.point.iter().all(|v| v.is_finite()) {
-                return Err(format!("{name}: non-finite point"));
+                return Err(CoreError::InvalidInput(format!("{name}: non-finite point")));
             }
             if !(m.sigma.is_finite() && m.sigma > 0.0) {
-                return Err(format!(
+                return Err(CoreError::InvalidInput(format!(
                     "{name}: sigma must be finite and positive, got {}",
                     m.sigma
-                ));
+                )));
             }
         }
         Ok(Self {
@@ -210,7 +214,7 @@ mod tests {
     use faer::Mat;
     use nalgebra::{DMatrix, DVector, UnitQuaternion};
 
-    fn matches() -> Result<Vec<PlaneMatch>, String> {
+    fn matches() -> Result<Vec<PlaneMatch>, CoreError> {
         (0..6)
             .map(|k| {
                 let f = f64::from(k);
@@ -226,7 +230,7 @@ mod tests {
     /// Over several parallel chunks, the normal equations equal the
     /// Jacobian's `JᵀJ`, `Jᵀr` and `‖r‖²`; and a shared `Arc` is not copied.
     #[test]
-    fn normal_equations_match_the_jacobian() -> Result<(), String> {
+    fn normal_equations_match_the_jacobian() -> Result<(), CoreError> {
         let base = matches()?;
         let many: Arc<[PlaneMatch]> = (0..3 * CHUNK + 7)
             .map(|k| {
@@ -249,7 +253,7 @@ mod tests {
                 &params,
                 Some(&mut NormalBlocks::new(&mut hessian, &mut gradient, &[0])),
             )
-            .ok_or("no normal equations")?;
+            .ok_or_else(|| CoreError::InvalidInput("no normal equations".to_string()))?;
         assert_eq!(factor.accumulate_normal(&params, None), Some(cost));
         let (rows, cols) = factor.jacobian_shape();
         let mut r = vec![0.0; rows];
@@ -265,7 +269,7 @@ mod tests {
 
     /// Residuals match the point-by-point formula, and the Jacobian finite
     /// differences, on every group.
-    fn check<G: LieGroup + Send + Sync + 'static>(state: G) -> Result<(), String> {
+    fn check<G: LieGroup + Send + Sync + 'static>(state: G) -> Result<(), CoreError> {
         let ms = matches()?;
         let factor = LidarMapPlanesFactor::<G>::new(ms.clone())?;
         let (rows, cols) = factor.jacobian_shape();
@@ -306,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn batched_matches_agree_with_single_points_on_every_group() -> Result<(), String> {
+    fn batched_matches_agree_with_single_points_on_every_group() -> Result<(), CoreError> {
         let q = UnitQuaternion::from_euler_angles(0.2, -0.1, 0.7);
         let t = Vector3::new(0.4, -1.2, 0.3);
         check(SE3::new(t, q))?;
@@ -315,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn construction_rejects_bad_input() -> Result<(), String> {
+    fn construction_rejects_bad_input() -> Result<(), CoreError> {
         assert!(LidarMapPlanesFactor::<SE3>::new(Vec::new()).is_err());
         let mut ms = matches()?;
         ms[0].sigma = 0.0;

@@ -584,7 +584,7 @@ impl Marginal {
 
         let factor =
             MarginalPriorFactor::new(self.dims, self.sqrt_information, self.offset, local_log)
-                .map_err(MarginalizationError::Factor)?;
+                .map_err(|e| MarginalizationError::Factor(e.to_string()))?;
         Ok((self.kept, factor))
     }
 }

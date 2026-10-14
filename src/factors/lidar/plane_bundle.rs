@@ -29,6 +29,8 @@ use nalgebra::{Matrix3, SymmetricEigen, Vector3};
 use apex_manifolds::se3::SE3;
 use apex_manifolds::{LieGroup, Tangent};
 
+use crate::core::CoreError;
+use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::group_point::acts_on_points;
@@ -93,20 +95,25 @@ impl<G: LieGroup> LidarPlaneBundleFactor<G> {
         points: Vec<Vec<Vector3<f64>>>,
         fixed: Vec<Vector3<f64>>,
         sigma: f64,
-    ) -> Result<Self, String> {
+    ) -> CoreResult<Self> {
         let name = "LidarPlaneBundleFactor";
         if !acts_on_points::<G>() {
-            return Err(format!("{name}: {} does not act on 3-D points", G::NAME));
+            return Err(CoreError::InvalidInput(format!(
+                "{name}: {} does not act on 3-D points",
+                G::NAME
+            )));
         }
         if points.is_empty() || points.iter().any(Vec::is_empty) {
-            return Err(format!("{name}: every frame needs at least one point"));
+            return Err(CoreError::InvalidInput(format!(
+                "{name}: every frame needs at least one point"
+            )));
         }
         let free: usize = points.iter().map(Vec::len).sum();
         if free + fixed.len() < 3 {
-            return Err(format!(
+            return Err(CoreError::InvalidInput(format!(
                 "{name}: a plane needs three points, got {}",
                 free + fixed.len()
-            ));
+            )));
         }
         let finite = points
             .iter()
@@ -114,12 +121,12 @@ impl<G: LieGroup> LidarPlaneBundleFactor<G> {
             .chain(&fixed)
             .all(|p| p.iter().all(|v| v.is_finite()));
         if !finite {
-            return Err(format!("{name}: non-finite point"));
+            return Err(CoreError::InvalidInput(format!("{name}: non-finite point")));
         }
         if !(sigma.is_finite() && sigma > 0.0) {
-            return Err(format!(
+            return Err(CoreError::InvalidInput(format!(
                 "{name}: sigma must be finite and positive, got {sigma}"
-            ));
+            )));
         }
         Ok(Self {
             extrinsic,
@@ -272,7 +279,9 @@ mod tests {
 
     /// `Jᵀr` is the gradient of the plane-eliminated cost — checked against
     /// central differences of the cost itself, plane re-fitted each time.
-    fn check_gradient<G: LieGroup + Send + Sync + 'static>(states: Vec<G>) -> Result<(), String> {
+    fn check_gradient<G: LieGroup + Send + Sync + 'static>(
+        states: Vec<G>,
+    ) -> Result<(), CoreError> {
         const EPS: f64 = 1e-6;
         let dof = G::TangentVector::DIM;
         let points: Vec<Vec<Vector3<f64>>> = states
@@ -332,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gradient_is_exact_on_se23() -> Result<(), String> {
+    fn the_gradient_is_exact_on_se23() -> Result<(), CoreError> {
         check_gradient(vec![
             SE23::new(
                 Vector3::new(0.0, 0.0, 0.0),
@@ -353,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gradient_is_exact_on_se3_and_sim3() -> Result<(), String> {
+    fn the_gradient_is_exact_on_se3_and_sim3() -> Result<(), CoreError> {
         check_gradient(vec![
             SE3::new(
                 Vector3::zeros(),
@@ -379,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn a_consistent_plane_costs_only_its_noise() -> Result<(), String> {
+    fn a_consistent_plane_costs_only_its_noise() -> Result<(), CoreError> {
         let states = vec![
             SE3::new(Vector3::zeros(), UnitQuaternion::identity()),
             SE3::new(

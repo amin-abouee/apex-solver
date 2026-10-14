@@ -64,6 +64,7 @@ use apex_manifolds::se3::SE3;
 use apex_manifolds::se23::SE23;
 
 use crate::core::variable::ManifoldVariable;
+use crate::core::{CoreError, CoreResult};
 use crate::factors::Factor;
 use crate::factors::common::math::tangent_basis;
 use crate::factors::common::validate::expect_block_sizes;
@@ -123,14 +124,16 @@ impl InverseDepthBearingSe23Factor {
         host_bearing: Vector3<f64>,
         measured_bearing: Vector3<f64>,
         sqrt_information: SMatrix<f64, 2, 2>,
-    ) -> Result<Self, String> {
+    ) -> CoreResult<Self> {
         let host = unit(&host_bearing).ok_or_else(|| {
-            format!("InverseDepthBearingSe23Factor: host bearing {host_bearing:?} has no direction")
+            CoreError::InvalidInput(format!(
+                "InverseDepthBearingSe23Factor: host bearing {host_bearing:?} has no direction"
+            ))
         })?;
         let measured = unit(&measured_bearing).ok_or_else(|| {
-            format!(
+            CoreError::InvalidInput(format!(
                 "InverseDepthBearingSe23Factor: measured bearing {measured_bearing:?} has no direction"
-            )
+            ))
         })?;
 
         Ok(Self {
@@ -150,11 +153,11 @@ impl InverseDepthBearingSe23Factor {
         host_bearing: Vector3<f64>,
         measured_bearing: Vector3<f64>,
         sigma: f64,
-    ) -> Result<Self, String> {
+    ) -> CoreResult<Self> {
         if !sigma.is_finite() || sigma <= 0.0 {
-            return Err(format!(
+            return Err(CoreError::InvalidInput(format!(
                 "InverseDepthBearingSe23Factor: sigma must be finite and positive, got {sigma}"
-            ));
+            )));
         }
         let sqrt_information = SMatrix::<f64, 2, 2>::identity() * (1.0 / sigma);
         Self::new(host_bearing, measured_bearing, sqrt_information)
@@ -639,14 +642,17 @@ mod tests {
         else {
             panic!("expected a zero host bearing to be rejected");
         };
-        assert!(message.contains("host bearing"), "{message}");
+        assert!(message.to_string().contains("host bearing"), "{message}");
 
         let Err(message) =
             InverseDepthBearingSe23Factor::new_isotropic(Vector3::z(), Vector3::zeros(), 0.005)
         else {
             panic!("expected a zero measured bearing to be rejected");
         };
-        assert!(message.contains("measured bearing"), "{message}");
+        assert!(
+            message.to_string().contains("measured bearing"),
+            "{message}"
+        );
     }
 
     #[test]

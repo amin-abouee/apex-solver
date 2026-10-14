@@ -21,6 +21,7 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{DMatrix, DVector};
 
 use crate::core::variable::ManifoldVariable;
+use crate::core::{CoreError, CoreResult};
 use crate::factors::{Factor, NormalBlocks};
 
 /// `inner` with its Jacobian right-multiplied by a projection.
@@ -35,16 +36,17 @@ impl<F: Factor> ProjectedFactor<F> {
     ///
     /// # Errors
     ///
-    /// A direction of the wrong length or not finite and non-zero.
-    pub fn new(inner: F, directions: &[DVector<f64>]) -> Result<Self, String> {
+    /// A direction of the wrong length ([`CoreError::DimensionMismatch`]) or
+    /// not finite and non-zero ([`CoreError::InvalidInput`]).
+    pub fn new(inner: F, directions: &[DVector<f64>]) -> CoreResult<Self> {
         let n = inner.jacobian_shape().1;
         let mut basis: Vec<DVector<f64>> = Vec::new();
         for direction in directions {
             if direction.len() != n {
-                return Err(format!(
+                return Err(CoreError::DimensionMismatch(format!(
                     "ProjectedFactor: direction of length {} for {n} columns",
                     direction.len()
-                ));
+                )));
             }
             let mut v = direction.clone();
             for b in &basis {
@@ -52,7 +54,9 @@ impl<F: Factor> ProjectedFactor<F> {
             }
             let norm = v.norm();
             if !(norm.is_finite() && norm > 1e-12) {
-                return Err("ProjectedFactor: degenerate or non-finite direction".to_string());
+                return Err(CoreError::InvalidInput(
+                    "ProjectedFactor: degenerate or non-finite direction".to_string(),
+                ));
             }
             basis.push(v / norm);
         }
@@ -138,7 +142,7 @@ mod tests {
     use nalgebra::{UnitQuaternion, Vector3};
 
     /// Points on two walls `x = ±2` only: a corridor along `y`.
-    fn corridor() -> Result<LidarMapPlanesFactor<SE3>, String> {
+    fn corridor() -> Result<LidarMapPlanesFactor<SE3>, CoreError> {
         let mut matches = Vec::new();
         for k in 0..20 {
             let f = f64::from(k);
@@ -164,7 +168,7 @@ mod tests {
     /// Projecting out the corridor's axis leaves the residual, zeroes the
     /// information along the axis, and keeps it across the corridor.
     #[test]
-    fn projection_removes_only_the_degenerate_direction() -> Result<(), String> {
+    fn projection_removes_only_the_degenerate_direction() -> Result<(), CoreError> {
         let state = SE3::new(
             Vector3::new(0.1, 0.4, 0.0),
             UnitQuaternion::from_euler_angles(0.0, 0.0, 0.02),
@@ -193,7 +197,7 @@ mod tests {
 
     /// Its normal equations are the inner ones projected, `PᵀHP`.
     #[test]
-    fn projected_normal_equations_match_its_jacobian() -> Result<(), String> {
+    fn projected_normal_equations_match_its_jacobian() -> Result<(), CoreError> {
         let state = SE3::new(
             Vector3::new(0.1, 0.4, 0.0),
             UnitQuaternion::from_euler_angles(0.0, 0.0, 0.02),
@@ -212,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn construction_rejects_bad_directions() -> Result<(), String> {
+    fn construction_rejects_bad_directions() -> Result<(), CoreError> {
         assert!(ProjectedFactor::new(corridor()?, &[DVector::zeros(5)]).is_err());
         assert!(ProjectedFactor::new(corridor()?, &[DVector::zeros(6)]).is_err());
         let v = DVector::from_element(6, 1.0);

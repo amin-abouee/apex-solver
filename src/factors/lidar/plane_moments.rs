@@ -48,6 +48,7 @@ use nalgebra::{Matrix3, SMatrix, SymmetricEigen, Vector3};
 use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
+use crate::core::{CoreError, CoreResult};
 use crate::factors::common::group_point::acts_on_points;
 use crate::factors::common::validate::expect_manifolds;
 use crate::factors::{Factor, NormalBlocks};
@@ -205,17 +206,24 @@ impl<G: LieGroup> LidarPlaneMomentFactor<G> {
     /// A group without a 3-D point action, no frame, a frame without points,
     /// fewer than three points in all, non-finite moments, or a `sigma` that
     /// is not finite and positive.
-    pub fn new(frames: Vec<PointMoments>, fixed: PointMoments, sigma: f64) -> Result<Self, String> {
+    pub fn new(frames: Vec<PointMoments>, fixed: PointMoments, sigma: f64) -> CoreResult<Self> {
         let name = "LidarPlaneMomentFactor";
         if !acts_on_points::<G>() || G::TangentVector::DIM > MAX_DOF {
-            return Err(format!("{name}: {} does not act on 3-D points", G::NAME));
+            return Err(CoreError::InvalidInput(format!(
+                "{name}: {} does not act on 3-D points",
+                G::NAME
+            )));
         }
         if frames.is_empty() || frames.iter().any(|m| m.count <= 0.0) {
-            return Err(format!("{name}: every frame needs at least one point"));
+            return Err(CoreError::InvalidInput(format!(
+                "{name}: every frame needs at least one point"
+            )));
         }
         let total = frames.iter().map(|m| m.count).sum::<f64>() + fixed.count;
         if total < 3.0 {
-            return Err(format!("{name}: a plane needs three points, got {total}"));
+            return Err(CoreError::InvalidInput(format!(
+                "{name}: a plane needs three points, got {total}"
+            )));
         }
         let finite = |m: &PointMoments| {
             m.count.is_finite()
@@ -223,18 +231,20 @@ impl<G: LieGroup> LidarPlaneMomentFactor<G> {
                 && m.outer.iter().all(|v| v.is_finite())
         };
         if !frames.iter().all(finite) || !finite(&fixed) {
-            return Err(format!("{name}: non-finite moments"));
+            return Err(CoreError::InvalidInput(format!(
+                "{name}: non-finite moments"
+            )));
         }
         if !(sigma.is_finite() && sigma > 0.0) {
-            return Err(format!(
+            return Err(CoreError::InvalidInput(format!(
                 "{name}: sigma must be finite and positive, got {sigma}"
-            ));
+            )));
         }
         let frames = frames
             .iter()
             .map(PointMoments::centred)
             .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| format!("{name}: a frame without points"))?;
+            .ok_or_else(|| CoreError::InvalidInput(format!("{name}: a frame without points")))?;
         Ok(Self {
             frames,
             fixed: fixed.centred(),
@@ -460,7 +470,7 @@ mod tests {
     /// The normal equations straight from the scatter: the cost's gradient
     /// (by central differences) and the Jacobian path's `JᵀJ`, `Jᵀr`, cost.
     #[test]
-    fn normal_equations_match_the_cost_and_the_jacobian() -> Result<(), String> {
+    fn normal_equations_match_the_cost_and_the_jacobian() -> Result<(), CoreError> {
         let poses = [pose(0.0), pose(1.0)];
         let factor = LidarPlaneMomentFactor::<SE3>::new(
             poses
@@ -478,7 +488,7 @@ mod tests {
                 &params,
                 Some(&mut NormalBlocks::new(&mut hessian, &mut gradient, &[0, 6])),
             )
-            .ok_or("no normal equations")?;
+            .ok_or_else(|| CoreError::InvalidInput("no normal equations".to_string()))?;
         assert_eq!(factor.accumulate_normal(&params, None), Some(cost));
 
         let (rows, cols) = factor.jacobian_shape();
@@ -513,8 +523,10 @@ mod tests {
                 let params: Vec<&[f64]> = moved.iter().map(|p| p.as_param_slice()).collect();
                 factor.accumulate_normal(&params, None)
             };
-            let numeric =
-                (cost_at(step).ok_or("cost")? - cost_at(-step).ok_or("cost")?) / (4.0 * step);
+            let numeric = (cost_at(step)
+                .ok_or_else(|| CoreError::InvalidInput("cost".to_string()))?
+                - cost_at(-step).ok_or_else(|| CoreError::InvalidInput("cost".to_string()))?)
+                / (4.0 * step);
             assert!(
                 (numeric - gradient[k]).abs() < 1e-5 * (1.0 + gradient.norm()),
                 "{k}: {numeric} vs {}",
@@ -548,7 +560,9 @@ mod tests {
 
     /// The moment residuals carry the per-point cost exactly, and `Jᵀr`
     /// matches the finite-difference gradient of the cost.
-    fn check_gradient<G: LieGroup + Send + Sync + 'static>(states: Vec<G>) -> Result<(), String> {
+    fn check_gradient<G: LieGroup + Send + Sync + 'static>(
+        states: Vec<G>,
+    ) -> Result<(), CoreError> {
         let frames: Vec<Vec<Vector3<f64>>> = states
             .iter()
             .enumerate()
@@ -594,7 +608,7 @@ mod tests {
             .collect();
         let (normal, offset, _) = PointMoments::from_points(&world)
             .plane()
-            .ok_or("no plane")?;
+            .ok_or_else(|| CoreError::InvalidInput("no plane".to_string()))?;
         let direct: f64 = world
             .iter()
             .map(|w| ((normal.dot(w) + offset) / sigma).powi(2))
@@ -645,12 +659,12 @@ mod tests {
     }
 
     #[test]
-    fn moment_gradient_is_exact_on_se3() -> Result<(), String> {
+    fn moment_gradient_is_exact_on_se3() -> Result<(), CoreError> {
         check_gradient((0..3).map(|i| pose(f64::from(i))).collect::<Vec<_>>())
     }
 
     #[test]
-    fn moment_gradient_is_exact_on_se23() -> Result<(), String> {
+    fn moment_gradient_is_exact_on_se23() -> Result<(), CoreError> {
         check_gradient(
             (0..3)
                 .map(|i| {
@@ -666,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn moment_gradient_is_exact_on_sim3() -> Result<(), String> {
+    fn moment_gradient_is_exact_on_sim3() -> Result<(), CoreError> {
         check_gradient(
             (0..2)
                 .map(|i| {
@@ -682,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn transformed_moments_match_transformed_points() -> Result<(), String> {
+    fn transformed_moments_match_transformed_points() -> Result<(), CoreError> {
         let points = plane_points(&pose(1.0), 2);
         let p = pose(2.0);
         let a = p.rotation_so3().rotation_matrix() * 1.3;
@@ -692,7 +706,9 @@ mod tests {
         let carried = PointMoments::from_points(&points).transformed(&a, &b);
         assert!((direct.sum - carried.sum).norm() < 1e-12);
         assert!((direct.outer - carried.outer).norm() < 1e-10);
-        let (normal, offset, values) = carried.plane().ok_or("no plane")?;
+        let (normal, offset, values) = carried
+            .plane()
+            .ok_or_else(|| CoreError::InvalidInput("no plane".to_string()))?;
         assert!(values[0] < 1e-4 && values[1] > 1e-3, "{values:?}");
         assert!((normal.norm() - 1.0).abs() < 1e-12 && offset.is_finite());
         Ok(())
@@ -702,7 +718,7 @@ mod tests {
     /// where the raw 4 × 4 moment form gave residuals in the thousands): the
     /// cost is `N·λ_min/σ²` to the digit.
     #[test]
-    fn far_planes_keep_their_exact_cost() -> Result<(), String> {
+    fn far_planes_keep_their_exact_cost() -> Result<(), CoreError> {
         let moments = PointMoments {
             count: 12.0,
             sum: Vector3::new(-241.60453252371218, -418.42991819175455, -6.515154650408839),
@@ -740,7 +756,9 @@ mod tests {
             &state.rotation_so3().rotation_matrix(),
             &state.translation(),
         );
-        let (_, _, values) = world.plane().ok_or("no plane")?;
+        let (_, _, values) = world
+            .plane()
+            .ok_or_else(|| CoreError::InvalidInput("no plane".to_string()))?;
         let expected = 12.0 * values[0] / (sigma * sigma);
         let cost = cost(&residual);
         assert!(

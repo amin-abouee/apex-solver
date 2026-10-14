@@ -29,6 +29,7 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
+use crate::core::{CoreError, CoreResult};
 use crate::factors::Factor;
 
 /// Minimum eigenvalue clamp used when whitening the combined covariance, so
@@ -58,10 +59,12 @@ impl GicpFactor {
         target_covariance: Matrix3<f64>,
         body_covariance: Matrix3<f64>,
         rotation_hint: Matrix3<f64>,
-    ) -> Result<Self, String> {
+    ) -> CoreResult<Self> {
         for c in [&target_covariance, &body_covariance] {
             if c.iter().any(|v| !v.is_finite()) {
-                return Err("GICP covariances must be finite".into());
+                return Err(CoreError::InvalidInput(
+                    "GICP covariances must be finite".into(),
+                ));
             }
         }
         let rotated = rotation_hint * body_covariance * rotation_hint.transpose();

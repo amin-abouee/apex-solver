@@ -204,6 +204,7 @@ impl Factor for DopplerFactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::CoreError;
 
     fn fd_check<F>(
         f: &F,
@@ -211,7 +212,7 @@ mod tests {
         rows: usize,
         cols: usize,
         tol: f64,
-    ) -> Result<(), String>
+    ) -> Result<(), CoreError>
     where
         F: Fn(&[&[f64]], &mut [f64], Option<faer::mat::MatMut<'_, f64>>),
     {
@@ -239,10 +240,10 @@ mod tests {
                     let fd = (r_plus[row] - r_minus[row]) / (2.0 * EPS);
                     let ana = jac_buf[(col_offset + col) * rows + row];
                     if (fd - ana).abs() > tol {
-                        return Err(format!(
+                        return Err(CoreError::InvalidInput(format!(
                             "J[{row},{}]: analytical={ana:.6} fd={fd:.6}",
                             col_offset + col
-                        ));
+                        )));
                     }
                 }
             }
@@ -252,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn pseudorange_zero_residual_and_fd() -> Result<(), String> {
+    fn pseudorange_zero_residual_and_fd() -> Result<(), CoreError> {
         let sat = Vector3::new(1.9e7, 0.0, 1.2e7);
         let pos = Vector3::new(0.0, 0.0, 0.0);
         let geo_range = (sat - pos).norm();
@@ -288,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn doppler_zero_residual_and_fd() -> Result<(), String> {
+    fn doppler_zero_residual_and_fd() -> Result<(), CoreError> {
         let sat_pos = Vector3::new(2.0e7, 1.0e6, 1.5e7);
         let sat_vel = Vector3::new(100.0, -500.0, 800.0);
         let pos = Vector3::new(0.0, 0.0, 0.0);

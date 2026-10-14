@@ -26,6 +26,7 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
+use crate::core::{CoreError, CoreResult};
 use crate::factors::Factor;
 use crate::factors::lidar::distance_field::{DistanceField, IcpFactor};
 
@@ -39,11 +40,17 @@ pub struct Plane {
 }
 
 impl Plane {
-    /// Create a plane and normalize it. Rejects near-zero normals.
-    pub fn new(normal: Vector3<f64>, offset: f64) -> Result<Self, String> {
+    /// A plane `nᵀ·x + d = 0` with a unit normal.
+    ///
+    /// # Errors
+    ///
+    /// A near-zero or non-finite normal, as [`CoreError::InvalidInput`].
+    pub fn new(normal: Vector3<f64>, offset: f64) -> CoreResult<Self> {
         let norm = normal.norm();
         if !(norm.is_finite() && norm > 1e-12) {
-            return Err("plane normal must be non-zero and finite".into());
+            return Err(CoreError::InvalidInput(
+                "plane normal must be non-zero and finite".into(),
+            ));
         }
         Ok(Self {
             normal: normal / norm,

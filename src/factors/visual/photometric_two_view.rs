@@ -38,6 +38,8 @@ use apex_manifolds::se3::SE3;
 use apex_manifolds::{LieGroup, Tangent};
 
 use super::photometric_patch::IntensityImage;
+use crate::core::CoreError;
+use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::group_point::acts_on_points;
@@ -100,25 +102,32 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
         offsets: impl Into<Arc<[Vector2<f64>]>>,
         gain: f64,
         sigma: f64,
-    ) -> Result<Self, String> {
+    ) -> CoreResult<Self> {
         let PlanePoint { point, normal } = plane;
         let name = "PhotometricTwoViewFactor";
         if !acts_on_points::<G>() {
-            return Err(format!("{name}: {} does not act on 3-D points", G::NAME));
+            return Err(CoreError::InvalidInput(format!(
+                "{name}: {} does not act on 3-D points",
+                G::NAME
+            )));
         }
         let offsets = offsets.into();
         if offsets.len() < 2 {
-            return Err(format!("{name}: need at least two patch offsets"));
+            return Err(CoreError::InvalidInput(format!(
+                "{name}: need at least two patch offsets"
+            )));
         }
         let finite = point.iter().chain(normal.iter()).all(|v| v.is_finite())
             && offsets.iter().all(|o| o.iter().all(|v| v.is_finite()));
         if !finite || (normal.norm() - 1.0).abs() > 1e-6 {
-            return Err(format!("{name}: non-finite input or non-unit normal"));
+            return Err(CoreError::InvalidInput(format!(
+                "{name}: non-finite input or non-unit normal"
+            )));
         }
         if !(gain.is_finite() && gain > 0.0 && sigma.is_finite() && sigma > 0.0) {
-            return Err(format!(
+            return Err(CoreError::InvalidInput(format!(
                 "{name}: gain and sigma must be finite and positive"
-            ));
+            )));
         }
         Ok(Self {
             camera,
@@ -327,10 +336,10 @@ mod tests {
     }
 
     /// The wall `z = 3` seen through extrinsic `t_sc` from body `body`.
-    fn render(body: &SE23, t_sc: &SE3) -> Result<Arc<IntensityImage>, String> {
+    fn render(body: &SE23, t_sc: &SE3) -> Result<Arc<IntensityImage>, CoreError> {
         let (origin, rotation) =
             PhotometricTwoViewFactor::<SE23, PinholeCamera>::camera_pose(body, t_sc)
-                .ok_or("no camera pose")?;
+                .ok_or_else(|| CoreError::InvalidInput("no camera pose".to_string()))?;
         let cam = camera();
         let image = IntensityImage::from_fn(640, 480, |x, y| {
             let Ok(ray) = cam.unproject(&Vector2::new(x as f64, y as f64)) else {
@@ -358,7 +367,7 @@ mod tests {
         )
     }
 
-    fn factor(t_sc: &SE3) -> Result<PhotometricTwoViewFactor<SE23, PinholeCamera>, String> {
+    fn factor(t_sc: &SE3) -> Result<PhotometricTwoViewFactor<SE23, PinholeCamera>, CoreError> {
         let (a, b) = (body(0.0, 0.0), body(0.12, 0.05));
         PhotometricTwoViewFactor::new(
             camera(),
@@ -391,7 +400,7 @@ mod tests {
     /// the true pose; moving the body breaks that, and the Jacobian matches
     /// a coarser finite difference of the residual.
     #[test]
-    fn two_views_agree_at_the_truth() -> Result<(), String> {
+    fn two_views_agree_at_the_truth() -> Result<(), CoreError> {
         let t_sc = extrinsic();
         let f = factor(&t_sc)?;
         let truth = body(0.12, 0.05);
@@ -463,7 +472,7 @@ mod tests {
     /// A common extrinsic error is mostly invisible between two nearby views
     /// — the reason the extrinsic must enter both.
     #[test]
-    fn a_shared_extrinsic_error_largely_cancels() -> Result<(), String> {
+    fn a_shared_extrinsic_error_largely_cancels() -> Result<(), CoreError> {
         let t_sc = extrinsic();
         let f = factor(&t_sc)?;
         let truth = body(0.12, 0.05);
@@ -487,7 +496,7 @@ mod tests {
     /// extrinsic: zero residual at the truth, and a nudged reference shows in
     /// the residual and in its own Jacobian columns.
     #[test]
-    fn a_free_reference_is_a_third_block() -> Result<(), String> {
+    fn a_free_reference_is_a_third_block() -> Result<(), CoreError> {
         let t_sc = extrinsic();
         let f = factor(&t_sc)?.with_free_reference();
         let (reference, current) = (body(0.0, 0.0), body(0.12, 0.05));
@@ -539,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn construction_rejects_bad_input() -> Result<(), String> {
+    fn construction_rejects_bad_input() -> Result<(), CoreError> {
         let t_sc = extrinsic();
         let image = render(&body(0.0, 0.0), &t_sc)?;
         let make = |normal: Vector3<f64>, gain: f64| {

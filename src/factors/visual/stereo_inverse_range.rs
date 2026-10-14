@@ -44,6 +44,8 @@ use apex_manifolds::se23::SE23;
 use faer::prelude::ReborrowMut;
 use nalgebra::{DMatrix, Matrix3, Vector2, Vector3};
 
+use crate::core::CoreError;
+use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
@@ -71,20 +73,22 @@ impl Observation {
         host_bearing: Vector3<f64>,
         measurement: Vector2<f64>,
         pixel_sigma: f64,
-    ) -> Result<Self, String> {
+    ) -> CoreResult<Self> {
         let norm = host_bearing.norm();
         if !norm.is_finite() || norm <= 0.0 {
-            return Err(format!(
+            return Err(CoreError::InvalidInput(format!(
                 "host bearing must be finite and non-zero, got {host_bearing:?}"
-            ));
+            )));
         }
         if !measurement.iter().all(|v| v.is_finite()) {
-            return Err(format!("measurement must be finite, got {measurement:?}"));
+            return Err(CoreError::InvalidInput(format!(
+                "measurement must be finite, got {measurement:?}"
+            )));
         }
         if !pixel_sigma.is_finite() || pixel_sigma <= 0.0 {
-            return Err(format!(
+            return Err(CoreError::InvalidInput(format!(
                 "pixel sigma must be finite and positive, got {pixel_sigma}"
-            ));
+            )));
         }
         Ok(Self {
             host_bearing: host_bearing / norm,
@@ -212,7 +216,7 @@ impl<CAM> InverseRangeProjectionSe23Factor<CAM> {
         host_bearing: Vector3<f64>,
         measurement: Vector2<f64>,
         pixel_sigma: f64,
-    ) -> Result<Self, String> {
+    ) -> CoreResult<Self> {
         Ok(Self {
             observation: Observation::new(host_bearing, measurement, pixel_sigma)?,
             camera: PhantomData,
@@ -336,7 +340,7 @@ impl<CAM> StereoInverseRangeFactor<CAM> {
         host_bearing: Vector3<f64>,
         measurement: Vector2<f64>,
         pixel_sigma: f64,
-    ) -> Result<Self, String> {
+    ) -> CoreResult<Self> {
         Ok(Self {
             observation: Observation::new(host_bearing, measurement, pixel_sigma)?,
             camera: PhantomData,

@@ -45,6 +45,8 @@ use nalgebra::{DMatrix, Matrix3, SMatrix, SVector, Vector2, Vector3};
 use std::sync::atomic::{AtomicU8, Ordering};
 use tracing::warn;
 
+use crate::core::CoreError;
+use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
@@ -94,10 +96,12 @@ fn act_jacobians(pose: &SE3, point: &Vector3<f64>) -> (SMatrix<f64, 3, 6>, Matri
 
 impl<CAM: CameraModel> SmartProjectionFactor<CAM> {
     /// Create the factor from pixel observations and a shared camera model.
-    pub fn new(observations: Vec<Vector2<f64>>, camera: CAM) -> Result<Self, String> {
+    pub fn new(observations: Vec<Vector2<f64>>, camera: CAM) -> CoreResult<Self> {
         let n = observations.len();
         if n == 0 {
-            return Err("SmartProjectionFactor requires at least one observation".into());
+            return Err(CoreError::InvalidInput(
+                "SmartProjectionFactor requires at least one observation".into(),
+            ));
         }
         Ok(Self {
             observations,
@@ -109,11 +113,13 @@ impl<CAM: CameraModel> SmartProjectionFactor<CAM> {
     }
 
     /// Set per-observation sigmas for the internal whitening.
-    pub fn with_sigmas(mut self, sigmas: Vec<f64>) -> Result<Self, String> {
+    pub fn with_sigmas(mut self, sigmas: Vec<f64>) -> CoreResult<Self> {
         if sigmas.len() != self.observations.len()
             || sigmas.iter().any(|s| !(s.is_finite() && *s > 0.0))
         {
-            return Err("sigmas must be positive, finite, and match the observation count".into());
+            return Err(CoreError::InvalidInput(
+                "sigmas must be positive, finite, and match the observation count".into(),
+            ));
         }
         self.sigmas = sigmas;
         Ok(self)
@@ -539,7 +545,7 @@ mod tests {
         let (factor, poses, point) = three_view_setup()?;
         let recovered = factor
             .triangulate(&poses)
-            .ok_or("triangulation should succeed")?;
+            .ok_or_else(|| CoreError::InvalidInput("triangulation should succeed".to_string()))?;
         assert!(
             (recovered - point).norm() < 1e-6,
             "recovered {recovered}, truth {point}"
@@ -558,7 +564,7 @@ mod tests {
         let n = poses.len();
         let point = factor
             .triangulate(&poses)
-            .ok_or("triangulation should succeed")?;
+            .ok_or_else(|| CoreError::InvalidInput("triangulation should succeed".to_string()))?;
 
         // Explicit whitened (σ=1) blocks, recomputed independently.
         let mut h_pp = DMatrix::<f64>::zeros(6 * n, 6 * n);
@@ -594,7 +600,9 @@ mod tests {
             let b = d_uv_d_pc * rot;
             h_ll += b.transpose() * b;
         }
-        let h_ll_inv = h_ll.try_inverse().ok_or("Hll singular")?;
+        let h_ll_inv = h_ll
+            .try_inverse()
+            .ok_or_else(|| CoreError::InvalidInput("Hll singular".to_string()))?;
         let schur =
             &h_pp - &h_pl * DMatrix::from_fn(3, 3, |r, c| h_ll_inv[(r, c)]) * h_pl.transpose();
 

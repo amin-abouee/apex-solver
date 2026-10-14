@@ -11,6 +11,7 @@ use faer::Mat;
 use faer::prelude::ReborrowMut;
 
 use crate::core::variable::ManifoldVariable;
+use crate::core::{CoreError, CoreResult};
 use crate::factors::{Factor, NormalBlocks};
 
 /// `inner` with some parameter blocks fixed to given values.
@@ -29,24 +30,27 @@ impl<F: Factor> HeldBlocks<F> {
     /// # Errors
     ///
     /// `dofs` and `held` of different lengths, column counts that do not add
-    /// up to the inner Jacobian's, or no free block left.
-    pub fn new(inner: F, dofs: Vec<usize>, held: Vec<Option<Vec<f64>>>) -> Result<Self, String> {
+    /// up to the inner Jacobian's ([`CoreError::DimensionMismatch`]), or no
+    /// free block left ([`CoreError::InvalidInput`]).
+    pub fn new(inner: F, dofs: Vec<usize>, held: Vec<Option<Vec<f64>>>) -> CoreResult<Self> {
         if dofs.len() != held.len() {
-            return Err(format!(
+            return Err(CoreError::DimensionMismatch(format!(
                 "HeldBlocks: {} block dimensions for {} blocks",
                 dofs.len(),
                 held.len()
-            ));
+            )));
         }
         if dofs.iter().sum::<usize>() != inner.jacobian_shape().1 {
-            return Err(format!(
+            return Err(CoreError::DimensionMismatch(format!(
                 "HeldBlocks: block dimensions sum to {}, the factor has {} columns",
                 dofs.iter().sum::<usize>(),
                 inner.jacobian_shape().1
-            ));
+            )));
         }
         if held.iter().all(Option::is_some) {
-            return Err("HeldBlocks: every block is held; nothing to estimate".to_string());
+            return Err(CoreError::InvalidInput(
+                "HeldBlocks: every block is held; nothing to estimate".to_string(),
+            ));
         }
         Ok(Self {
             inner,
@@ -190,7 +194,7 @@ mod tests {
         )
     }
 
-    fn factor() -> Result<LidarMapPlaneFactor<SE23>, String> {
+    fn factor() -> Result<LidarMapPlaneFactor<SE23>, CoreError> {
         LidarMapPlaneFactor::new(
             Vector3::new(4.0, -1.5, 0.8),
             Plane::new(Vector3::new(0.3, -0.5, 0.8), 1.7)?,
@@ -201,7 +205,7 @@ mod tests {
     /// Holding the extrinsic reproduces the full factor's residual and its
     /// state columns exactly.
     #[test]
-    fn a_held_block_drops_its_columns_and_keeps_the_rest() -> Result<(), String> {
+    fn a_held_block_drops_its_columns_and_keeps_the_rest() -> Result<(), CoreError> {
         let full = factor()?;
         let s = state().as_param_slice().to_vec();
         let e = extrinsic().as_param_slice().to_vec();
@@ -237,7 +241,7 @@ mod tests {
 
     /// Without inner normal equations there are none: use the Jacobian.
     #[test]
-    fn no_inner_normal_equations_means_none() -> Result<(), String> {
+    fn no_inner_normal_equations_means_none() -> Result<(), CoreError> {
         let e = extrinsic().as_param_slice().to_vec();
         let held = HeldBlocks::new(factor()?, vec![9, 6], vec![None, Some(e)])?;
         assert_eq!(
@@ -248,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn inconsistent_wrappings_are_rejected() -> Result<(), String> {
+    fn inconsistent_wrappings_are_rejected() -> Result<(), CoreError> {
         let e = extrinsic().as_param_slice().to_vec();
         assert!(HeldBlocks::new(factor()?, vec![9], vec![None, Some(e.clone())]).is_err());
         assert!(HeldBlocks::new(factor()?, vec![9, 5], vec![None, Some(e.clone())]).is_err());

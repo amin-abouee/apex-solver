@@ -25,6 +25,7 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{DMatrix, DVector};
 
 use crate::core::variable::ManifoldVariable;
+use crate::core::{CoreError, CoreResult};
 use crate::factors::Factor;
 
 /// Compute the concatenated local tangent `θ(x ⊟ x₀)` of the connected
@@ -57,25 +58,25 @@ impl MarginalPriorFactor {
         sqrt_info: DMatrix<f64>,
         offset: DVector<f64>,
         local_log: LocalLogFn,
-    ) -> Result<Self, String> {
+    ) -> CoreResult<Self> {
         let total: usize = dims.iter().sum();
         if sqrt_info.nrows() != total {
-            return Err(format!(
+            return Err(CoreError::DimensionMismatch(format!(
                 "sqrt_info has {} rows, expected Σdims = {total}",
                 sqrt_info.nrows()
-            ));
+            )));
         }
         if sqrt_info.ncols() != total {
-            return Err(format!(
+            return Err(CoreError::DimensionMismatch(format!(
                 "sqrt_info has {} columns, expected Σdims = {total}",
                 sqrt_info.ncols()
-            ));
+            )));
         }
         if offset.len() != total {
-            return Err(format!(
+            return Err(CoreError::DimensionMismatch(format!(
                 "offset has length {}, expected {total}",
                 offset.len()
-            ));
+            )));
         }
         Ok(Self {
             sqrt_info,
@@ -564,7 +565,7 @@ mod tests {
         let err = factor
             .validate_variables(&[se3_var, rn_var])
             .err()
-            .ok_or("dof mismatch must be rejected")?;
+            .ok_or_else(|| CoreError::InvalidInput("dof mismatch must be rejected".to_string()))?;
         assert!(err.contains("dof 1"), "{err}");
         Ok(())
     }

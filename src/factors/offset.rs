@@ -19,6 +19,7 @@ use nalgebra::DMatrix;
 use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
+use crate::core::{CoreError, CoreResult};
 use crate::factors::{Factor, NormalBlocks};
 
 /// `inner` with block `block` (of group `G`) evaluated at `X·Δ`.
@@ -38,15 +39,16 @@ impl<F: Factor, G: LieGroup> RightOffset<F, G> {
     ///
     /// # Errors
     ///
-    /// A block column that does not fit the inner Jacobian.
-    pub fn new(inner: F, block: usize, column: usize, offset: G) -> Result<Self, String> {
+    /// A block column that does not fit the inner Jacobian, as
+    /// [`CoreError::DimensionMismatch`].
+    pub fn new(inner: F, block: usize, column: usize, offset: G) -> CoreResult<Self> {
         let dof = G::TangentVector::DIM;
         if column + dof > inner.jacobian_shape().1 {
-            return Err(format!(
+            return Err(CoreError::DimensionMismatch(format!(
                 "RightOffset: block columns {column}..{} exceed the factor's {}",
                 column + dof,
                 inner.jacobian_shape().1
-            ));
+            )));
         }
         let adjoint = offset.inverse(None).adjoint();
         let adjoint = (0..dof * dof)
@@ -141,7 +143,7 @@ mod tests {
     use faer::Mat;
     use nalgebra::{UnitQuaternion, Vector3};
 
-    fn factor() -> Result<LidarMapPlanesFactor<SE23>, String> {
+    fn factor() -> Result<LidarMapPlanesFactor<SE23>, CoreError> {
         let matches = (0..6)
             .map(|k| {
                 let f = f64::from(k);
@@ -151,13 +153,13 @@ mod tests {
                     sigma: 0.02,
                 })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, CoreError>>()?;
         LidarMapPlanesFactor::new(matches)
     }
 
     /// Its normal equations are the inner ones carried by `Ad(Δ⁻¹)`.
     #[test]
-    fn offset_normal_equations_match_its_jacobian() -> Result<(), String> {
+    fn offset_normal_equations_match_its_jacobian() -> Result<(), CoreError> {
         let state = SE23::new(
             Vector3::new(0.4, -1.2, 0.3),
             Vector3::new(0.5, 0.1, -0.2),
@@ -181,7 +183,7 @@ mod tests {
     /// The offset factor equals the inner one at `X·Δ`, and its Jacobian
     /// matches finite differences in `X`.
     #[test]
-    fn offset_residual_and_jacobian_are_exact() -> Result<(), String> {
+    fn offset_residual_and_jacobian_are_exact() -> Result<(), CoreError> {
         let state = SE23::new(
             Vector3::new(0.4, -1.2, 0.3),
             Vector3::new(0.5, 0.1, -0.2),

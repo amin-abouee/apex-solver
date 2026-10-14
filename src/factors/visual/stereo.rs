@@ -19,6 +19,8 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
 use tracing::warn;
 
+use crate::core::CoreError;
+use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
@@ -40,16 +42,16 @@ pub struct StereoCalibration {
 
 impl StereoCalibration {
     /// Create and validate a rectified stereo calibration.
-    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64, baseline: f64) -> Result<Self, String> {
+    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64, baseline: f64) -> CoreResult<Self> {
         if !(fx.is_finite() && fx > 0.0)
             || !(fy.is_finite() && fy > 0.0)
             || !(cx.is_finite() && cy.is_finite())
             || !(baseline.is_finite() && baseline > 0.0)
         {
-            return Err(
+            return Err(CoreError::InvalidInput(
                 "stereo calibration requires fx, fy > 0, finite principal point, baseline > 0"
                     .into(),
-            );
+            ));
         }
         Ok(Self {
             fx,
