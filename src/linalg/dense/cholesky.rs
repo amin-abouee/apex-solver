@@ -1,16 +1,43 @@
 use faer::{
-    Mat, Side,
-    linalg::solvers::{LltError, Solve},
+    Accum, Conj, Mat, Par, Side,
+    dyn_stack::{MemBuffer, MemStack, StackReq},
+    get_global_parallelism,
+    linalg::{
+        cholesky::llt::{factor, solve},
+        matmul::matmul,
+        solvers::{LltError, Solve},
+    },
 };
 
 use crate::error::ErrorLogging;
 use crate::linalg::{Damping, DenseMode, LinAlgError, LinAlgResult, LinearSolver};
+
+/// Factorization scratch memory. A clone starts empty and regrows on first use.
+struct Scratch(MemBuffer);
+
+impl std::fmt::Debug for Scratch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scratch")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
+
+impl Clone for Scratch {
+    fn clone(&self) -> Self {
+        Self(MemBuffer::new(StackReq::EMPTY))
+    }
+}
 
 /// Dense Cholesky (LLT) linear solver for CPU.
 ///
 /// Optimal for small-to-medium problems (< 500 DOF) where the Hessian is
 /// moderately dense. Avoids sparse data structure overhead and benefits
 /// from dense BLAS routines.
+///
+/// The normal equations, the factor and the solve live in buffers the solver
+/// keeps between calls, so a solve of an unchanged shape allocates only the
+/// step it returns.
 #[derive(Debug, Clone)]
 pub struct DenseCholeskySolver {
     /// Dense Hessian H = J^T · J
@@ -18,6 +45,15 @@ pub struct DenseCholeskySolver {
 
     /// Dense gradient g = J^T · r
     gradient: Option<Mat<f64>>,
+
+    /// Lower factor, reused so a solve does not allocate it.
+    factor: Mat<f64>,
+
+    /// Right-hand side `-gradient`, solved in place.
+    rhs: Mat<f64>,
+
+    /// Scratch memory for the in-place factorization and solve.
+    scratch: Scratch,
 }
 
 impl DenseCholeskySolver {
@@ -25,72 +61,145 @@ impl DenseCholeskySolver {
         Self {
             hessian: None,
             gradient: None,
+            factor: Mat::zeros(0, 0),
+            rhs: Mat::zeros(0, 0),
+            scratch: Scratch(MemBuffer::new(StackReq::EMPTY)),
         }
     }
 
     /// Solve with dense Jacobian directly (the core dense implementation).
+    /// `hessian = JᵀJ` and `gradient = Jᵀr` into the retained buffers, with
+    /// the exact kernel and parallelism the `*` operator uses.
+    fn form_normal_equations(&mut self, residuals: &Mat<f64>, jacobian: &Mat<f64>) {
+        let n = jacobian.ncols();
+        let par = get_global_parallelism();
+        let hessian = self.hessian.get_or_insert_with(|| Mat::zeros(n, n));
+        if hessian.nrows() != n || hessian.ncols() != n {
+            *hessian = Mat::zeros(n, n);
+        }
+        matmul(
+            hessian.as_mut(),
+            Accum::Replace,
+            jacobian.transpose(),
+            jacobian,
+            1.0,
+            par,
+        );
+        let gradient = self
+            .gradient
+            .get_or_insert_with(|| Mat::zeros(n, residuals.ncols()));
+        if gradient.nrows() != n || gradient.ncols() != residuals.ncols() {
+            *gradient = Mat::zeros(n, residuals.ncols());
+        }
+        matmul(
+            gradient.as_mut(),
+            Accum::Replace,
+            jacobian.transpose(),
+            residuals,
+            1.0,
+            par,
+        );
+    }
+
+    /// Solve `(H + damping)·x = -g` from the retained `H` and `g`, factoring
+    /// into reused buffers. The arithmetic is `Llt::new` + `Llt::solve`'s.
+    fn solve_retained(
+        &mut self,
+        damping: Option<&Damping>,
+        context: &str,
+    ) -> LinAlgResult<Mat<f64>> {
+        let par: Par = get_global_parallelism();
+        let (Some(hessian), Some(gradient)) = (self.hessian.as_ref(), self.gradient.as_ref())
+        else {
+            return Err(LinAlgError::FactorizationFailed(format!("{context}: no system")).log());
+        };
+        let n = hessian.nrows();
+        let k = gradient.ncols();
+
+        if self.factor.nrows() != n {
+            self.factor = Mat::zeros(n, n);
+        }
+        self.factor.fill(0.0);
+        self.factor.copy_from_triangular_lower(hessian);
+        if let Some(damping) = damping {
+            for i in 0..n {
+                let diagonal = hessian[(i, i)];
+                self.factor[(i, i)] = diagonal + damping.diagonal_term(diagonal);
+            }
+        }
+
+        if self.rhs.nrows() != n || self.rhs.ncols() != k {
+            self.rhs = Mat::zeros(n, k);
+        }
+        for column in 0..k {
+            for row in 0..n {
+                self.rhs[(row, column)] = -gradient[(row, column)];
+            }
+        }
+
+        let required = factor::cholesky_in_place_scratch::<f64>(n, par, Default::default())
+            .or(solve::solve_in_place_scratch::<f64>(n, k, par));
+        if self.scratch.0.len() < required.unaligned_bytes_required() {
+            self.scratch = Scratch(MemBuffer::new(required));
+        }
+        let stack = MemStack::new(&mut self.scratch.0);
+        factor::cholesky_in_place(
+            self.factor.as_mut(),
+            Default::default(),
+            par,
+            stack,
+            Default::default(),
+        )
+        .map_err(|e: LltError| map_llt_error(e, context))?;
+        for column in 0..n {
+            for row in 0..column {
+                self.factor[(row, column)] = 0.0;
+            }
+        }
+        let stack = MemStack::new(&mut self.scratch.0);
+        solve::solve_in_place_with_conj(
+            self.factor.as_ref(),
+            Conj::No,
+            self.rhs.as_mut(),
+            par,
+            stack,
+        );
+        Ok(self.rhs.clone())
+    }
+
     fn solve_dense_normal(
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &Mat<f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        // H = J^T · J
-        let hessian = jacobian.transpose() * jacobian;
-        // g = J^T · r
-        let gradient = jacobian.transpose() * residuals;
-
-        // Solve H · dx = -g
-        let dx = solve_spd(
-            &hessian,
-            &(-&gradient),
-            "Dense Cholesky factorization failed",
-        )?;
-
-        self.hessian = Some(hessian);
-        self.gradient = Some(gradient);
-
-        Ok(dx)
+        self.form_normal_equations(residuals, jacobian);
+        self.solve_retained(None, "Dense Cholesky factorization failed")
     }
 
     /// Solve with dense Jacobian and damping (the core dense augmented implementation).
+    ///
+    /// `H_aug = H + λ·D` with `D_jj = clamp(H_jj, min_diagonal, max_diagonal)`;
+    /// the un-augmented Hessian is what stays cached, since DogLeg and LM need
+    /// the true quadratic model.
     fn solve_dense_augmented(
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &Mat<f64>,
         damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
-        // H = J^T · J
-        let hessian = jacobian.transpose() * jacobian;
-        // g = J^T · r
-        let gradient = jacobian.transpose() * residuals;
-
-        // H_aug = H + λ·D, D_jj = clamp(H_jj, min_diagonal, max_diagonal)
-        let n = hessian.nrows();
-        let mut augmented = hessian.clone();
-        for i in 0..n {
-            augmented[(i, i)] += damping.diagonal_term(hessian[(i, i)]);
-        }
-
-        // Solve H_aug · dx = -g
-        let dx = solve_spd(
-            &augmented,
-            &(-&gradient),
+        self.form_normal_equations(residuals, jacobian);
+        self.solve_retained(
+            Some(damping),
             "Augmented dense Cholesky factorization failed",
-        )?;
-
-        // Cache the un-augmented Hessian (DogLeg/LM need the true quadratic model)
-        self.hessian = Some(hessian);
-        self.gradient = Some(gradient);
-
-        Ok(dx)
+        )
     }
 }
 
 /// Solve `a · x = b` for SPD `a` via dense Cholesky (LLT).
 ///
 /// Shared by every dense solver that reduces to one SPD system —
-/// `DenseCholeskySolver` and `ExplicitDenseSchur`'s reduced camera system —
-/// so the factorization and error-mapping logic exists in exactly one place.
+/// `ExplicitDenseSchur`'s reduced camera system — so the factorization and
+/// error-mapping logic exists in one place.
 pub(crate) fn solve_spd(a: &Mat<f64>, b: &Mat<f64>, context: &str) -> LinAlgResult<Mat<f64>> {
     let llt = a
         .as_ref()
@@ -312,5 +421,44 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn retained_buffers_match_the_allocating_arithmetic_bit_for_bit() -> TestResult {
+        let mut state = 17u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        let damping = Damping::identity(1e-10);
+        let mut solver = DenseCholeskySolver::new();
+        for rows in [52usize, 52, 9, 52] {
+            let jacobian = Mat::<f64>::from_fn(rows, 3, |_, _| next() * 3.0);
+            let residual = Mat::<f64>::from_fn(rows, 1, |_, _| next() * 2.0);
+
+            let hessian = jacobian.transpose() * &jacobian;
+            let gradient = jacobian.transpose() * &residual;
+            let mut augmented = hessian.clone();
+            for i in 0..3 {
+                augmented[(i, i)] += damping.diagonal_term(hessian[(i, i)]);
+            }
+            let expected = solve_spd(&augmented, &(-&gradient), "reference")?;
+
+            let step = solver.solve_augmented_equation(&residual, &jacobian, &damping)?;
+            assert_eq!(step, expected);
+            assert_eq!(solver.get_hessian(), Some(&hessian));
+            assert_eq!(solver.get_gradient(), Some(&gradient));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_buffers_report_a_non_positive_definite_system() {
+        let mut solver = DenseCholeskySolver::new();
+        let jacobian = Mat::<f64>::zeros(4, 2);
+        let residual = Mat::<f64>::from_fn(4, 1, |_, _| 1.0);
+        assert!(solver.solve_normal_equation(&residual, &jacobian).is_err());
     }
 }
