@@ -10,8 +10,9 @@
 use super::StorageReader;
 use crate::rosbag::error::{BagError, ReaderError, Result};
 use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage};
-use mcap::sans_io::linear_reader::{LinearReadEvent, LinearReader};
-use std::collections::HashMap;
+use mcap::sans_io::linear_reader::{LinearReadEvent, LinearReader, LinearReaderOptions};
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -32,41 +33,282 @@ pub struct StreamedMessage {
     pub data: Vec<u8>,
 }
 
-/// The messages of one MCAP file, read a record at a time.
-pub struct McapMessageStream {
-    file: File,
-    reader: LinearReader,
+/// Which messages of an MCAP file a stream yields. A message outside it is
+/// passed over where it sits in its chunk, before its payload is copied.
+#[derive(Debug, Clone, Default)]
+pub struct StreamFilter {
+    /// The topics wanted; every topic when `None`.
+    pub topics: Option<HashSet<String>>,
+    /// The earliest log time wanted \[ns\].
+    pub start: Option<u64>,
+    /// The latest log time wanted \[ns\].
+    pub stop: Option<u64>,
+}
+
+impl StreamFilter {
+    fn wants_topic(&self, topic: &str) -> bool {
+        self.topics
+            .as_ref()
+            .is_none_or(|topics| topics.contains(topic))
+    }
+
+    fn wants_time(&self, log_time: u64) -> bool {
+        self.start.is_none_or(|t| log_time >= t) && self.stop.is_none_or(|t| log_time <= t)
+    }
+}
+
+/// A chunk read from the file and not yet decompressed.
+struct PendingChunk {
+    compression: String,
+    uncompressed_size: u64,
+    data: Vec<u8>,
+}
+
+/// The schemas and channels seen so far, and the wanted messages found.
+struct Demux {
+    filter: StreamFilter,
     /// Schema names by ID.
     schemas: HashMap<u16, String>,
     /// Topic, message type and encoding by channel ID.
     channels: HashMap<u16, (String, String, String)>,
+    /// The channels whose topic the filter wants.
+    wanted: HashSet<u16>,
+    /// Wanted messages, in file order, not yet handed out.
+    ready: VecDeque<StreamedMessage>,
+}
+
+impl Demux {
+    fn new(filter: StreamFilter) -> Self {
+        Self {
+            filter,
+            schemas: HashMap::new(),
+            channels: HashMap::new(),
+            wanted: HashSet::new(),
+            ready: VecDeque::new(),
+        }
+    }
+
+    /// Take one record: remember a schema or a channel; queue a message if
+    /// its channel and time are wanted.
+    fn absorb(&mut self, record: mcap::records::Record<'_>) -> std::result::Result<(), String> {
+        match record {
+            mcap::records::Record::Schema { header, .. } => {
+                self.schemas.insert(header.id, header.name);
+            }
+            mcap::records::Record::Channel(channel) => {
+                let message_type = self
+                    .schemas
+                    .get(&channel.schema_id)
+                    .cloned()
+                    .unwrap_or_else(|| channel.message_encoding.clone());
+                if self.filter.wants_topic(&channel.topic) {
+                    self.wanted.insert(channel.id);
+                } else {
+                    self.wanted.remove(&channel.id);
+                }
+                self.channels.insert(
+                    channel.id,
+                    (channel.topic, message_type, channel.message_encoding),
+                );
+            }
+            mcap::records::Record::Message { header, data } => {
+                let Some((topic, message_type, encoding)) = self.channels.get(&header.channel_id)
+                else {
+                    return Err(format!("message on unknown channel {}", header.channel_id));
+                };
+                if self.wanted.contains(&header.channel_id)
+                    && self.filter.wants_time(header.log_time)
+                {
+                    self.ready.push_back(StreamedMessage {
+                        topic: topic.clone(),
+                        message_type: message_type.clone(),
+                        encoding: encoding.clone(),
+                        log_time: header.log_time,
+                        data: data.into_owned(),
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// The most a chunk's claimed uncompressed size reserves up front \[bytes\];
+/// a larger real chunk just grows the buffer.
+const MAX_CHUNK_RESERVE: u64 = 256 << 20;
+
+/// The records of `chunk`, decompressed.
+fn decompress(chunk: PendingChunk) -> std::result::Result<Vec<u8>, String> {
+    let reserve = chunk.uncompressed_size.min(MAX_CHUNK_RESERVE) as usize;
+    let mut out = Vec::with_capacity(reserve);
+    match chunk.compression.as_str() {
+        "" => return Ok(chunk.data),
+        "zstd" => {
+            let mut decoder = zstd::stream::read::Decoder::new(chunk.data.as_slice())
+                .map_err(|e| format!("zstd chunk: {e}"))?;
+            decoder
+                .read_to_end(&mut out)
+                .map_err(|e| format!("zstd chunk: {e}"))?;
+        }
+        "lz4" => {
+            lz4_flex::frame::FrameDecoder::new(chunk.data.as_slice())
+                .read_to_end(&mut out)
+                .map_err(|e| format!("lz4 chunk: {e}"))?;
+        }
+        other => return Err(format!("unsupported chunk compression {other:?}")),
+    }
+    Ok(out)
+}
+
+/// Feed the records of a decompressed chunk, back to back, to `demux`.
+fn absorb_chunk(demux: &mut Demux, records: &[u8]) -> std::result::Result<(), String> {
+    let mut at = 0usize;
+    while at < records.len() {
+        let head = records
+            .get(at..at + 9)
+            .ok_or("truncated record header in a chunk")?;
+        let opcode = head[0];
+        let length = <[u8; 8]>::try_from(&head[1..9])
+            .map(u64::from_le_bytes)
+            .map_err(|e| e.to_string())?;
+        let start = at + 9;
+        let end = usize::try_from(length)
+            .ok()
+            .and_then(|length| start.checked_add(length))
+            .filter(|&end| end <= records.len())
+            .ok_or("a record overruns its chunk")?;
+        let body = records
+            .get(start..end)
+            .ok_or("a record overruns its chunk")?;
+        let record = mcap::parse_record(opcode, body).map_err(|e| e.to_string())?;
+        demux.absorb(record)?;
+        at = end;
+    }
+    Ok(())
+}
+
+/// Decompress the pending chunks on the thread pool and feed them to
+/// `demux` in file order.
+fn flush(pending: &mut Vec<PendingChunk>, demux: &mut Demux) -> std::result::Result<(), String> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let chunks = std::mem::take(pending);
+    let decoded: Vec<std::result::Result<Vec<u8>, String>> =
+        chunks.into_par_iter().map(decompress).collect();
+    for records in decoded {
+        absorb_chunk(demux, &records?)?;
+    }
+    Ok(())
+}
+
+/// The messages of one MCAP file, read a record at a time. Its chunks are
+/// read in batches and each batch is decompressed in parallel; messages
+/// still come out in file order.
+pub struct McapMessageStream {
+    file: File,
+    reader: LinearReader,
+    demux: Demux,
+    pending: Vec<PendingChunk>,
+    /// Chunks read before they are decompressed together.
+    batch: usize,
+    /// The most chunks decompressed together so far.
+    largest_batch: usize,
     finished: bool,
 }
 
 impl McapMessageStream {
-    /// Stream the MCAP file at `path`.
+    /// Stream every message of the MCAP file at `path`.
     ///
     /// # Errors
     ///
     /// [`ReaderError`] if the file cannot be opened.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_filtered(path, StreamFilter::default())
+    }
+
+    /// Stream the messages of the MCAP file at `path` that `filter` wants.
+    ///
+    /// # Errors
+    ///
+    /// [`ReaderError`] if the file cannot be opened.
+    pub fn open_filtered(path: &Path, filter: StreamFilter) -> Result<Self> {
         let file = File::open(path).map_err(|e| {
             ReaderError::generic(format!("Failed to open MCAP file {}: {e}", path.display()))
         })?;
+        let options = LinearReaderOptions::default().with_emit_chunks(true);
         Ok(Self {
             file,
-            reader: LinearReader::new(),
-            schemas: HashMap::new(),
-            channels: HashMap::new(),
+            reader: LinearReader::new_with_options(options),
+            demux: Demux::new(filter),
+            pending: Vec::new(),
+            batch: (rayon::current_num_threads() * 2).clamp(4, 64),
+            largest_batch: 0,
             finished: false,
         })
     }
 
-    fn fail(&mut self, error: impl std::fmt::Display) -> Option<Result<StreamedMessage>> {
-        self.finished = true;
-        Some(Err(ReaderError::generic(format!(
-            "Failed to read MCAP message: {error}"
-        ))))
+    /// The most chunks decompressed together so far: how parallel the
+    /// reading has been. 1 means every chunk was decompressed alone.
+    #[must_use]
+    pub fn largest_batch(&self) -> usize {
+        self.largest_batch
+    }
+
+    /// Read until a wanted message is queued or the file ends.
+    fn advance(&mut self) -> std::result::Result<(), String> {
+        loop {
+            let event = match self.reader.next_event() {
+                None => {
+                    flush(&mut self.pending, &mut self.demux)?;
+                    self.finished = true;
+                    return Ok(());
+                }
+                Some(Err(error)) => return Err(error.to_string()),
+                Some(Ok(event)) => event,
+            };
+            match event {
+                LinearReadEvent::ReadRequest(need) => {
+                    let read = self
+                        .file
+                        .read(self.reader.insert(need))
+                        .map_err(|e| e.to_string())?;
+                    self.reader.notify_read(read);
+                }
+                LinearReadEvent::Record { opcode, data } => {
+                    match mcap::parse_record(opcode, data).map_err(|e| e.to_string())? {
+                        mcap::records::Record::Chunk { header, data } => {
+                            self.pending.push(PendingChunk {
+                                compression: header.compression,
+                                uncompressed_size: header.uncompressed_size,
+                                data: data.into_owned(),
+                            });
+                            if self.pending.len() >= self.batch {
+                                self.largest_batch = self.largest_batch.max(self.pending.len());
+                                flush(&mut self.pending, &mut self.demux)?;
+                            }
+                        }
+                        record @ (mcap::records::Record::Schema { .. }
+                        | mcap::records::Record::Channel(_)
+                        | mcap::records::Record::Message { .. }) => {
+                            // A schema, a channel or a message between chunks
+                            // comes after the chunks before it. The index
+                            // records between chunks (one per channel, after
+                            // every chunk) say nothing the stream uses, so
+                            // they must not end a batch.
+                            self.largest_batch = self.largest_batch.max(self.pending.len());
+                            flush(&mut self.pending, &mut self.demux)?;
+                            self.demux.absorb(record)?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !self.demux.ready.is_empty() {
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -74,64 +316,19 @@ impl Iterator for McapMessageStream {
     type Item = Result<StreamedMessage>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.finished {
-            return None;
-        }
         loop {
-            let event = match self.reader.next_event() {
-                None => {
-                    self.finished = true;
-                    return None;
-                }
-                Some(Err(error)) => return self.fail(error),
-                Some(Ok(event)) => event,
-            };
-            let (opcode, data) = match event {
-                LinearReadEvent::ReadRequest(need) => {
-                    let read = match self.file.read(self.reader.insert(need)) {
-                        Ok(read) => read,
-                        Err(error) => return self.fail(error),
-                    };
-                    self.reader.notify_read(read);
-                    continue;
-                }
-                LinearReadEvent::Record { opcode, data } => (opcode, data),
-            };
-            let record = match mcap::parse_record(opcode, data) {
-                Ok(record) => record,
-                Err(error) => return self.fail(error),
-            };
-            match record {
-                mcap::records::Record::Schema { header, .. } => {
-                    self.schemas.insert(header.id, header.name);
-                }
-                mcap::records::Record::Channel(channel) => {
-                    let message_type = self
-                        .schemas
-                        .get(&channel.schema_id)
-                        .cloned()
-                        .unwrap_or_else(|| channel.message_encoding.clone());
-                    self.channels.insert(
-                        channel.id,
-                        (channel.topic, message_type, channel.message_encoding),
-                    );
-                }
-                mcap::records::Record::Message { header, data } => {
-                    let Some((topic, message_type, encoding)) =
-                        self.channels.get(&header.channel_id)
-                    else {
-                        return self
-                            .fail(format!("message on unknown channel {}", header.channel_id));
-                    };
-                    return Some(Ok(StreamedMessage {
-                        topic: topic.clone(),
-                        message_type: message_type.clone(),
-                        encoding: encoding.clone(),
-                        log_time: header.log_time,
-                        data: data.into_owned(),
-                    }));
-                }
-                _ => {}
+            if let Some(message) = self.demux.ready.pop_front() {
+                return Some(Ok(message));
+            }
+            if self.finished {
+                return None;
+            }
+            if let Err(error) = self.advance() {
+                self.finished = true;
+                self.pending.clear();
+                return Some(Err(ReaderError::generic(format!(
+                    "Failed to read MCAP message: {error}"
+                ))));
             }
         }
     }
@@ -295,21 +492,17 @@ impl McapStorageReader {
         if !self.is_open {
             return Err(ReaderError::BagNotOpen);
         }
-        let topics: Option<Vec<String>> =
-            connections.map(|cs| cs.iter().map(|c| c.topic.clone()).collect());
+        let filter = StreamFilter {
+            topics: connections.map(|cs| cs.iter().map(|c| c.topic.clone()).collect()),
+            start,
+            stop,
+        };
         let streams = self
             .mcap_paths
             .iter()
-            .map(|path| McapMessageStream::open(path))
+            .map(|path| McapMessageStream::open_filtered(path, filter.clone()))
             .collect::<Result<Vec<_>>>()?;
-        Ok(streams.into_iter().flatten().filter(move |message| {
-            let Ok(message) = message else {
-                return true;
-            };
-            topics.as_ref().is_none_or(|t| t.contains(&message.topic))
-                && start.is_none_or(|t| message.log_time >= t)
-                && stop.is_none_or(|t| message.log_time <= t)
-        }))
+        Ok(streams.into_iter().flatten())
     }
 
     /// The connection a message on `topic` belongs to.
@@ -843,12 +1036,14 @@ mod tests {
         chunk_size: u64,
         compression: Option<mcap::Compression>,
         statistics: bool,
+        chunked: bool,
     ) -> std::result::Result<Vec<WrittenMessage>, Box<dyn std::error::Error>> {
         let file = std::io::BufWriter::new(File::create(path)?);
         let mut writer = mcap::WriteOptions::new()
             .compression(compression)
             .chunk_size(Some(chunk_size))
             .emit_statistics(statistics)
+            .use_chunks(chunked)
             .profile("ros2")
             .create(file)?;
         let schema = writer.add_schema("pkg/msg/Sample", "ros2msg", b"int32 value")?;
@@ -901,7 +1096,7 @@ mod tests {
         let dir = tempdir()?;
         for compression in [None, Some(mcap::Compression::Zstd)] {
             let path = dir.path().join("recording.mcap");
-            write_recording(&path, 90, 1_024, compression, true)?;
+            write_recording(&path, 90, 1_024, compression, true, true)?;
             let from_summary =
                 topics_from_summary(&path)?.ok_or("a written file carries statistics")?;
             let scanned = topics_by_scanning(&path);
@@ -914,7 +1109,7 @@ mod tests {
     fn the_summary_types_a_schemaless_channel_by_its_encoding() -> TestResult {
         let dir = tempdir()?;
         let path = dir.path().join("recording.mcap");
-        write_recording(&path, 9, 1_024, None, true)?;
+        write_recording(&path, 9, 1_024, None, true, true)?;
         let topics = topics_from_summary(&path)?.ok_or("statistics expected")?;
         assert_eq!(topics.get("/cam"), Some(&("cdr".to_string(), 3)));
         assert_eq!(topics.get("/imu"), Some(&("pkg/msg/Sample".to_string(), 3)));
@@ -925,7 +1120,7 @@ mod tests {
     fn a_file_without_statistics_is_counted_by_scanning() -> TestResult {
         let dir = tempdir()?;
         let path = dir.path().join("recording.mcap");
-        write_recording(&path, 30, 1_024, None, false)?;
+        write_recording(&path, 30, 1_024, None, false, true)?;
         assert!(topics_from_summary(&path)?.is_none());
 
         let reader = McapStorageReader::new(vec![path.as_path()], Vec::new())?;
@@ -945,8 +1140,15 @@ mod tests {
         let dir = tempdir()?;
         let first = dir.path().join("a.mcap");
         let second = dir.path().join("b.mcap");
-        write_recording(&first, 12, 1_024, None, true)?;
-        write_recording(&second, 30, 1_024, Some(mcap::Compression::Zstd), true)?;
+        write_recording(&first, 12, 1_024, None, true, true)?;
+        write_recording(
+            &second,
+            30,
+            1_024,
+            Some(mcap::Compression::Zstd),
+            true,
+            true,
+        )?;
         let reader = McapStorageReader::new(vec![first.as_path(), second.as_path()], Vec::new())?;
         let connections = reader.get_topics_from_mcap()?;
         let imu = connections
@@ -963,6 +1165,194 @@ mod tests {
         let missing = dir.path().join("none.mcap");
         assert!(topics_from_summary(&missing).is_err());
         assert!(topics_by_scanning(&missing).is_empty());
+        Ok(())
+    }
+
+    fn stream_all(
+        path: &Path,
+        filter: StreamFilter,
+    ) -> std::result::Result<Vec<WrittenMessage>, Box<dyn std::error::Error>> {
+        McapMessageStream::open_filtered(path, filter)?
+            .map(|m| m.map(|m| (m.topic, m.log_time, m.data)).map_err(Into::into))
+            .collect()
+    }
+
+    #[test]
+    fn a_stream_yields_every_message_in_file_order() -> TestResult {
+        let dir = tempdir()?;
+        for compression in [
+            None,
+            Some(mcap::Compression::Zstd),
+            Some(mcap::Compression::Lz4),
+        ] {
+            let path = dir.path().join("recording.mcap");
+            let written = write_recording(&path, 900, 1_024, compression, true, true)?;
+            let read = stream_all(&path, StreamFilter::default())?;
+            assert_eq!(read.len(), written.len(), "{compression:?}");
+            assert_eq!(read, written, "{compression:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_stream_spans_more_chunks_than_one_batch() -> TestResult {
+        let dir = tempdir()?;
+        let path = dir.path().join("recording.mcap");
+        let written =
+            write_recording(&path, 3_000, 256, Some(mcap::Compression::Zstd), true, true)?;
+        let stream = McapMessageStream::open(&path)?;
+        assert!(stream.batch >= 4);
+        let chunks = {
+            let mut reader = LinearReader::new_with_options(
+                LinearReaderOptions::default().with_emit_chunks(true),
+            );
+            let mut file = File::open(&path)?;
+            let mut chunks = 0usize;
+            while let Some(event) = reader.next_event() {
+                match event? {
+                    LinearReadEvent::ReadRequest(need) => {
+                        let read = file.read(reader.insert(need))?;
+                        reader.notify_read(read);
+                    }
+                    LinearReadEvent::Record { opcode, .. } => {
+                        if opcode == mcap::records::op::CHUNK {
+                            chunks += 1;
+                        }
+                    }
+                }
+            }
+            chunks
+        };
+        assert!(
+            chunks > 4 * stream.batch,
+            "{chunks} chunks, batch {}",
+            stream.batch
+        );
+        let read: Vec<WrittenMessage> = stream
+            .map(|m| m.map(|m| (m.topic, m.log_time, m.data)))
+            .collect::<Result<_>>()?;
+        assert_eq!(read, written);
+        Ok(())
+    }
+
+    #[test]
+    fn a_filter_keeps_the_wanted_topics_and_times() -> TestResult {
+        let dir = tempdir()?;
+        let path = dir.path().join("recording.mcap");
+        let written = write_recording(&path, 600, 512, Some(mcap::Compression::Zstd), true, true)?;
+        let filter = StreamFilter {
+            topics: Some(["/imu".to_string(), "/cam".to_string()].into()),
+            start: Some(2_000),
+            stop: Some(5_000),
+        };
+        let expected: Vec<WrittenMessage> = written
+            .into_iter()
+            .filter(|(topic, time, _)| topic != "/cloud" && (2_000..=5_000).contains(time))
+            .collect();
+        assert!(!expected.is_empty());
+        assert_eq!(stream_all(&path, filter)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn a_filter_that_wants_no_topic_yields_nothing() -> TestResult {
+        let dir = tempdir()?;
+        let path = dir.path().join("recording.mcap");
+        write_recording(&path, 60, 512, None, true, true)?;
+        let filter = StreamFilter {
+            topics: Some(HashSet::from(["/absent".to_string()])),
+            ..StreamFilter::default()
+        };
+        assert!(stream_all(&path, filter)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn an_unchunked_file_streams_its_top_level_messages() -> TestResult {
+        let dir = tempdir()?;
+        let path = dir.path().join("recording.mcap");
+        let written = write_recording(&path, 90, 1_024, None, true, false)?;
+        assert_eq!(stream_all(&path, StreamFilter::default())?, written);
+        Ok(())
+    }
+
+    #[test]
+    fn a_truncated_file_ends_the_stream_with_an_error() -> TestResult {
+        let dir = tempdir()?;
+        let path = dir.path().join("recording.mcap");
+        write_recording(&path, 600, 512, Some(mcap::Compression::Zstd), true, true)?;
+        let bytes = std::fs::read(&path)?;
+        std::fs::write(&path, &bytes[..bytes.len() / 2])?;
+
+        let mut errors = 0usize;
+        let mut messages = 0usize;
+        for item in McapMessageStream::open(&path)? {
+            match item {
+                Ok(_) => messages += 1,
+                Err(_) => errors += 1,
+            }
+        }
+        assert!(messages > 0, "the intact half is still read");
+        assert_eq!(errors, 1, "one error, then the stream is finished");
+        Ok(())
+    }
+
+    #[test]
+    fn a_stream_of_a_missing_file_is_an_open_error() {
+        assert!(McapMessageStream::open(Path::new("/nonexistent/none.mcap")).is_err());
+    }
+
+    #[test]
+    fn a_chunk_with_an_unknown_compression_is_an_error() {
+        let chunk = PendingChunk {
+            compression: "brotli".to_string(),
+            uncompressed_size: 0,
+            data: Vec::new(),
+        };
+        assert!(decompress(chunk).is_err());
+    }
+
+    #[test]
+    fn a_chunk_whose_record_overruns_it_is_an_error() {
+        let mut demux = Demux::new(StreamFilter::default());
+        let mut records = vec![0x05u8];
+        records.extend_from_slice(&1_000u64.to_le_bytes());
+        records.extend_from_slice(&[0, 1, 2]);
+        assert!(absorb_chunk(&mut demux, &records).is_err());
+        assert!(absorb_chunk(&mut demux, &[0x05, 1, 2]).is_err());
+    }
+
+    #[test]
+    fn a_message_on_an_unknown_channel_is_an_error() {
+        let mut demux = Demux::new(StreamFilter::default());
+        let header = mcap::records::MessageHeader {
+            channel_id: 9,
+            sequence: 0,
+            log_time: 1,
+            publish_time: 1,
+        };
+        let record = mcap::records::Record::Message {
+            header,
+            data: std::borrow::Cow::Borrowed(&[1, 2, 3]),
+        };
+        assert!(demux.absorb(record).is_err());
+    }
+
+    #[test]
+    fn chunks_are_decompressed_in_batches_despite_the_index_records_between_them() -> TestResult {
+        let dir = tempdir()?;
+        let path = dir.path().join("recording.mcap");
+        write_recording(&path, 3_000, 256, Some(mcap::Compression::Zstd), true, true)?;
+        let mut stream = McapMessageStream::open(&path)?;
+        let batch = stream.batch;
+        let mut count = 0usize;
+        for message in stream.by_ref() {
+            message?;
+            count += 1;
+        }
+        assert_eq!(count, 3_000);
+        assert_eq!(stream.largest_batch(), batch);
+        assert!(batch > 1);
         Ok(())
     }
 }
