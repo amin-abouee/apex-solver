@@ -137,6 +137,90 @@ impl Iterator for McapMessageStream {
     }
 }
 
+/// The message type and message count of each topic in the MCAP file at
+/// `path`, from its summary section; `None` when the file has no summary or
+/// its summary carries no statistics (a recorder that was killed, say).
+///
+/// A topic counts only if it holds messages, as in
+/// [`topics_by_scanning`]; its type is its schema's name, or its channel's
+/// encoding without a schema.
+fn topics_from_summary(path: &Path) -> Result<Option<HashMap<String, (String, u64)>>> {
+    use mcap::sans_io::summary_reader::{SummaryReadEvent, SummaryReader, SummaryReaderOptions};
+    use std::io::Seek;
+
+    let fail = |error: &dyn std::fmt::Display| {
+        ReaderError::generic(format!(
+            "Failed to read the MCAP summary of {}: {error}",
+            path.display()
+        ))
+    };
+    let mut file = File::open(path).map_err(|e| fail(&e))?;
+    let size = file.metadata().map_err(|e| fail(&e))?.len();
+    let mut reader =
+        SummaryReader::new_with_options(SummaryReaderOptions::default().with_file_size(size));
+    while let Some(event) = reader.next_event() {
+        match event.map_err(|e| fail(&e))? {
+            SummaryReadEvent::ReadRequest(want) => {
+                let read = file.read(reader.insert(want)).map_err(|e| fail(&e))?;
+                reader.notify_read(read);
+            }
+            SummaryReadEvent::SeekRequest(to) => {
+                let at = file.seek(to).map_err(|e| fail(&e))?;
+                reader.notify_seeked(at);
+            }
+        }
+    }
+    let Some(summary) = reader.finish() else {
+        return Ok(None);
+    };
+    let Some(stats) = summary.stats else {
+        return Ok(None);
+    };
+    let mut topics: HashMap<String, (String, u64)> = HashMap::new();
+    for (id, &count) in &stats.channel_message_counts {
+        if count == 0 {
+            continue;
+        }
+        let Some(channel) = summary.channels.get(id) else {
+            return Ok(None);
+        };
+        let message_type = channel.schema.as_ref().map_or_else(
+            || channel.message_encoding.clone(),
+            |schema| schema.name.clone(),
+        );
+        topics
+            .entry(channel.topic.clone())
+            .or_insert((message_type, 0))
+            .1 += count;
+    }
+    Ok(Some(topics))
+}
+
+/// The same table as [`topics_from_summary`], by streaming every message of
+/// the file; unreadable messages are skipped with a warning.
+fn topics_by_scanning(path: &Path) -> HashMap<String, (String, u64)> {
+    let mut topics: HashMap<String, (String, u64)> = HashMap::new();
+    let stream = match McapMessageStream::open(path) {
+        Ok(stream) => stream,
+        Err(e) => {
+            tracing::warn!("Failed to read MCAP topics: {e}");
+            return topics;
+        }
+    };
+    for message in stream {
+        match message {
+            Ok(message) => {
+                topics
+                    .entry(message.topic)
+                    .or_insert((message.message_type, 0))
+                    .1 += 1;
+            }
+            Err(e) => tracing::warn!("Failed to read MCAP message: {e}"),
+        }
+    }
+    topics
+}
+
 /// MCAP storage reader implementation
 pub struct McapStorageReader {
     /// Paths to MCAP files
@@ -159,19 +243,26 @@ impl McapStorageReader {
         })
     }
 
-    /// Get all topics and their message counts directly from MCAP files —
-    /// one streaming pass over every file.
+    /// Get all topics and their message counts directly from the MCAP
+    /// files: from each file's summary section when it has statistics (a
+    /// seek to the footer and a read of the index, however large the file),
+    /// by one streaming pass over the file when it has none.
     pub fn get_topics_from_mcap(&self) -> Result<Vec<Connection>> {
         let mut topic_map: HashMap<String, (String, u64)> = HashMap::new();
-        for message in self.stream(None, None, None)? {
-            match message {
-                Ok(message) => {
-                    topic_map
-                        .entry(message.topic)
-                        .or_insert((message.message_type, 0))
-                        .1 += 1;
+        for path in &self.mcap_paths {
+            let counted = match topics_from_summary(path) {
+                Ok(Some(counted)) => counted,
+                Ok(None) => topics_by_scanning(path),
+                Err(e) => {
+                    tracing::warn!(
+                        "No usable MCAP summary in {} ({e}); scanning the file",
+                        path.display()
+                    );
+                    topics_by_scanning(path)
                 }
-                Err(e) => tracing::warn!("Failed to read MCAP message: {e}"),
+            };
+            for (topic, (message_type, count)) in counted {
+                topic_map.entry(topic).or_insert((message_type, 0)).1 += count;
             }
         }
 
@@ -737,6 +828,141 @@ mod tests {
         let path = std::path::PathBuf::from("test.mcap");
         let reader = McapStorageReader::new(vec![path.as_path()], vec![])?;
         assert!(!reader.is_open());
+        Ok(())
+    }
+
+    /// A message as written: topic, log time \[ns\], payload.
+    type WrittenMessage = (String, u64, Vec<u8>);
+
+    /// One recording the readers below are compared on: `messages` messages
+    /// round-robin on `/imu`, `/cloud` and `/cam`, in chunks of about
+    /// `chunk_size` bytes. `(topic, log time, data)` in write order.
+    fn write_recording(
+        path: &Path,
+        messages: u64,
+        chunk_size: u64,
+        compression: Option<mcap::Compression>,
+        statistics: bool,
+    ) -> std::result::Result<Vec<WrittenMessage>, Box<dyn std::error::Error>> {
+        let file = std::io::BufWriter::new(File::create(path)?);
+        let mut writer = mcap::WriteOptions::new()
+            .compression(compression)
+            .chunk_size(Some(chunk_size))
+            .emit_statistics(statistics)
+            .profile("ros2")
+            .create(file)?;
+        let schema = writer.add_schema("pkg/msg/Sample", "ros2msg", b"int32 value")?;
+        let channels = [
+            (
+                "/imu",
+                writer.add_channel(schema, "/imu", "cdr", &Default::default())?,
+            ),
+            (
+                "/cloud",
+                writer.add_channel(schema, "/cloud", "cdr", &Default::default())?,
+            ),
+            (
+                "/cam",
+                writer.add_channel(0, "/cam", "cdr", &Default::default())?,
+            ),
+        ];
+        let mut written = Vec::new();
+        for k in 0..messages {
+            let (topic, channel_id) = channels[(k % 3) as usize];
+            let size = 16 + (k % 7) as usize * 40;
+            let data: Vec<u8> = (0..size)
+                .map(|i| ((i as u64 * 7 + k) % 251) as u8)
+                .collect();
+            let log_time = 1_000 + 10 * k;
+            let header = mcap::records::MessageHeader {
+                channel_id,
+                sequence: k as u32,
+                log_time,
+                publish_time: log_time,
+            };
+            writer.write_to_known_channel(&header, &data)?;
+            written.push((topic.to_string(), log_time, data));
+        }
+        writer.finish()?;
+        Ok(written)
+    }
+
+    fn sorted(topics: HashMap<String, (String, u64)>) -> Vec<(String, String, u64)> {
+        let mut rows: Vec<_> = topics
+            .into_iter()
+            .map(|(topic, (message_type, count))| (topic, message_type, count))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn the_summary_lists_the_topics_a_scan_finds() -> TestResult {
+        let dir = tempdir()?;
+        for compression in [None, Some(mcap::Compression::Zstd)] {
+            let path = dir.path().join("recording.mcap");
+            write_recording(&path, 90, 1_024, compression, true)?;
+            let from_summary =
+                topics_from_summary(&path)?.ok_or("a written file carries statistics")?;
+            let scanned = topics_by_scanning(&path);
+            assert_eq!(sorted(from_summary), sorted(scanned), "{compression:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_summary_types_a_schemaless_channel_by_its_encoding() -> TestResult {
+        let dir = tempdir()?;
+        let path = dir.path().join("recording.mcap");
+        write_recording(&path, 9, 1_024, None, true)?;
+        let topics = topics_from_summary(&path)?.ok_or("statistics expected")?;
+        assert_eq!(topics.get("/cam"), Some(&("cdr".to_string(), 3)));
+        assert_eq!(topics.get("/imu"), Some(&("pkg/msg/Sample".to_string(), 3)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_file_without_statistics_is_counted_by_scanning() -> TestResult {
+        let dir = tempdir()?;
+        let path = dir.path().join("recording.mcap");
+        write_recording(&path, 30, 1_024, None, false)?;
+        assert!(topics_from_summary(&path)?.is_none());
+
+        let reader = McapStorageReader::new(vec![path.as_path()], Vec::new())?;
+        let connections = reader.get_topics_from_mcap()?;
+        let counts: HashMap<_, _> = connections
+            .iter()
+            .map(|c| (c.topic.as_str(), c.message_count))
+            .collect();
+        assert_eq!(counts.get("/imu"), Some(&10));
+        assert_eq!(counts.get("/cloud"), Some(&10));
+        assert_eq!(counts.get("/cam"), Some(&10));
+        Ok(())
+    }
+
+    #[test]
+    fn topics_sum_over_several_files() -> TestResult {
+        let dir = tempdir()?;
+        let first = dir.path().join("a.mcap");
+        let second = dir.path().join("b.mcap");
+        write_recording(&first, 12, 1_024, None, true)?;
+        write_recording(&second, 30, 1_024, Some(mcap::Compression::Zstd), true)?;
+        let reader = McapStorageReader::new(vec![first.as_path(), second.as_path()], Vec::new())?;
+        let connections = reader.get_topics_from_mcap()?;
+        let imu = connections
+            .iter()
+            .find(|c| c.topic == "/imu")
+            .ok_or("imu topic")?;
+        assert_eq!(imu.message_count, 4 + 10);
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_file_has_no_summary_and_no_topics() -> TestResult {
+        let dir = tempdir()?;
+        let missing = dir.path().join("none.mcap");
+        assert!(topics_from_summary(&missing).is_err());
+        assert!(topics_by_scanning(&missing).is_empty());
         Ok(())
     }
 }
