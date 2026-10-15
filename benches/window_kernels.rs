@@ -273,7 +273,7 @@ fn bench_window(c: &mut Criterion) -> SetupResult<()> {
 fn benches(c: &mut Criterion) {
     for result in [bench_imu(c), bench_lidar(c), bench_window(c)] {
         if let Err(error) = result {
-            eprintln!("window_kernels: setup failed: {error}");
+            tracing::error!("window_kernels: setup failed: {error}");
         }
     }
 }
