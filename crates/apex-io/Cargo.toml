@@ -190,6 +190,12 @@ download = ["dep:ureq", "dep:bzip2", "dep:flate2", "dep:tar"]
 
 [dev-dependencies]
 tempfile.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "mcap_stream"
+required-features = ["rosbag"]
+harness = false
 
 [lints]
 workspace = true
