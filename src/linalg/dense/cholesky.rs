@@ -13,19 +13,33 @@ use crate::error::ErrorLogging;
 use crate::linalg::{Damping, DenseMode, LinAlgError, LinAlgResult, LinearSolver};
 
 /// Factorization scratch memory. A clone starts empty and regrows on first use.
-struct Scratch(MemBuffer);
+struct Scratch {
+    buffer: MemBuffer,
+    /// Bytes the buffer was built to serve. `MemBuffer::len` is not comparable
+    /// with a requirement's `unaligned_bytes_required`, so it is tracked here.
+    built_for: usize,
+}
+
+impl Scratch {
+    fn empty() -> Self {
+        Self {
+            buffer: MemBuffer::new(StackReq::EMPTY),
+            built_for: 0,
+        }
+    }
+}
 
 impl std::fmt::Debug for Scratch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Scratch")
-            .field("bytes", &self.0.len())
+            .field("bytes", &self.built_for)
             .finish()
     }
 }
 
 impl Clone for Scratch {
     fn clone(&self) -> Self {
-        Self(MemBuffer::new(StackReq::EMPTY))
+        Self::empty()
     }
 }
 
@@ -63,7 +77,7 @@ impl DenseCholeskySolver {
             gradient: None,
             factor: Mat::zeros(0, 0),
             rhs: Mat::zeros(0, 0),
-            scratch: Scratch(MemBuffer::new(StackReq::EMPTY)),
+            scratch: Scratch::empty(),
         }
     }
 
@@ -107,7 +121,7 @@ impl DenseCholeskySolver {
         &mut self,
         damping: Option<&Damping>,
         context: &str,
-    ) -> LinAlgResult<Mat<f64>> {
+    ) -> LinAlgResult<&Mat<f64>> {
         let par: Par = get_global_parallelism();
         let (Some(hessian), Some(gradient)) = (self.hessian.as_ref(), self.gradient.as_ref())
         else {
@@ -139,10 +153,14 @@ impl DenseCholeskySolver {
 
         let required = factor::cholesky_in_place_scratch::<f64>(n, par, Default::default())
             .or(solve::solve_in_place_scratch::<f64>(n, k, par));
-        if self.scratch.0.len() < required.unaligned_bytes_required() {
-            self.scratch = Scratch(MemBuffer::new(required));
+        let bytes = required.unaligned_bytes_required();
+        if self.scratch.built_for < bytes {
+            self.scratch = Scratch {
+                buffer: MemBuffer::new(required),
+                built_for: bytes,
+            };
         }
-        let stack = MemStack::new(&mut self.scratch.0);
+        let stack = MemStack::new(&mut self.scratch.buffer);
         factor::cholesky_in_place(
             self.factor.as_mut(),
             Default::default(),
@@ -156,7 +174,7 @@ impl DenseCholeskySolver {
                 self.factor[(row, column)] = 0.0;
             }
         }
-        let stack = MemStack::new(&mut self.scratch.0);
+        let stack = MemStack::new(&mut self.scratch.buffer);
         solve::solve_in_place_with_conj(
             self.factor.as_ref(),
             Conj::No,
@@ -164,7 +182,7 @@ impl DenseCholeskySolver {
             par,
             stack,
         );
-        Ok(self.rhs.clone())
+        Ok(&self.rhs)
     }
 
     fn solve_dense_normal(
@@ -174,6 +192,7 @@ impl DenseCholeskySolver {
     ) -> LinAlgResult<Mat<f64>> {
         self.form_normal_equations(residuals, jacobian);
         self.solve_retained(None, "Dense Cholesky factorization failed")
+            .cloned()
     }
 
     /// Solve with dense Jacobian and damping (the core dense augmented implementation).
@@ -187,6 +206,24 @@ impl DenseCholeskySolver {
         jacobian: &Mat<f64>,
         damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
+        self.form_normal_equations(residuals, jacobian);
+        self.solve_retained(
+            Some(damping),
+            "Augmented dense Cholesky factorization failed",
+        )
+        .cloned()
+    }
+
+    /// [`LinearSolver::solve_augmented_equation`] that hands the step back
+    /// by reference, into the solver's own buffer: the result of a solve of
+    /// an unchanged shape costs no allocation. The step is valid until the
+    /// next solve; the arithmetic is the owning method's.
+    pub fn solve_augmented_equation_ref(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &Mat<f64>,
+        damping: &Damping,
+    ) -> LinAlgResult<&Mat<f64>> {
         self.form_normal_equations(residuals, jacobian);
         self.solve_retained(
             Some(damping),
@@ -460,5 +497,22 @@ mod tests {
         let jacobian = Mat::<f64>::zeros(4, 2);
         let residual = Mat::<f64>::from_fn(4, 1, |_, _| 1.0);
         assert!(solver.solve_normal_equation(&residual, &jacobian).is_err());
+    }
+
+    #[test]
+    fn by_reference_step_equals_the_owned_step() -> TestResult {
+        let jacobian = Mat::<f64>::from_fn(52, 3, |i, j| ((i * 7 + j * 3) % 11) as f64 - 4.5);
+        let residual = Mat::<f64>::from_fn(52, 1, |i, _| ((i * 5) % 9) as f64 - 3.0);
+        let damping = Damping::identity(1e-10);
+
+        let owned =
+            DenseCholeskySolver::new().solve_augmented_equation(&residual, &jacobian, &damping)?;
+        let mut solver = DenseCholeskySolver::new();
+        for _ in 0..3 {
+            let by_reference =
+                solver.solve_augmented_equation_ref(&residual, &jacobian, &damping)?;
+            assert_eq!(*by_reference, owned);
+        }
+        Ok(())
     }
 }
