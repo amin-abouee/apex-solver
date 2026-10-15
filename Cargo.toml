@@ -242,3 +242,7 @@ lto = "thin"
 [[bench]]
 name = "micro_kernels"
 harness = false
+
+[[bench]]
+name = "window_kernels"
+harness = false
