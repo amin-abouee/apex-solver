@@ -192,6 +192,7 @@ tracing-subscriber.workspace = true
 factrs.workspace = true
 tiny-solver.workspace = true
 csv.workspace = true
+dhat = "0.3"
 serde.workspace = true
 
 [[bench]]
