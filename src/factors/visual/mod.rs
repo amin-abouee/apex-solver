@@ -9,6 +9,7 @@ pub mod homogeneous_point;
 pub mod inverse_depth;
 pub mod inverse_depth_bearing_se23;
 pub mod inverse_depth_se23;
+pub mod photometric_inverse_range;
 pub mod photometric_patch;
 pub mod photometric_two_view;
 pub mod projection;
@@ -24,6 +25,10 @@ pub use homogeneous_point::HomogeneousPointFactor;
 pub use inverse_depth::InverseDepthFactor;
 pub use inverse_depth_bearing_se23::InverseDepthBearingSe23Factor;
 pub use inverse_depth_se23::InverseDepthSe23Factor;
+pub use photometric_inverse_range::{
+    AffinePriorFactor, GradientImage, PhotometricInverseRangeSe23Factor, PhotometricPoint,
+    PhotometricWeights,
+};
 pub use photometric_patch::IntensityImage;
 pub use photometric_patch::PhotometricPatchFactor;
 pub use photometric_two_view::{PhotometricTwoViewFactor, PlanePoint, ReferenceView};
