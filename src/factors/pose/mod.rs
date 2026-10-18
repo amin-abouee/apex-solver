@@ -7,7 +7,9 @@
 pub mod between;
 pub mod partial_prior;
 pub mod prior;
+pub mod relative_4dof;
 
 pub use between::BetweenFactor;
 pub use partial_prior::{PoseRotationPrior, PoseTranslationPrior};
 pub use prior::{EuclideanPriorFactor, PriorFactor};
+pub use relative_4dof::Relative4DofFactor;
