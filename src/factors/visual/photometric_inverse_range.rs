@@ -39,6 +39,14 @@
 //! affine:   ∂/∂b_t = −s, ∂/∂b_h = s·α, ∂/∂a_t = −s·α·(Iₕ−b_h), ∂/∂a_h = s·α·(Iₕ−b_h)
 //! ```
 //!
+//! # Scale
+//!
+//! The states live in a visual frame whose metric scale is `s` (see
+//! [`ScaleGravityImuFactor`](crate::factors::imu::se23::ScaleGravityImuFactor)),
+//! so the extrinsic's translation, which is metric, enters as `t_SC / s`.
+//! With `t' = t_SC / s` and `M = R_scᵀ R_tᵀ`: `∂r/∂s = −s·g (M R_h − R_scᵀ) t'/s`,
+//! and the extrinsic's `ρ` columns are divided by `s`.
+//!
 //! # Inactive cases
 //!
 //! A point at non-positive range or behind the target camera, or a pattern
@@ -46,7 +54,7 @@
 //! gradient is undefined), contributes nothing: zero residual and zero
 //! Jacobian, as the line and patch factors do.
 //!
-//! # Parameter layout (6 blocks, 29 minimal DOF)
+//! # Parameter layout (7 blocks, 30 minimal DOF)
 //!
 //! ```text
 //! params[0]: SE23 host        — 10D, 9 DOF
@@ -55,6 +63,7 @@
 //! params[3]: Rn(1) ρ          —  1D
 //! params[4]: Rn(2) (a, b) host
 //! params[5]: Rn(2) (a, b) target
+//! params[6]: Rn(1) s         scale of the visual frame
 //! ```
 //!
 //! The factor whitens internally; register it with `NoiseModel::null()`.
@@ -75,8 +84,9 @@ use crate::factors::common::validate::expect_block_sizes;
 
 /// Residuals per point: the 8-pixel pattern.
 pub const PATTERN_PIXELS: usize = 8;
-/// Columns of the Jacobian: two states, the extrinsic, `ρ`, two affine pairs.
-pub const JACOBIAN_COLUMNS: usize = 9 + 9 + 6 + 1 + 2 + 2;
+/// Columns of the Jacobian: two states, the extrinsic, `ρ`, two affine pairs
+/// and the scale.
+pub const JACOBIAN_COLUMNS: usize = 9 + 9 + 6 + 1 + 2 + 2 + 1;
 
 /// A target image with gradients, shared by every factor that looks at it.
 ///
@@ -195,6 +205,7 @@ pub struct PhotometricInverseRangeSe23Factor {
 /// The variables the factor is evaluated at.
 #[derive(Clone, Copy)]
 struct State<'a> {
+    scale: f64,
     host: &'a SE23,
     target: &'a SE23,
     extrinsic: &'a SE3,
@@ -261,7 +272,7 @@ impl PhotometricInverseRangeSe23Factor {
     /// factor is inactive there.
     #[must_use]
     pub fn energy(&self, params: &[&[f64]]) -> Option<f64> {
-        let [host, target, extrinsic, rho, aff_h, aff_t] = params else {
+        let [host, target, extrinsic, rho, aff_h, aff_t, scale] = params else {
             return None;
         };
         let (host, target, extrinsic) = (
@@ -271,6 +282,7 @@ impl PhotometricInverseRangeSe23Factor {
         );
         self.evaluate(
             &State {
+                scale: scale[0],
                 host: &host,
                 target: &target,
                 extrinsic: &extrinsic,
@@ -285,6 +297,7 @@ impl PhotometricInverseRangeSe23Factor {
 
     fn evaluate(&self, state: &State<'_>, with_jacobian: bool) -> Option<Evaluation> {
         let State {
+            scale,
             host,
             target,
             extrinsic,
@@ -292,13 +305,14 @@ impl PhotometricInverseRangeSe23Factor {
             aff_h,
             aff_t,
         } = *state;
-        if !rho.is_finite() || rho <= 0.0 {
+        if !rho.is_finite() || rho <= 0.0 || !(scale.is_finite() && scale > 0.0) {
             return None;
         }
         let [fx, fy, cx, cy] = self.k;
         let r_e = extrinsic.rotation_so3().rotation_matrix();
+        let inv_scale = 1.0 / scale;
         let (t_e, r_h, p_h) = (
-            extrinsic.translation(),
+            extrinsic.translation() * inv_scale,
             host.rotation_matrix(),
             host.translation(),
         );
@@ -363,15 +377,19 @@ impl PhotometricInverseRangeSe23Factor {
                 // extrinsic
                 let gt_rel = g.transpose() * r_rel;
                 row.fixed_rows_mut::<3>(18)
-                    .copy_from(&(gt_rel - g.transpose()).transpose());
+                    .copy_from(&((gt_rel - g.transpose()) * inv_scale).transpose());
                 row.fixed_rows_mut::<3>(21).copy_from(
                     &(g.transpose() * skew(&p_target) - gt_rel * skew(&p_host)).transpose(),
                 );
                 // inverse range
                 row[24] = -(gt_rel * p_host)[0] / rho;
+                // scale: the extrinsic translation is t_SC / s.
+                let d_t = (g.transpose() * (m * r_h - r_e.transpose())) * (-t_e * inv_scale);
+                row[29] = d_t[0];
                 for c in 0..25 {
                     row[c] *= s;
                 }
+                row[29] *= s;
                 // affine: a_h, b_h, a_t, b_t
                 let fixed = alpha * host_term;
                 row[25] = s * fixed;
@@ -398,7 +416,7 @@ impl Factor for PhotometricInverseRangeSe23Factor {
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        let [host, target, extrinsic, rho, aff_h, aff_t] = params else {
+        let [host, target, extrinsic, rho, aff_h, aff_t, scale] = params else {
             return;
         };
         let (host, target, extrinsic) = (
@@ -408,6 +426,7 @@ impl Factor for PhotometricInverseRangeSe23Factor {
         );
         let evaluation = self.evaluate(
             &State {
+                scale: scale[0],
                 host: &host,
                 target: &target,
                 extrinsic: &extrinsic,
@@ -452,8 +471,8 @@ impl Factor for PhotometricInverseRangeSe23Factor {
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
         expect_block_sizes(
             variables,
-            &[SE23::REP_SIZE, SE23::REP_SIZE, SE3::REP_SIZE, 1, 2, 2],
-            "PhotometricInverseRangeSe23Factor expects [SE23 host, SE23 target, SE3 T_SC, Rn(1) rho, Rn(2) aff_host, Rn(2) aff_target]",
+            &[SE23::REP_SIZE, SE23::REP_SIZE, SE3::REP_SIZE, 1, 2, 2, 1],
+            "PhotometricInverseRangeSe23Factor expects [SE23 host, SE23 target, SE3 T_SC, Rn(1) rho, Rn(2) aff_host, Rn(2) aff_target, Rn(1) scale]",
         )
     }
 }
@@ -704,6 +723,7 @@ mod tests {
         rho: f64,
         aff_h: [f64; 2],
         aff_t: [f64; 2],
+        scale: f64,
     }
 
     fn vars(s: &Scene) -> Vars {
@@ -714,10 +734,11 @@ mod tests {
             rho: s.rho,
             aff_h: [0.0, 0.0],
             aff_t: [0.0, 0.0],
+            scale: 1.0,
         }
     }
 
-    fn params(v: &Vars) -> [Vec<f64>; 6] {
+    fn params(v: &Vars) -> [Vec<f64>; 7] {
         [
             v.host.as_param_slice().to_vec(),
             v.target.as_param_slice().to_vec(),
@@ -725,6 +746,7 @@ mod tests {
             vec![v.rho],
             v.aff_h.to_vec(),
             v.aff_t.to_vec(),
+            vec![v.scale],
         ]
     }
 
@@ -758,6 +780,7 @@ mod tests {
         Rho,
         AffineHost(usize),
         AffineTarget(usize),
+        Scale,
     }
 
     fn perturbed(v: &Vars, column: Column, d: f64) -> Vars {
@@ -780,6 +803,7 @@ mod tests {
             Column::Rho => out.rho += d,
             Column::AffineHost(k) => out.aff_h[k] += d,
             Column::AffineTarget(k) => out.aff_t[k] += d,
+            Column::Scale => out.scale += d,
         }
         out
     }
@@ -814,6 +838,7 @@ mod tests {
         base.rho *= 1.05;
         base.aff_h = [0.02, 1.5];
         base.aff_t = [-0.03, -2.0];
+        base.scale = 1.07;
         let (base_r, jac) = run(&f, &base);
         assert!(
             base_r.iter().all(|x| x.abs() > 1e-3),
@@ -834,6 +859,7 @@ mod tests {
         columns.push((26, Column::AffineHost(1)));
         columns.push((27, Column::AffineTarget(0)));
         columns.push((28, Column::AffineTarget(1)));
+        columns.push((29, Column::Scale));
 
         let mut checked = 0;
         for (col, which) in columns {
@@ -863,7 +889,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 23);
+        assert_eq!(checked, 24);
         Ok(())
     }
 
@@ -1024,6 +1050,7 @@ mod tests {
         );
         let aff_h = fixed(&mut problem, ManifoldType::RN, &[0.0, 0.0]);
         let aff_t = fixed(&mut problem, ManifoldType::RN, &[0.0, 0.0]);
+        let scale = fixed(&mut problem, ManifoldType::RN, &[1.0]);
 
         let start = s.target.right_plus(
             &SE23Tangent::from_slice(&[0.015, -0.01, 0.012, 0.004, -0.003, 0.005, 0.0, 0.0, 0.0]),
@@ -1057,7 +1084,7 @@ mod tests {
                 PhotometricWeights::default(),
             )?;
             problem.add_residual_block_with_noise(
-                &[host, target, extrinsic, key, aff_h, aff_t],
+                &[host, target, extrinsic, key, aff_h, aff_t, scale],
                 Box::new(f),
                 None,
                 NoiseModel::null(),
