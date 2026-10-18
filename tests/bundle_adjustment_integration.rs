@@ -19,6 +19,9 @@ use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
 
+/// Download attempts before the test fails on a network error.
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+
 /// Convert axis-angle rotation vector to SO3.
 fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
     let angle = axis_angle.norm();
@@ -32,8 +35,15 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
 
 #[test]
 fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>> {
-    // Ensure the dataset is present, downloading it if necessary.
-    apex_solver::apex_io::ensure_ba_dataset("trafalgar", 21, 11315)?;
+    // Ensure the dataset is present, downloading it if necessary. The server
+    // is slow at times, so a timed-out download is retried before failing.
+    let mut attempt = 1;
+    while let Err(error) = apex_solver::apex_io::ensure_ba_dataset("trafalgar", 21, 11315) {
+        if attempt == DOWNLOAD_ATTEMPTS {
+            return Err(error.into());
+        }
+        attempt += 1;
+    }
 
     // Load BAL dataset
     let dataset = BalLoader::load("data/bundle_adjustment/trafalgar/problem-21-11315-pre.txt")?;
