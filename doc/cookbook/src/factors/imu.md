@@ -1,177 +1,172 @@
-# IMU
+# IMU Factors
 
-`factors::imu` — inertial preintegration. Two factors per group and nothing
-else, so a choice here is two questions rather than a catalogue.
+An IMU measures angular rate and specific force; the estimator needs the
+*relative motion* between two states. The bridge is preintegration: the
+measurements between two keyframes are integrated once, into a rotation, a
+velocity increment and a position increment, plus the Jacobians that say how
+those change when the bias changes. This chapter is that bridge, the four
+factor types built on it, and the two modelling choices that decide which one
+a system should use.
 
-## Preintegration
+## 1. Preintegration
 
-Integrating raw IMU samples between keyframes would re-integrate the whole
-interval every time the state changes. Preintegration instead accumulates the
-measurements into a *relative* quantity that does not depend on the
-states — only on the bias linearization point — so a keyframe pair can be
-re-evaluated in constant time.
+`ImuPreintegration` integrates a sample sequence over $[t_0, t_1]$ with the
+midpoint rule, accumulating
 
-`ImuPreintegration::new(measurements, params, t0, t1, &bias_ref)` accumulates
-the delta $\Delta$, its $15\times15$ covariance, and the bias-correction
-Jacobians $\partial\Delta/\partial\mathbf{b}$. Everything it produces is
-**gravity-free**; the factors reinstate gravity when they build the
-gravity-corrected state.
+$$
+\Delta R,\quad \Delta\mathbf{v},\quad \Delta\mathbf{p},
+\qquad
+\mathbf{C}_1 = \int R\,\mathrm{d}\tau,
+\qquad
+\mathbf{C}_2 = \int\!\!\int R\,\mathrm{d}\tau^2,
+$$
 
-## Two axes
+together with the first-order bias Jacobians
+$\partial\Delta R/\partial b_g$,
+$\partial\Delta\mathbf{v}/\partial b_g$,
+$\partial\Delta\mathbf{p}/\partial b_g$ and the accelerometer terms
+$-\mathbf{C}_1\,\partial b_a$, $-\mathbf{C}_2\,\partial b_a$.
 
-**Which group?** `se23` models a keyframe as $(R, \mathbf{t}, \mathbf{v})$;
-`sgal3` adds a time coordinate, $(R, \mathbf{t}, \mathbf{v}, s)$, making the
-inter-keyframe interval an estimated quantity — pick it for time-offset or
-rolling-shutter calibration, `se23` otherwise.
+The two $\mathbf{C}$ integrals are what make the accelerometer bias's effect
+on the *position* correct: it enters through $\int\!\!\int R$, not through a
+linear $t$.
 
-**Combined or not?** This is the split GTSAM draws between `ImuFactor` and
-`CombinedImuFactor`, and it decides the residual dimension.
+The factor that uses it is the crate's most reused: `apex-vio` and `apex-cv`
+both build their IMU factors from it.
 
-| | `ImuFactor` | `CombinedImuFactor` |
+## 2. The residual
+
+The interval is compared as a right-minus on the `SE23` group, with gravity
+folded into the state so the comparison is a plain group difference:
+
+$$
+gc_i = \left(\mathbf{t}_i + \mathbf{v}_i\Delta t - \tfrac12\mathbf{g}\Delta t^2,\;
+\mathbf{v}_i - \mathbf{g}\Delta t,\; R_i\right),
+\qquad
+\mathbf{r} = (gc_i^{-1}\circ X_j)\boxminus\left(\Delta\boxplus\xi(\delta b)\right),
+$$
+
+with the first-order bias correction
+
+$$
+\xi(\delta b) = \begin{bmatrix}
+J^p_{b_g}\delta b_g - \mathbf{C}_2\delta b_a\
+-J^\alpha_{b_g}\delta b_g\
+J^v_{b_g}\delta b_g - \mathbf{C}_1\delta b_a
+\end{bmatrix}.
+$$
+
+## 3. Two groups
+
+<div class="apx-table">
+<span class="apx-title">`se23` and `sgal3`</span>
+
+| | `se23` | `sgal3` |
 |---|---|---|
-| `se23` | 9D, `(SE23, SE23, bias)` | 15D, `(SE23, bias, SE23, bias)` |
-| `sgal3` | 10D, `(SGal3, SGal3, bias)` | 16D, `(SGal3, bias, SGal3, bias)` |
+| state | $(R, t, v)$ | $(R, t, v, s)$ — a time coordinate |
+| interval | given by the keyframes | an estimated quantity |
+| use when | the camera and IMU are synchronized | sensor time-offset or rolling-shutter must be calibrated |
 
-`ImuFactor` shares one bias variable across the interval and leaves its
-evolution to a separate edge; `CombinedImuFactor` takes a bias per keyframe and
-embeds the random walk in six extra residual rows. **Doing both counts that
-uncertainty twice.**
+</div>
 
-Weighting follows the same split: the shared-bias form uses a $9\times9$
-information built from measurement noise alone, the combined form the full
-$15\times15$ including the random walk.
+The crate's IMU module docs make the choice a two-question decision: *which
+group* (`se23` unless the time offset is a thing you must estimate) and
+*combined or not* (below). Both groups ship `ImuFactor` and
+`CombinedImuFactor` with the same residual and the same bias correction, so
+switching groups does not change anything else.
 
-A keyframe is a **single** variable on the group, not separate pose and
-velocity blocks — the optimizer's update is then a group right-plus, and the
-pose/velocity coupling inertial integration produces is the group's job. The
-practical consequence is that aiding measurements attach to that state: an
-SE(3)-only factor cannot connect to an `SE23` variable, while
-`PriorFactor<SE23>` and `MarginalPriorFactor` are generic and do.
+## 4. Combined or not
 
-## Error
+**`ImuFactor`** shares **one** bias variable across the interval and leaves
+the bias's evolution to a separate `bias_random_walk` edge. The factor's
+residual is 9 rows: $[\rho, \theta, \nu]$.
 
-$$
-\begin{aligned}
-\text{gc}_i &= \mathrm{SE}_2(3)\!\left(\mathbf{p}_i + \mathbf{v}_i\Delta t - \tfrac12 \mathbf{g}\,\Delta t^2,\;\; \mathbf{v}_i - \mathbf{g}\,\Delta t,\;\; R_i\right) \\
-\text{predicted} &= \text{gc}_i^{-1} \circ \text{state}_j \\
-\mathbf{r} &= \text{predicted} \boxminus \big(\Delta \boxplus \mathbf{c}(\mathbf{b})\big) \in \mathbb{R}^9
-\end{aligned}
-$$
+**`CombinedImuFactor`** takes a bias **per keyframe** and embeds the random
+walk in its trailing six rows. The residual is 15 rows:
+$[\rho, \theta, \nu, \Delta b_g, \Delta b_a]$.
 
-Folding gravity into the state rather than the residual is what makes the
-comparison a plain group right-minus. The bias correction $\mathbf{c}(\mathbf{b})$
-is the first-order update of the preintegrated delta for a bias away from its
-linearization point,
+The module's documentation is explicit about the consequence: "Using both at
+once would count that uncertainty twice." The trade is graph size — the
+combined factor saves a factor per interval — against the coupling: a
+combined factor's two bias blocks and two state blocks share rows, which is
+precisely what makes the *marginalization* of a window's first keyframe
+ineligible for the Schur path (chapter
+[The Schur Complement](../linalg/schur.md)).
 
-$$
-\mathbf{c} = \left(\tfrac{\partial\Delta\mathbf{p}}{\partial\mathbf{b}_g}\delta\mathbf{b}_g - C_{\!\iint}\delta\mathbf{b}_a,\;\;
--\tfrac{\partial\Delta\boldsymbol{\alpha}}{\partial\mathbf{b}_g}\delta\mathbf{b}_g,\;\;
-\tfrac{\partial\Delta\mathbf{v}}{\partial\mathbf{b}_g}\delta\mathbf{b}_g - C_{\!\int}\delta\mathbf{b}_a\right)
-$$
+## 5. Gravity and scale
 
-The combined form appends $\mathbf{b}_i - \mathbf{b}_j$ (6 rows).
+Two wrapper factors extend the IMU factor with additional unknowns:
 
-## Jacobian
-
-All four factors are thin wrappers over one `evaluate`, which returns the
-residual and three tangent-space blocks. Write
-$J_{\boxminus}^{\text{pred}}, J_{\boxminus}^{\Delta}$ for the two Jacobians
-`right_minus` reports and $J_{\boxplus}$ for the tangent Jacobian of
-`right_plus`. Then
+**`GravityFrameImuFactor`** adds a three-degree-of-freedom gravity direction
+$R_g \in SO(3)$ to the factor — gravity is $R_g(0,0,-g)$ — and evaluates the
+inner factor on the states expressed in the gravity frame,
+$X' = T_g^{-1}X$ with $T_g = SE_2(3)(R_g, 0, 0)$. Its columns are
 
 $$
-\frac{\partial\mathbf{r}}{\partial\,\text{gc}_i}
-= J_{\boxminus}^{\text{pred}}\cdot\big({-}\mathrm{Ad}_{\text{predicted}^{-1}}\big),
+\frac{\partial \mathbf{r}}{\partial \boldsymbol{\psi}}
+= \sum_{X'}\frac{\partial \mathbf{r}}{\partial X'}
+\left(-\mathrm{Ad}(X'^{-1})\right)_{[:,\,\theta]} ,
 \qquad
-\frac{\partial\mathbf{r}}{\partial\,\text{state}_j} = J_{\boxminus}^{\text{pred}},
-\qquad
-\frac{\partial\mathbf{r}}{\partial\mathbf{b}}
-= J_{\boxminus}^{\Delta}\,J_{\boxplus}\,\frac{\partial\mathbf{c}}{\partial\mathbf{b}}
+\boldsymbol{\psi} = (0,\psi,0),
 $$
 
-The $-\mathrm{Ad}$ comes from differentiating $X^{-1}Y$ with respect to the
-left argument: $(X\,\mathrm{Exp}(\delta))^{-1}Y
-= \mathrm{Exp}(-\mathrm{Ad}_{(X^{-1}Y)^{-1}}\delta)\,X^{-1}Y$.
+the gravity rotation's effect on the interval residual, propagated through the
+states' adjoints. The LIO stack uses it: a map built from a still start
+inherits that start's tilt — at rest, an accelerometer bias across gravity is
+indistinguishable from tilt — so the world frame stays the map's and gravity's
+direction *in it* is a variable. Rotating the rig makes the tilt observable
+and the bias separable.
 
-The bias block expands to
+**One warning from the source**: the yaw of $R_g$ is **unobservable**, because
+gravity is invariant to it. It must be held or priored.
 
-$$
-\frac{\partial\mathbf{c}}{\partial\mathbf{b}} =
-\begin{bmatrix}
-\partial\Delta\mathbf{p}/\partial\mathbf{b}_g & -C_{\!\iint} \\[2pt]
--\partial\Delta\boldsymbol{\alpha}/\partial\mathbf{b}_g & 0 \\[2pt]
-\partial\Delta\mathbf{v}/\partial\mathbf{b}_g & -C_{\!\int}
-\end{bmatrix} \in \mathbb{R}^{9\times6}
-$$
+**`ScaleGravityImuFactor`** adds a **scale** variable on top: the factor sees
+$X' = T_g^{-1}S(s)X$ with $S(s)(R, p, v) = (R, s\,p, s\,v)$, where $s$ is a
+one-dimensional `Rn` variable. A monocular visual system has no scale *and*
+starts in a frame whose vertical is wherever the first image put it; making
+the scale and the gravity direction two variables means a global scale change
+costs the solver **one coordinate** instead of every pose and every depth.
+This is the DM-VIO construction (von Stumberg & Cremers, 2022), and it is
+how a simulation-to-reality scale is estimated.
 
-in the $[\boldsymbol{\rho},\boldsymbol{\theta},\boldsymbol{\nu}]$ tangent order.
+## 6. Whitening
 
-The lift from $\text{state}_i$ to the gravity-corrected state is a **constant**
-matrix, independent of the linearization point, because $\text{gc}_i$ shares
-$\text{state}_i$'s rotation and shifts the rest by gravity terms only:
+The IMU factors whiten **internally**: the preintegration's information matrix
+is part of the measurement, and the factor applies it itself. They must
+therefore be registered with `NoiseModel::null()` — the crate rejects the
+other combination at registration (chapter [Noise Models](../core/noise.md)).
 
-$$
-\frac{\partial\,\text{gc}_i}{\partial\,\text{state}_i} =
-\begin{bmatrix} I & 0 & \Delta t\,I \\ 0 & I & 0 \\ 0 & 0 & I \end{bmatrix},
-\qquad
-(\delta\boldsymbol{\rho},\delta\boldsymbol{\theta},\delta\boldsymbol{\nu})
-\mapsto (\delta\boldsymbol{\rho} + \Delta t\,\delta\boldsymbol{\nu},\ \delta\boldsymbol{\theta},\ \delta\boldsymbol{\nu})
-$$
+## 7. Worked example
 
-The combined form appends the bias-walk rows, whose Jacobian is constant:
+A keyframe pair 100 ms apart, 10 IMU samples. `ImuPreintegration::try_new`
+produces $\Delta R$, $\Delta\mathbf{v}$, $\Delta\mathbf{p}$ at the reference
+bias, and the factor's residual compares the state's implied motion against
+it, with the bias correction for the difference between the current and
+reference biases. The 15 rows of a `CombinedImuFactor` land in the graph as
+one block over four variables: $[X_i, b_i, X_j, b_j]$.
 
-$$
-\frac{\partial(\mathbf{b}_i - \mathbf{b}_j)}{\partial\mathbf{b}_i} = I_6,
-\qquad
-\frac{\partial(\mathbf{b}_i - \mathbf{b}_j)}{\partial\mathbf{b}_j} = -I_6
-$$
+## 8. The catch
 
-Every $J$ above is reported by the group's own `right_plus`, `right_minus` and
-`adjoint`; none of it is hand-derived.
+<div class="apx-warning">
+<span class="apx-title">Warning — the interval's IMU samples must actually cover the interval</span>
 
-## Bias evolution
+Preintegration zero-order-holds the nearest sample at each boundary, and a
+buffer lying wholly outside $[t_0, t_1]$ would be extrapolated across the
+whole span and returned as if it had been measured. The crate rejects that
+case (`EmptyIntegration`) rather than integrating nothing. A *partially*
+covered interval is not rejected — the missing part is held — which is why a
+window with gaps produces a factor that is quietly wrong over the gap.
 
-The non-combined factors need a companion edge, which
-`factors::imu::bias` builds as a `BetweenFactor<Rn>` with zero measurement:
+</div>
 
-$$
-\mathbf{b}_j = \mathbf{b}_i + \mathbf{w}, \qquad
-\mathbf{w} \sim \mathcal{N}\!\left(0,\ \mathrm{diag}(\sigma_{gw}^2, \sigma_{aw}^2)\,\Delta t\right)
-$$
+<div class="apx-note">
+<span class="apx-title">Note — the factor's blocks decide the marginalization's fate</span>
 
-```rust
-use apex_solver::factors::imu::{se23, bias_random_walk, bias_random_walk_noise};
+The combined factor's four blocks over two states is what makes a window's
+first keyframe ineligible for Schur elimination: the eliminated block is not
+block-diagonal. That is a *design* consequence, not a bug, and it is why the
+crate has a separate dense marginalization path. Choosing between `ImuFactor`
+and `CombinedImuFactor` is therefore also a choice about how the window will be
+marginalized.
 
-problem.add_residual_block(
-    &[state_i, state_j, bias],
-    Box::new(se23::ImuFactor::new(preintegration)),
-    None,
-);
-problem.add_residual_block_with_noise(
-    &[bias, bias_next],
-    Box::new(bias_random_walk()),
-    None,
-    bias_random_walk_noise(&params, dt)?,
-);
-```
-
-An initial bias prior (an `EuclideanPriorFactor` on $\mathbb{R}^6$) is required
-for observability in every configuration.
-
-## SGal(3) and the time row
-
-SGal(3)'s tangent carries a time coordinate, so the residual gains a row
-$(t_j - t_i) - \Delta t$, weighted by $1/\sigma_t$ (`with_time_sigma`, default
-100 µs). That row is the reason to choose SGal(3): it makes the interval a
-quantity the optimizer can move.
-
-> **Known limitation.** SGal(3)'s group law is
-> $\mathbf{t} = R_1(\mathbf{t}_2 + s_1\mathbf{v}_2) + \mathbf{t}_1$ — the left
-> operand's time couples the right operand's velocity into translation. The
-> residual composes $\text{gc}_i^{-1}\circ\text{state}_j$, so it depends on the
-> absolute $s_i$, while the preintegrated delta corresponds to $s_i = 0$. A
-> **single interval** with $s_i = 0,\ s_j = \Delta t$ is correct; chaining these
-> factors across keyframes on a common absolute clock is not. Prefer the
-> `se23` factors for multi-keyframe chains until the residual is re-derived in
-> terms of $\Delta s = s_j - s_i$.
-
+</div>

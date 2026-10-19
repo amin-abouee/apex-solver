@@ -1,188 +1,161 @@
-# LiDAR
+# LiDAR Factors
 
-`factors::lidar` — scan registration. Correspondences are established upstream:
-these factors evaluate one already-matched pair, so the data association is the
-front end's job.
+The LiDAR family is where a solver earns its keep: a sweep brings tens of
+thousands of points, and a factor per point would be a factor graph with tens
+of thousands of blocks. The crate's answer is a family of factors that take
+*many* points at once, with the point-to-plane geometry compressed into a
+handful of rows. This chapter is the family, its two topologies, and the
+compression that makes it possible.
 
-Two graph topologies coexist deliberately. The **two-pose** family
-(`distance_field`, `edge`, and the `LidarPlaneFactor` alias) registers a scan
-against a reference frame with the query point baked into the factor. The
-**pose-and-point** family (`plane`, `point_to_point`, `gicp`) treats the
-body-frame point as a variable. Pick the one matching how your front end
-parameterizes the scan.
+## 1. Two topologies, deliberately
 
-The derivative every pose-and-point factor needs is `SE3::act`'s:
+<div class="apx-table">
+<span class="apx-title">The LiDAR module's structure</span>
+
+| Topology | Factors | The unknown |
+|---|---|---|
+| **two-pose** | `distance_field` (`IcpFactor`), `edge` (`LidarEdgeFactor`) | a scan registered against a reference frame, the query point baked into the factor |
+| **pose-and-point** | `plane` (`LidarPlaneFactor`, `PointToPlaneFactor`), `point_to_point` (`PoseToPointFactor`), `gicp` (`GicpFactor`), `map_plane`, `map_planes`, `plane_bundle`, `plane_moments`, `submap_field` | the body-frame point is a *variable* |
+
+</div>
+
+The two-pose family treats a measurement as a relation between two poses; the
+pose-and-point family treats the point as an unknown in the graph. The
+module's own comment calls the coexistence deliberate: the two answer
+different questions, and a consumer that registers both must be clear about
+which is which.
+
+## 2. The plane factors
+
+The workhorse is a point-to-plane residual:
 
 $$
-\frac{\partial (T\mathbf{p})}{\partial(\delta\boldsymbol{\rho},\delta\boldsymbol{\theta})}
-= \big[\;R \;\big|\; -R[\mathbf{p}]_\times\;\big],
+r_k = \frac{\mathbf{n}_k^\top (X \odot \mathbf{s}_k) + d_k}{\sigma_k},
+$$
+
+where $\mathbf{s}_k$ is the point in the body frame, $(\mathbf{n}_k, d_k)$ the
+map plane, and $\sigma_k$ the match's uncertainty.
+
+<div class="apx-table">
+<span class="apx-title">The plane family</span>
+
+| Factor | Shape |
+|---|---|
+| `LidarMapPlaneFactor` | one point against one map plane |
+| `LidarMapPlanesFactor` | a whole sweep's matches in one factor — `PlaneMatch` list, one block on the pose |
+| `LidarPlaneBundleFactor` | one plane over several frames, the plane eliminated |
+| `LidarPlaneMomentFactor` | the same, with each frame's points summarized by their moments |
+| `PrecomputedPlane`, `Plane`, `LidarPointChain` | the shared plane types and the point-chain helper |
+
+</div>
+
+<div class="apx-widget" data-widget="plane-fit" data-title="From points to a plane" data-foot="Add points to a voxel and watch the normal lock in; the smallest eigenvalue is the residual thickness."></div>
+
+## 3. The moment compression
+
+`LidarPlaneMomentFactor` is Voxel-SLAM's local-mapping factor, and the
+interesting part is its algebra. A frame's points reach the world affinely,
+$\mathbf{w}_k = A\mathbf{s}_k + \mathbf{b}$, so the frame's total squared
+distance to the plane is a quadratic form in the moments:
+
+$$
+\sum_k (\mathbf{n}^\top\mathbf{w}_k + d)^2 = \mathbf{c}^\top M\mathbf{c},
 \qquad
-\frac{\partial (T\mathbf{p})}{\partial \mathbf{p}} = R
+M = \sum_k \tilde{\mathbf{s}}_k\tilde{\mathbf{s}}_k^\top .
 $$
 
----
-
-## `IcpFactor<F>` — point-to-field
-
-Aligns a query point against a distance or occupancy field defined in another
-frame. Generic over `F: DistanceField`, which returns the field value and its
-gradient at a query point.
-
-**Blocks** $[T_{WA},\ T_{WB}]$ — residual 1, Jacobian $1\times12$. Whitens
-internally with $1/\sigma$.
-
-### Error
+Centring on the frame's mean $\boldsymbol{\mu}$ kills the cross term, and the
+sum splits into a spread term and a mean term:
 
 $$
-T_{AB} = T_{WA}^{-1}T_{WB},
-\qquad
-\mathbf{p}_A = T_{AB}\,\mathbf{p}_B,
-\qquad
-r = \frac{1}{\sigma}\cdot\frac{f(\mathbf{p}_A)}{\lVert\nabla f(\mathbf{p}_A)\rVert}
+(A^\top\mathbf{n})^\top S(A^\top\mathbf{n}) + N\,(\mathbf{n}^\top(A\boldsymbol{\mu}+\mathbf{b})+d)^2 ,
 $$
 
-Dividing by $\lVert\nabla f\rVert$ converts the field value into an approximate
-*metric* distance to the surface, so one $\sigma$ is meaningful across fields
-of different scaling.
-
-### Jacobian
+with $S$ the centred scatter. Writing $S = LL^\top$, the frame contributes
+**four** rows:
 
 $$
-\frac{\partial r}{\partial \mathbf{p}_A} = \frac{1}{\sigma}\cdot\frac{\nabla f}{\lVert\nabla f\rVert},
+\left[\,L^\top A^\top\mathbf{n}\;;\;\sqrt{N}\,(\mathbf{n}^\top(A\boldsymbol{\mu}+\mathbf{b})+d)\,\right]/\sigma ,
 $$
 
-$$
-\frac{\partial \mathbf{p}_A}{\partial T_{WA}} = \big[\,-C_{WA}^\top \;\big|\; C_{WA}^\top[C_{WB}\mathbf{p}_B + \mathbf{t}_{WB} - \mathbf{t}_{WA}]_\times\,\big],
-\qquad
-\frac{\partial \mathbf{p}_A}{\partial T_{WB}} = \big[\,C_{WA}^\top \;\big|\; -C_{WA}^\top[C_{WB}\mathbf{p}_B]_\times\,\big]
-$$
+whatever the number of points. A leaf carrying 100 000 mapped points
+contributes the same four rows per participating frame as one with five.
 
-The residual and Jacobian are zeroed where the field query fails or
-$\lVert\nabla f\rVert < 10^{-3}$ — an undefined gradient carries no information,
-and a huge one is numerical noise.
+The plane itself is eliminated — re-fit on every evaluation — which is what
+makes the factor's Jacobian exact rather than a linearization about a stale
+plane: at the optimum, the derivative through the plane parameters vanishes
+(the envelope theorem), so the gradient of the reduced cost is exact.
 
----
+Two details make the compression usable. First, the moments are **centred** on
+the frame's mean: the raw $4 \times 4$ moment matrix of points tens of metres
+away spans ten orders of magnitude, and a square root of it is accurate only
+to about $10^{-4}$ relative — residuals in the thousands for a plane whose true
+cost is around $10^{-2}$. Second, world points of frames already outside the
+window ("fixed" frames) contribute the same four residuals with $A = I$,
+$b = 0$ and **no Jacobian**, so a frame that has left the window still
+constrains the plane.
 
-## `LidarPlaneFactor` — LOAM point-to-plane, two-pose
+## 4. Why the action is affine
 
-Not a distinct residual: it is the type alias
-`IcpFactor<PrecomputedPlane>`, where the field is a plane through
-$\mathbf{q}$ with unit normal $\mathbf{n}$:
-
-$$
-f(\mathbf{p}) = \mathbf{n}^\top(\mathbf{p} - \mathbf{q}),
-\qquad
-\nabla f = \mathbf{n},
-\qquad
-\lVert\nabla f\rVert = 1
-$$
-
-so $r = \sigma^{-1}\mathbf{n}^\top(\mathbf{p}_A - \mathbf{q})$ and the Jacobian
-above specializes exactly. Build one with `lidar_plane_factor_isotropic`.
-
----
-
-## `LidarEdgeFactor` — LOAM point-to-line
-
-The only genuinely distinct LiDAR residual here.
-
-**Blocks** $[T_{WA},\ T_{WB}]$ — residual 3, Jacobian $3\times12$. Whitens
-internally.
-
-### Error
-
-With a matched edge line through $\mathbf{q}$ with unit direction $\mathbf{d}$,
+Every factor that moves a body-frame point into the world needs
+$\partial(X\odot\mathbf{s})/\partial X$. The crate computes it from four
+group-action evaluations:
 
 $$
-\mathbf{e} = W\left(I - \mathbf{d}\mathbf{d}^\top\right)\left(\mathbf{p}_A - \mathbf{q}\right)
+\frac{\partial (X\odot\mathbf{s})}{\partial X}
+= J(\mathbf{0}) + \sum_j s_j\left(J(\mathbf{e}_j) - J(\mathbf{0})\right),
 $$
 
-the **vector rejection** of the offset onto the line's orthogonal complement.
-The scalar cross-product form $\lVert(\mathbf{p}_A - \mathbf{q})\times\mathbf{d}\rVert$
-would measure the same distance but is non-differentiable at its own zero,
-which is precisely where the optimizer converges.
+using the fact that the action's Jacobian is affine in the point for every
+group that acts on points. One formula, every group, four evaluations per
+factor rather than per point.
 
-### Jacobian
+## 5. Distance fields and submap fields
 
-The projector $P = I - \mathbf{d}\mathbf{d}^\top$ is constant, so
-$\partial\mathbf{e}/\partial\mathbf{p}_A = W P$, chained with the same
-$\partial\mathbf{p}_A/\partial T$ blocks as `IcpFactor`.
+Two factors work against a *field* rather than against discrete planes:
 
----
+- `IcpFactor` (with the `DistanceField` trait) registers a scan against a
+  reference frame's field — the log-odds occupancy field the LIO stack builds
+  — with a residual normalized by the field's gradient;
+- `LidarSubmapFieldFactor` and `SubmapAlignmentFactor` do the same against a
+  submap's field, with the alignment as a variable.
 
-## `PointToPlaneFactor` — plane as a measurement
+The field's residual is $L(\mathbf{p}) / \sqrt{L_{\min}^2/9 + \sigma_d^2
+\|\nabla L\|^2}$ — a log-odds level divided by a scale built from the field's
+own slope and the measurement noise, which turns a level set into an
+approximate metric distance.
 
-**Blocks** $[T_{wr},\ \mathbf{p}_\text{body}]$ — residual 1, Jacobian $1\times9$.
-Takes an external `NoiseModel`.
+## 6. Worked example
 
-$$
-r = \mathbf{n}^\top\!\left(T_{wr}\,\mathbf{p}_\text{body}\right) + d
-$$
+A sweep with 4 000 matches against the map's planes. `LidarMapPlanesFactor`
+takes the `PlaneMatch` list and the pose, and produces 4 000 rows with one
+block — the whole sweep in one residual block, with the Jacobian accumulated
+in 512-row chunks so the matrix is never materialized. The odometry's problem
+therefore has one block per sweep rather than one per point, and the
+per-iteration linearization cost is bounded by the sweep count, not the point
+count.
 
-for a target plane $\mathbf{n}^\top\mathbf{x} + d = 0$ with $\lVert\mathbf{n}\rVert = 1$.
+## 7. The catch
 
-$$
-\frac{\partial r}{\partial(\delta\boldsymbol{\rho},\delta\boldsymbol{\theta})}
-= \big[\;\mathbf{n}^\top R \;\big|\; -\mathbf{n}^\top R\,[\mathbf{p}_\text{body}]_\times\;\big],
-\qquad
-\frac{\partial r}{\partial \mathbf{p}_\text{body}} = \mathbf{n}^\top R
-$$
+<div class="apx-warning">
+<span class="apx-title">Warning — the moment compression changes what the residual means</span>
 
-One constraint per correspondence, along the normal only — which is why three
-non-parallel planes are needed to fix a translation.
+Four rows per frame are not four measurements; they are a *summary* of
+thousands, with the summary's own weighting (the centred scatter). A factor
+consumer that wants to weight individual points differently — by range, by
+incidence angle, by a learned quality — cannot use the moment factor, and
+must use the point-level one and pay the cost. The compression is a
+*modelling* choice about which points matter, not a numerical trick.
 
----
+</div>
 
-## `PoseToPointFactor`
+<div class="apx-note">
+<span class="apx-title">Note — whitening inside the LiDAR factors</span>
 
-**Blocks** $[T_{wr},\ \mathbf{p}_\text{body}]$ — residual 3, Jacobian $3\times9$.
+Several of these factors apply their own weighting — GICP's combined point
+covariance, the preintegration-style information, the moment factor's $\sigma$ —
+and therefore declare `whitens_internally() -> true`. They must be registered
+with `NoiseModel::null()`, and the crate rejects the combination that would
+whiten twice (chapter [Noise Models](../core/noise.md)).
 
-$$
-\mathbf{r} = T_{wr}\,\mathbf{p}_\text{body} - \tilde{\mathbf{p}}_\text{world},
-\qquad
-\frac{\partial\mathbf{r}}{\partial\delta} = \big[\,R \mid -R[\mathbf{p}_\text{body}]_\times\,\big],
-\qquad
-\frac{\partial\mathbf{r}}{\partial\mathbf{p}_\text{body}} = R
-$$
-
-The plain point-to-point correspondence, and the $C = I$ special case of GICP.
-
----
-
-## `GicpFactor` — plane-to-plane
-
-Generalized ICP: the same point-to-point residual, but Mahalanobis-whitened by
-the *combined* surface covariance, so tangential directions (flat in both
-clouds) contribute almost nothing and the normal direction dominates.
-Plane-to-plane registration emerges from point-to-point with the right metric.
-
-**Blocks** $[T_{wr},\ \mathbf{p}_\text{body}]$ — residual 3, Jacobian $3\times9$.
-Whitens internally.
-
-### Error
-
-$$
-C = C_\text{target} + R\,C_\text{body}R^\top,
-\qquad
-\mathbf{e} = T_{wr}\mathbf{p}_\text{body} - \mathbf{p}_\text{target},
-\qquad
-\mathbf{r} = C^{-1/2}\,\mathbf{e}
-$$
-
-$C^{-1/2}$ is the symmetric inverse square root, with eigenvalues below
-$10^{-12}$ clamped to zero so a rank-deficient covariance yields a
-pseudo-inverse root rather than non-finite entries.
-
-### Jacobian
-
-$$
-\frac{\partial\mathbf{r}}{\partial\delta} = C^{-1/2}\big[\,R \mid -R[\mathbf{p}_\text{body}]_\times\,\big],
-\qquad
-\frac{\partial\mathbf{r}}{\partial\mathbf{p}_\text{body}} = C^{-1/2}R
-$$
-
-$C$ is evaluated **once at construction** from a caller-supplied rotation hint
-and then held fixed, so the rotation-dependence of $C$ is dropped from the
-Jacobian. That is deliberate: callers rebuild correspondences (and these
-factors) every scan-matching iteration, so the frozen covariance never goes
-stale, and freezing it keeps the residual/Jacobian pair exactly consistent.
+</div>

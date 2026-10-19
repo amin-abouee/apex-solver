@@ -1,0 +1,182 @@
+/* ==========================================================================
+   The Apex VIO Cookbook — house style
+   --------------------------------------------------------------------------
+   Callout boxes, figure captions, interactive-widget chrome, and a few
+   typographic touches. No external fonts or scripts.
+   ========================================================================== */
+
+:root {
+  --apx-boundary: #2f6f8f;
+  --apx-boundary-soft: rgba(47, 111, 143, 0.12);
+  --apx-factor: #b45309;
+  --apx-factor-soft: rgba(180, 83, 9, 0.12);
+  --apx-var: #15803d;
+  --apx-var-soft: rgba(21, 128, 61, 0.12);
+  --apx-meas: #7c3aed;
+  --apx-meas-soft: rgba(124, 58, 237, 0.12);
+  --apx-warn: #b91c1c;
+  --apx-warn-soft: rgba(185, 28, 28, 0.10);
+  --apx-note: #1d4ed8;
+  --apx-note-soft: rgba(29, 78, 216, 0.10);
+  --apx-grid: rgba(127, 127, 127, 0.22);
+}
+
+/* ---- Callouts ------------------------------------------------------------ */
+
+.apx {
+  border-radius: 6px;
+  border: 1px solid var(--apx-grid);
+  border-left-width: 4px;
+  padding: 0.7em 1em 0.75em 1em;
+  margin: 1.1em 0;
+}
+.apx > p:first-child { margin-top: 0.2em; }
+.apx > p:last-child { margin-bottom: 0.2em; }
+.apx .apx-title {
+  display: block;
+  font-weight: 650;
+  font-variant: small-caps;
+  letter-spacing: 0.03em;
+  margin-bottom: 0.35em;
+}
+
+.apx-note    { border-left-color: var(--apx-note);    background: var(--apx-note-soft); }
+.apx-example { border-left-color: var(--apx-var);     background: var(--apx-var-soft); }
+.apx-paper   { border-left-color: var(--apx-meas);    background: var(--apx-meas-soft); }
+.apx-warning { border-left-color: var(--apx-warn);    background: var(--apx-warn-soft); }
+.apx-derive  { border-left-color: var(--apx-boundary);background: var(--apx-boundary-soft); }
+.apx-check  { border-left-color: var(--apx-factor);  background: var(--apx-factor-soft); }
+
+/* ---- Figure + caption ---------------------------------------------------- */
+
+figure.apx-figure {
+  margin: 1.4em 0;
+  text-align: center;
+}
+figure.apx-figure > img,
+figure.apx-figure > svg {
+  max-width: 100%;
+  height: auto;
+}
+figure.apx-figure > figcaption {
+  font-size: 0.85em;
+  opacity: 0.8;
+  margin-top: 0.5em;
+  text-align: left;
+  padding: 0 0.5em;
+}
+figure.apx-figure > figcaption b { font-variant: small-caps; }
+
+/* ---- Interactive widget chrome ------------------------------------------- */
+
+.apx-widget {
+  margin: 1.5em 0;
+  border: 1px solid var(--apx-grid);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.apx-widget .apx-widget-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5em 0.9em;
+  padding: 0.55em 0.8em;
+  border-bottom: 1px solid var(--apx-grid);
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 0.85em;
+}
+.apx-widget .apx-widget-bar .apx-widget-title {
+  font-weight: 650;
+  margin-right: auto;
+}
+.apx-widget .apx-widget-body {
+  position: relative;
+  width: 100%;
+}
+.apx-widget canvas,
+.apx-widget svg.apx-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  touch-action: none;
+}
+.apx-widget .apx-widget-foot {
+  padding: 0.5em 0.8em 0.7em 0.8em;
+  font-size: 0.82em;
+  opacity: 0.85;
+  border-top: 1px solid var(--apx-grid);
+}
+.apx-widget .apx-readout {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.95;
+}
+
+.apx-widget label.apx-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  white-space: nowrap;
+  user-select: none;
+}
+.apx-widget input[type="range"] { width: 8.5em; vertical-align: middle; }
+.apx-widget button {
+  font: inherit;
+  font-size: 0.95em;
+  padding: 0.25em 0.7em;
+  border-radius: 5px;
+  border: 1px solid var(--apx-grid);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.apx-widget button:hover { background: rgba(127, 127, 127, 0.14); }
+.apx-widget button[aria-pressed="true"] {
+  border-color: var(--apx-boundary);
+  background: var(--apx-boundary-soft);
+  font-weight: 600;
+}
+
+/* Legend chips used inside widgets */
+.apx-legend { display: inline-flex; flex-wrap: wrap; gap: 0.3em 0.9em; align-items: center; }
+.apx-legend .apx-chip { display: inline-flex; align-items: center; gap: 0.35em; }
+.apx-legend .apx-swatch {
+  width: 0.85em; height: 0.85em; border-radius: 3px; display: inline-block;
+}
+
+/* Node/factor palette shared by SVG widgets */
+.apx-node-state  { fill: var(--apx-var); }
+.apx-node-pose   { fill: var(--apx-boundary); }
+.apx-node-land   { fill: var(--apx-meas); }
+.apx-node-prior  { fill: #6b7280; }
+.apx-factor-imu  { fill: #d97706; }
+.apx-factor-vis  { fill: #0e7490; }
+.apx-factor-lid  { fill: #be123c; }
+.apx-factor-pho  { fill: #7c3aed; }
+.apx-edge { stroke: currentColor; stroke-opacity: 0.55; stroke-width: 1.4; fill: none; }
+.apx-edge-meas { stroke: var(--apx-meas); stroke-opacity: 0.8; stroke-dasharray: 4 3; }
+
+/* ---- Table polish -------------------------------------------------------- */
+
+.apx-table { overflow-x: auto; }
+.apx-table table { font-size: 0.9em; }
+.apx-table table th { font-variant: small-caps; letter-spacing: 0.02em; }
+
+/* Symbols table with a tight first column */
+.apx-symbols td:first-child { white-space: nowrap; }
+
+/* "Where in the code" strip */
+.apx-code-path {
+  font-family: var(--mono-font);
+  font-size: 0.86em;
+  padding: 0.15em 0.45em;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.13);
+}
+
+/* ---- Print --------------------------------------------------------------- */
+
+@media print {
+  .apx-widget .apx-widget-bar { display: none; }
+  .apx-widget .apx-widget-foot { font-size: 0.75em; }
+}

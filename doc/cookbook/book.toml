@@ -2,22 +2,37 @@
 authors = ["Amin Abouee <amin.abouee@gmail.com>"]
 language = "en"
 src = "src"
-title = "Apex Solver Cookbook"
-description = "Practical guide to nonlinear least squares on manifolds with apex-solver: problem construction, optimizers, linear solvers, robust losses and visualization."
+title = "The Apex Solver Cookbook"
+description = "A lecture-style course on apex-solver: the factor-graph machinery, every optimizer and linear solver, and every factor family in the crate — from the noise model to the marginalization prior."
 
 [build]
 build-dir = "book"
 create-missing = true
 
+# Math is pre-rendered at build time by mdbook-katex. `no-css` keeps the
+# generated stylesheet out of the pages; the vendored copy below is referenced
+# instead so the book renders fully offline (fonts live in
+# src/assets/katex/fonts/, which mdbook copies verbatim).
 [preprocessor.katex]
 after = ["links"]
+no-css = true
+throw-on-error = true
 
 [output.html]
 default-theme = "rust"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/amin-abouee/apex-solver"
 edit-url-template = "https://github.com/amin-abouee/apex-solver/edit/main/doc/cookbook/{path}"
+additional-css = ["assets/katex/katex.min.css", "assets/apex-book.css"]
+additional-js = ["assets/apex-book.js", "assets/widgets-solver.js", "assets/widgets-vision.js", "assets/widgets-lidar.js"]
 
 [output.html.fold]
 enable = true
 level = 1
+
+[output.html.search]
+enable = true
+heading-split-level = 3
+
+[output.linkcheck]
+optional = true
