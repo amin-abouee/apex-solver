@@ -26,7 +26,53 @@ The default is the crate's default: Levenberg–Marquardt, `SparseCholesky`,
 `Sparse`. It is right for most problems because most problems are large,
 sparse, and not perfectly conditioned.
 
-## 2. The decision procedure
+## 2. The crate's own presets
+
+Before choosing anything, look at what the crate already measured. The LM
+config carries three presets, each backed by a sweep rather than a guess.
+
+<div class="apx apx-table">
+<span class="apx-title">`LevenbergMarquardtConfig` presets</span>
+
+| Preset | Sets | Why |
+|---|---|---|
+| `for_2d_pose_graph()` | damping $10^{-4}$, diagonal bounds $(1, 1)$ | on the 2D suite (M3500, mit, city10000, ring) and cubicle, **scalar** $\lambda I$ damping is 2–7× faster than $\lambda\operatorname{diag}(H)$ at unchanged cost. The equal bounds *are* the uniform damping |
+| `for_large_3d_pose_graph()` | damping $10^{-5}$, cost and parameter tolerances $10^{-3}$ | for graphs with an early cost plateau (parking-garage class): the weighted objective plateaus while the unweighted cost is already accurate, so looser tolerances stop the plateau early (~2× faster at identical unweighted cost), and the smaller initial damping keeps the accurate basin |
+| `for_bundle_adjustment()` | `ImplicitSparseSchur`, `ExplicitSchurVariant::Sparse`, `SchurJacobi` preconditioner, damping $10^{-3}$, 20 iterations, Ceres' tolerances | the matrix-free Schur, measured 2.2× faster in total on the BAL datasets |
+
+</div>
+
+The bundle-adjustment preset's own measurement table, from the source:
+
+| dataset | implicit | explicit/Sparse | ΔRMSE |
+|---|---|---|---|
+| Ladybug | 18.76 s, 0.876538 | 75.24 s, 0.875283 | +0.14 % |
+| Trafalgar | 6.27 s, 0.798081 | 2.51 s, 0.808522 | −1.29 % |
+| Dubrovnik | 31.34 s, 0.768611 | 41.91 s, 0.787517 | −2.40 % |
+| Venice | 20.23 s, 0.752080 | 51.15 s, 0.747589 | +0.60 % |
+
+It forms neither $J^\top J$ nor $S$, so it is the only one of the four that
+keeps scaling. It loses only on Trafalgar, the smallest set, where the
+absolute cost is about 4 s against about 56 s saved on Ladybug. And
+`ExplicitSparseSchur` remains the choice when the reduced solve must be
+*exact*: its step does not depend on a tolerance, and it is the reference
+every other path is measured against.
+
+<div class="apx apx-note">
+<span class="apx-title">Note — the 2D preset contradicts the general advice</span>
+
+This book says elsewhere that Marquardt's diagonal scaling is the default
+because it is scale-relative. The 2D preset says otherwise *for 2D pose
+graphs*: uniform $\lambda I$ is 2–7× faster there, at unchanged cost. The
+reason is that a 2D pose graph's columns are already comparable in magnitude
+— a translation in metres and an angle in radians, on a map of a few hundred
+metres — so the diagonal scaling has nothing to correct, and computing it
+costs. A preset is a measured statement about a shape of problem, and the
+shape matters.
+
+</div>
+
+## 3. The decision procedure
 
 **Step 1 — how big?** Below roughly 500 DoF, use the dense path: the
 bookkeeping of the sparse path costs more than the factorization saves. Above
@@ -54,7 +100,7 @@ in radians, or a parameter with a wildly different magnitude, call for
 Jacobi scaling — or for a per-block parameterization that puts them on
 similar scales.
 
-## 3. Reading the result
+## 4. Reading the result
 
 The solve's own report tells you when the choice was wrong:
 
@@ -71,7 +117,7 @@ The solve's own report tells you when the choice was wrong:
 
 </div>
 
-## 4. The interaction with the rest of the pipeline
+## 5. The interaction with the rest of the pipeline
 
 Two decisions outside the solver change what the solver should be:
 
@@ -86,7 +132,7 @@ of mismatches — the fix is selection, upstream: RANSAC in the consumer crate,
 an inlier mask, a gate. The solver's job is to minimize the objective it is
 given.
 
-## 5. Worked example
+## 6. Worked example
 
 A visual-inertial window: 7 keyframes (105 DoF), 200 landmarks, an IMU factor
 per pair. The landmarks are eliminable, but the IMU factor puts `state_0` and
@@ -99,7 +145,7 @@ The same graph with the IMU factor replaced by a pose-only prior *is*
 block-diagonal, and `ExplicitSparseSchur` then reduces the solve to 105
 unknowns with the landmark steps recovered by back-substitution.
 
-## 6. The catch
+## 7. The catch
 
 <div class="apx-warning">
 <span class="apx-title">Warning — the cheapest solver is not always the fastest</span>

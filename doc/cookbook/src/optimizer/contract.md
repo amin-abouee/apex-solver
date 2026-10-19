@@ -51,7 +51,44 @@ Levenberg–Marquardt adds `damping`, `damping_min`, `damping_max` and the
 update factors; Dog Leg adds the trust-region radius and its bounds; Gauss–
 Newton adds `use_jacobi_scaling` and `min_diagonal`.
 
-## 4. The result
+## 4. The builder
+
+Every optimizer's configuration is built with `with_*` methods that take
+`self` and return the configuration, so a config reads as a sentence:
+
+```rust
+let config = LevenbergMarquardtConfig::default()
+    .with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)
+    .with_max_iterations(20)
+    .with_damping(1e-4)
+    .with_cost_tolerance(1e-6);
+```
+
+<div class="apx apx-table">
+<span class="apx-title">The builder families</span>
+
+| Family | Methods | Notes |
+|---|---|---|
+| the budget | `with_max_iterations`, `with_timeout`, `with_min_cost_threshold` | the iteration cap, the wall-clock stop, the "good enough" exit |
+| the tolerances | `with_cost_tolerance`, `with_parameter_tolerance`, `with_gradient_tolerance` | the three convergence criteria |
+| the damping | `with_damping`, `with_damping_bounds`, `with_damping_factors`, `with_damping_update`, `with_diagonal_bounds` | LM; `with_damping_update` selects the `Nielsen` or `Marquardt` rule |
+| the trust region | `with_trust_region`, `with_min_trust_region_radius`, `with_mu_params` | Dog Leg |
+| the step quality | `with_step_quality`, `with_step_quality_thresholds`, `with_min_relative_decrease` | the acceptance bands |
+| the conditioning | `with_max_condition_number` | a check on the Jacobian's conditioning |
+| the scaling | `with_jacobi_scaling` | column preconditioning |
+| the Schur | `with_schur_variant`, `with_schur_preconditioner`, `with_schur_cg_params`, `with_schur_cg_q_tolerance` | the reduced solve's flavour and its tolerances |
+| the covariance | `with_compute_covariances`, `with_covariance_options` | the uncertainty estimate (chapter [Covariance](../linalg/covariance.md)) |
+| the presets | `for_2d_pose_graph`, `for_large_3d_pose_graph`, `for_bundle_adjustment` | measured, not guessed |
+| the report | `print_configuration` | the config as text |
+
+</div>
+
+The Dog Leg config has its own `with_step_reuse` (whether a rejected step's
+direction may be reused) and `with_visualization`; the Gauss–Newton config
+has `with_min_diagonal` and no damping or trust-region family at all, because
+it has neither.
+
+## 5. The result
 
 <div class="apx-table">
 <span class="apx-title">What comes back</span>
@@ -77,7 +114,7 @@ The `covariances` field is `None` unless the configuration asked for it
 covariance **in tangent space** — a $6\times6$ matrix for an `SE3`, not a
 $7\times7$ one.
 
-## 5. Convergence
+## 6. Convergence
 
 `check_convergence(&ConvergenceParams) -> Option<OptimizationStatus>` is the
 shared criterion, and its order is deliberate:
@@ -93,7 +130,7 @@ shared criterion, and its order is deliberate:
 The cost that is compared is the **robust** cost the linearizer accumulated,
 not $\tfrac12\|r\|^2$ — the number the user asked to minimize.
 
-## 6. Applying a step
+## 7. Applying a step
 
 ```rust
 pub fn apply_parameter_step(variables, step, variable_order) -> f64
@@ -121,7 +158,7 @@ introduced a bias that grows with the step size.
 
 </div>
 
-## 7. Worked example
+## 8. Worked example
 
 ```rust
 let config = LevenbergMarquardtConfig::default()
@@ -136,7 +173,7 @@ The same call with `GaussNewton` or `DogLeg` swaps the step rule and nothing
 else — the problem, the factors, the linearization and the result type are
 identical. That is the point of the trait.
 
-## 8. The catch
+## 9. The catch
 
 <div class="apx-warning">
 <span class="apx-title">Warning — the optimizer cannot fix a bad problem</span>

@@ -146,7 +146,36 @@ standard deviations; the loss then thresholds the *whitened* residual, so the
 
 </div>
 
-## 6. Solving and inspection
+## 6. The API in one table
+
+<div class="apx apx-table">
+<span class="apx-title">`Problem`'s surface</span>
+
+| Group | Methods |
+|---|---|
+| building | `new(jacobian_mode)`, `add_variable`, `add_residual_block`, `add_residual_block_with_noise`, `try_add_residual_block`, `try_add_residual_block_with_noise` |
+| removing | `remove_residual_block`, `remove_residual_blocks`, `try_remove_variable` |
+| inspecting | `variable`, `variable_params`, `manifold_type`, `variable_keys`, `num_variables`, `num_residual_blocks`, `total_residual_dimension` |
+| setting values | `set_variable_params`, `update_values_from` |
+| constraining | `fix_variable`, `try_fix_variable`, `unfix_variable`, `set_variable_bounds`, `try_set_variable_bounds`, `remove_variable_bounds`, `apply_constraints_to_variables` |
+| the policy | `jacobian_evaluation`, `set_jacobian_evaluation` |
+| the FEJ points | `freeze_linearization_point`, `set_linearization_point`, `clear_linearization_point`, `is_linearization_point_frozen` |
+| the elimination | `mark_for_elimination` (`mark_as_schur_landmark` is the deprecated spelling) |
+| solving products | `compute_residual_sparse`, `compute_residual_and_cost_sparse`, `compute_residual_and_jacobian_sparse`, `compute_residual_and_jacobian_dense` |
+| dumping | `log_residual_to_file`, `log_sparse_jacobian_to_file`, `log_variables_to_file` |
+| uncertainty | `compute_and_set_covariances` |
+
+</div>
+
+Two asymmetries are worth noticing. The *panicking* and *typed* forms come in
+pairs for the two mutating operations that can fail — registering a block
+and fixing a variable (`fix_variable` / `try_fix_variable`) or bounding it
+(`set_variable_bounds` / `try_set_variable_bounds`) — and the typed forms
+return `CoreResult`. The *non-mutating* accessors are all `Option`-returning
+rather than panicking, because a stale key is an expected condition, not a
+programming error.
+
+## 7. Solving and inspection
 
 ```rust
 let result = LevenbergMarquardt::with_config(config).optimize(&mut problem)?;
@@ -162,7 +191,7 @@ accessors `compute_residual_sparse`, `compute_residual_and_cost_sparse`,
 The last two are the fastest way to see what a factor actually contributed
 before blaming the optimizer.
 
-## 7. Worked example
+## 8. Worked example
 
 A pose graph with 300 keyframes:
 
@@ -184,7 +213,7 @@ for pair in odometry_edges {
 Every registration is against known variables, so the panicking path is safe
 here; a graph built from user configuration would use the `try_` forms.
 
-## 8. The catch
+## 9. The catch
 
 <div class="apx-warning">
 <span class="apx-title">Warning — a block that references an unknown key measures nothing</span>

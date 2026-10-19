@@ -129,14 +129,73 @@ costs the solver **one coordinate** instead of every pose and every depth.
 This is the DM-VIO construction (von Stumberg & Cremers, 2022), and it is
 how a simulation-to-reality scale is estimated.
 
-## 6. Whitening
+## 6. The preintegration's API
+
+`ImuPreintegration` is the type a consumer builds, and its surface is worth
+knowing, because the *reference bias* is one of the things that has to be
+understood to use it correctly.
+
+```rust
+let preint = ImuPreintegration::try_new(
+    measurements,          // the samples covering [t0, t1]
+    imu_params,            // noise model, gravity, extrinsics
+    t0, t1,
+    &speed_and_biases,     // the reference state the biases are taken at
+)?;
+```
+
+`try_new` validates the interval: a non-finite or inverted $[t_0, t_1]$ is
+`PreintegrationError::NonPositiveInterval`, and a buffer lying wholly outside
+the interval is `PreintegrationError::EmptyIntegration` (the error carries the
+count and the first/last timestamps). A *partially* covered interval is not
+rejected — the missing part is held — which is why a window with gaps produces
+a factor that is quietly wrong over the gap.
+
+<div class="apx apx-table">
+<span class="apx-title">What the preintegration exposes</span>
+
+| Accessor | What it is |
+|---|---|
+| `delta_q`, `acc_integral`, `acc_doubleintegral` | the integrated rotation and the two acceleration integrals |
+| `c_integral`, `c_doubleintegral` | $\mathbf{C}_1$ and $\mathbf{C}_2$ — the moments the accelerometer bias's effect on the *position* needs |
+| `dv_db_a`, `dp_db_a` | $\partial\Delta\mathbf{v}/\partial b_a$, $\partial\Delta\mathbf{p}/\partial b_a$ |
+| `dalpha_db_g`, `dv_db_g`, `dp_db_g` | the three gyroscope-bias Jacobians |
+| `delta_se23`, `delta_sgal3` | the interval as a group element, in either group |
+| `square_root_information` | the $15 \times 15$ square-root information of the **combined** factor |
+| `kinematic_square_root_information` | the $9 \times 9$ square-root information of the kinematic part alone |
+| `p_delta` | the transition matrix of the discrete error dynamics |
+| `speed_and_biases_ref` | the reference state the biases were taken at |
+| `delta_t`, `t0`, `t1`, `num_measurements` | the interval and the sample count |
+| `imu_params` | the parameters the integration used |
+
+</div>
+
+Two operations matter most:
+
+- **`redo_preintegration(&mut self, speed_and_biases)`** resets every
+  accumulator and re-integrates from the stored samples at a *new* reference
+  bias. It returns the number of steps integrated. This is the operation a
+  bias-only update loop uses, and it is why the samples are kept: a
+  re-integration is cheap compared with keeping the raw samples around.
+- **`propagation(...)`** is the free-function form: it propagates a state
+  through a set of measurements without building a preintegration, and
+  returns the number of steps. It is the "just integrate this" path for a
+  consumer that needs no Jacobians.
+
+The `ImuParameters` type carries the noise model and the rig's description:
+`use_imu`, `t_bs` (the sensor-to-body extrinsic), `a_max` / `g_max` (the
+saturation limits), the continuous and random-walk noise sigmas
+(`sigma_g_c`, `sigma_a_c`, `sigma_gw_c`, `sigma_aw_c`, `sigma_bg`, `sigma_ba`),
+the gravity magnitude `g`, and the accelerometer's scale matrix `s_a`.
+
+## 7. Whitening
 
 The IMU factors whiten **internally**: the preintegration's information matrix
 is part of the measurement, and the factor applies it itself. They must
 therefore be registered with `NoiseModel::null()` — the crate rejects the
 other combination at registration (chapter [Noise Models](../core/noise.md)).
 
-## 7. Worked example
+## 8. Worked example
 
 A keyframe pair 100 ms apart, 10 IMU samples. `ImuPreintegration::try_new`
 produces $\Delta R$, $\Delta\mathbf{v}$, $\Delta\mathbf{p}$ at the reference
@@ -145,7 +204,7 @@ it, with the bias correction for the difference between the current and
 reference biases. The 15 rows of a `CombinedImuFactor` land in the graph as
 one block over four variables: $[X_i, b_i, X_j, b_j]$.
 
-## 8. The catch
+## 9. The catch
 
 <div class="apx-warning">
 <span class="apx-title">Warning — the interval's IMU samples must actually cover the interval</span>

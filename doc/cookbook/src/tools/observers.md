@@ -103,7 +103,27 @@ frustum scale, the landmark point size and colors (initial versus
 optimized), the `SE2` pose radius, box half-size and colors, and the Hessian
 downsample size.
 
-## 5. Reading a solve
+## 5. The presets
+
+`VisualizationConfig` has three named configurations, and
+`RerunObserver` has matching constructors:
+
+| Preset | What it shows |
+|---|---|
+| `VisualizationConfig::cameras_only()` | the cameras, no landmarks, no `SE2` poses |
+| `VisualizationConfig::landmarks_only()` | the 3-D landmarks alone — the structure-from-motion point cloud |
+| `VisualizationConfig::for_pose_graph()` | the cameras, no landmarks, poses **not** inverted |
+| `VisualizationConfig::for_bundle_adjustment()` | the cameras **inverted** ($T_{wc} \to T_{cw}$, which is what a viewer expects) and the `SE2` poses off — they are not used in bundle adjustment |
+
+`RerunObserver::new_for_bundle_adjustment(enabled, save_path, invert_camera_poses)`
+combines the last of these with the observer's own options.
+
+`VisualizationMode` decides *when* the state is published:
+`Iterative` (every iteration — detailed but slower, for analysing the
+trajectory) and `InitialAndFinal` (the default — the initial and the final
+state only, for production runs).
+
+## 6. Reading a solve
 
 <div class="apx-table">
 <span class="apx-title">What a plot tells you</span>
@@ -124,7 +144,7 @@ The Hessian view is the most useful of these for a *new* problem: an empty row
 or an isolated block in the heat map is a gauge or a missing factor, visible
 before the solve rather than after.
 
-## 6. Worked example
+## 7. Worked example
 
 Debugging a window solve that converges to the wrong answer. The Rerun
 observer shows the cost falling normally and the states moving smoothly — so
@@ -135,7 +155,7 @@ landmark is the suspect: its residual is an outlier, and the robust kernel is
 down-weighting it, but the *step* still moves the states because the kernel's
 influence, while bounded, is not zero. The fix is upstream — a gate.
 
-## 7. The catch
+## 8. The catch
 
 <div class="apx-warning">
 <span class="apx-title">Warning — the observer is not a debugger</span>

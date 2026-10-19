@@ -30,6 +30,7 @@
 - [Damping and Column Scaling](./optimizer/damping.md)
 - [Dense Linear Solvers](./linalg/dense.md)
 - [Sparse Linear Solvers](./linalg/sparse.md)
+- [Covariance and Uncertainty](./linalg/covariance.md)
 - [The Schur Complement](./linalg/schur.md)
 - [Choosing a Solver](./optimizer/choosing.md)
 
@@ -62,8 +63,10 @@
 # Part V — Tools and Appendices
 
 - [Observers: Rerun](./tools/observers.md)
+- [Errors, Logging and the Prelude](./tools/errors-and-logging.md)
 - [Benchmarks and Performance](./tools/benchmarks.md)
 - [Migrating 1.4 → 1.5 → 1.6](./tools/migration.md)
+- [Code Map](./tools/code-map.md)
 - [The Crate Cookbooks](./tools/crate-cookbooks.md)
 - [Symbol Glossary](./appendix/glossary.md)
 - [Exercises](./appendix/exercises.md)
