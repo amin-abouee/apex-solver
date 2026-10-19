@@ -51,7 +51,51 @@ book to the file that implements it.
 
 </div>
 
-## 2. Outside `src/`
+## 2. The factor families, file by file
+
+The table above names a family; this one names the file that holds each
+factor, so a reader looking for "the factor with the 4-D residual" finds it
+in one step.
+
+<div class="apx apx-table">
+<span class="apx-title">`src/factors/` by file</span>
+
+| Family | Files | What is in them |
+|---|---|---|
+| pose | `between.rs`, `prior.rs`, `partial_prior.rs`, `relative_4dof.rs` | the between edge, the tangent-space and ambient priors, the partial priors, the 4-DoF edge |
+| visual — geometry | `projection.rs`, `smart_projection.rs`, `homogeneous_point.rs`, `depth.rs`, `inverse_depth.rs`, `inverse_depth_se23.rs`, `inverse_depth_bearing_se23.rs`, `stereo.rs`, `stereo_inverse_range.rs`, `essential_matrix.rs`, `extrinsic_projection.rs`, `time_offset_projection.rs` | the pixel, bearing, depth and epipolar factors, and the two calibration factors |
+| visual — photometric | `photometric_patch.rs`, `photometric_two_view.rs`, `photometric_inverse_range.rs` | the patch, two-view and map-point factors, with the image and weight types |
+| IMU | `preintegration.rs`, `types.rs`, `bias.rs`, `se23/factors.rs`, `se23/gravity.rs`, `sgal3/factors.rs` | the integration, the parameters, the random-walk edge, the two groups, and the gravity/scale wrappers |
+| LiDAR | `action.rs`, `plane.rs`, `map_plane.rs`, `map_planes.rs`, `plane_bundle.rs`, `plane_moments.rs`, `point_to_point.rs`, `gicp.rs`, `distance_field.rs`, `edge.rs`, `submap_field.rs` | the affine action, the plane family, the point factors, GICP, and the distance-field and submap factors |
+| ranging | `range.rs`, `bearing.rs` | the three range factors and the two bearing factors |
+| motion | `nonholonomic.rs`, `planar.rs`, `zero_velocity.rs` | the vehicle and stationarity factors |
+| navigation | `gps.rs`, `gps_velocity.rs`, `gnss_raw.rs`, `barometric.rs`, `attitude.rs` | the position, velocity, raw-observable, height and attitude factors |
+| marginal | `marginal_prior.rs` | the linear container |
+| decorators | `aggregate.rs`, `held.rs`, `offset.rs`, `projected.rs` | the four wrappers |
+| shared | `common/math.rs`, `common/cheirality.rs`, `common/group_point.rs`, `common/validate.rs`, `common/test_utils.rs` | the shared kernels |
+
+</div>
+
+<div class="apx apx-table">
+<span class="apx-title">`src/linalg/` by file</span>
+
+| File | What is in it |
+|---|---|
+| `mod.rs` | `Damping`, `LinearSolverType`, `StructureAware`, the dense/sparse mode enums |
+| `dense/cholesky.rs`, `dense/qr.rs` | the dense factorizations |
+| `dense/schur/explicit.rs`, `dense/schur/gather.rs` | the dense Schur and its gather step |
+| `sparse/cholesky.rs`, `sparse/qr.rs` | the sparse factorizations |
+| `sparse/normal_eq.rs` | `NormalEquationsCache` and `LazyNormalEquations` — the cached $J^\top J$ path |
+| `sparse/pattern.rs` | `PatternFingerprint` |
+| `sparse/schur/explicit.rs`, `sparse/schur/implicit.rs`, `sparse/schur/chunk_eliminator.rs` | the two Schur flavours and the chunked elimination |
+| `schur/partition.rs`, `schur/ordering.rs`, `schur/preconditioner.rs`, `schur/pcg.rs`, `schur/jacobian_ops.rs` | the partition, the ordering, the preconditioners, the PCG, and the Jacobian kernels |
+| `covariance.rs` | `Covariance`, `CovarianceOptions`, the two inversion strategies |
+| `utils.rs` | the two deprecated sparse/dense converters |
+| `regularization.rs` | internal regularization helpers |
+
+</div>
+
+## 3. Outside `src/`
 
 <div class="apx apx-table">
 <span class="apx-title">The rest of the workspace</span>
@@ -69,7 +113,7 @@ book to the file that implements it.
 
 </div>
 
-## 3. Concept → code
+## 4. Concept → code
 
 | If you are looking for… | Start at |
 |---|---|
@@ -81,7 +125,7 @@ book to the file that implements it.
 | how a factor's Jacobian is tested | the `*_tests.rs` file beside the factor, and `factors/common/test_utils.rs` |
 | what a config field actually does | `optimizer/*.rs`'s `with_*` builders and the `#[deprecated]` notes |
 
-## 4. Reading order for a newcomer
+## 5. Reading order for a newcomer
 
 1. `core/problem.rs` — the graph, end to end.
 2. `core/residual_block.rs` and `core/noise.rs` — what a block *is*.
@@ -90,7 +134,7 @@ book to the file that implements it.
 5. `linalg/schur/mod.rs` — the one genuinely intricate piece.
 6. One factor family, end to end: `factors/pose/between.rs` is the shortest.
 
-## 5. The catch
+## 6. The catch
 
 <div class="apx-warning">
 <span class="apx-title">Warning — there are two documentation surfaces</span>

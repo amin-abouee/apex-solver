@@ -96,6 +96,13 @@ What it shows:
 
 </div>
 
+The manifold-to-Rerun conversions live in `observers::conversions`, as
+**extension traits** rather than free functions — Rust's orphan rule would
+otherwise forbid implementing Rerun's traits for the crate's manifold types,
+and extension traits give the same ergonomics (`pose.to_rerun()`) with the
+conversion kept in the crate that owns the types. The axes are coloured
+red/green/blue for x/y/z, consistently.
+
 `VisualizationConfig` controls what appears: `with_show_cameras`,
 `with_show_landmarks`, `with_show_se2_poses`, `with_show_plots`,
 `with_show_matrices`, plus the camera's field of view, aspect ratio and
