@@ -15,6 +15,10 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[test]
 fn a_warm_solve_of_the_same_shape_allocates_nothing() -> TestResult {
+    // The counter sees every thread. Left parallel, faer may hand a tiny matmul
+    // to the rayon pool, whose workers allocate their own bookkeeping on first
+    // use, which this test would count against the solver.
+    faer::set_global_parallelism(faer::Par::Seq);
     let _profiler = dhat::Profiler::builder().testing().build();
 
     let jacobian = Mat::<f64>::from_fn(52, 3, |i, j| ((i * 7 + j * 3) % 11) as f64 - 4.5);

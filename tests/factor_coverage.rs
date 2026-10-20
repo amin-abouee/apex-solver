@@ -2504,6 +2504,90 @@ fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
     assert!(angle < 1e-5, "keyframe 1 rotation error {angle:.3e}");
 }
 
+/// A four-degree-of-freedom pose graph: nodes are `Rn(4)` `[x, y, z, ψ]` with a
+/// constant tilt, and the relative-pose factors recover position and yaw.
+#[test]
+fn relative_4dof_factor_recovers_positions_and_yaws() {
+    use apex_solver::factors::pose::Relative4DofFactor;
+    use nalgebra::Matrix3;
+
+    let rot_z = |yaw: f64| {
+        let (s, c) = yaw.sin_cos();
+        Matrix3::new(c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0)
+    };
+    let tilt = |roll: f64, pitch: f64| {
+        let (sr, cr) = roll.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+        let rx = Matrix3::new(1.0, 0.0, 0.0, 0.0, cr, -sr, 0.0, sr, cr);
+        let ry = Matrix3::new(cp, 0.0, sp, 0.0, 1.0, 0.0, -sp, 0.0, cp);
+        ry * rx
+    };
+
+    let truth: [[f64; 4]; 4] = [
+        [0.0, 0.0, 0.0, 0.0],
+        [1.0, 0.2, 0.1, 0.3],
+        [1.8, 1.1, 0.25, 0.6],
+        [2.2, 2.0, 0.3, 1.0],
+    ];
+    let tilts = [
+        tilt(0.02, -0.01),
+        tilt(0.01, 0.03),
+        tilt(-0.02, 0.02),
+        tilt(0.0, 0.0),
+    ];
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let keys: Vec<_> = truth
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            // Anchor node 0 at the truth; start the others off by a few
+            // centimetres and degrees.
+            let offset = if index == 0 { 0.0 } else { 0.05 * index as f64 };
+            problem.add_variable(
+                ManifoldType::RN,
+                DVector::from_vec(vec![
+                    node[0] + offset,
+                    node[1] - offset,
+                    node[2] + 0.5 * offset,
+                    node[3] + 2.0 * offset,
+                ]),
+            )
+        })
+        .collect();
+    anchor_rn(&mut problem, keys[0], &truth[0]);
+
+    let noise =
+        NoiseModel::from_sigmas(&[0.01, 0.01, 0.01, 0.005]).unwrap_or_else(|e| panic!("{e}"));
+    for (i, j) in [(0, 1), (1, 2), (2, 3), (0, 2)] {
+        let (a, b) = (&truth[i], &truth[j]);
+        let rotation = rot_z(a[3]) * tilts[i];
+        let delta = rotation.transpose()
+            * (Vector3::new(b[0], b[1], b[2]) - Vector3::new(a[0], a[1], a[2]));
+        problem.add_residual_block_with_noise(
+            &[keys[i], keys[j]],
+            Box::new(Relative4DofFactor::new(tilts[i], delta, b[3] - a[3])),
+            None,
+            noise.clone(),
+        );
+    }
+
+    let result = lm_solver(100)
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("4-DoF graph failed: {e}"));
+    for (key, expected) in keys.iter().zip(&truth) {
+        let got = result.parameters[*key].as_param_slice();
+        for axis in 0..4 {
+            assert!(
+                (got[axis] - expected[axis]).abs() < 1e-6,
+                "axis {axis}: {} != {}",
+                got[axis],
+                expected[axis]
+            );
+        }
+    }
+}
+
 #[test]
 fn every_exported_factor_is_exercised_by_an_integration_test() {
     const MODULES: &[&str] = &[
