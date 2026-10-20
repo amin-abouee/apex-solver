@@ -44,6 +44,7 @@
 //! ```
 
 pub mod bias;
+pub(crate) mod common;
 pub mod preintegration;
 pub mod se23;
 pub mod sgal3;

@@ -1,13 +1,13 @@
 //! Nonholonomic (wheeled-vehicle) motion constraint.
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se23::SE23;
+use std::marker::PhantomData;
+
+use apex_manifolds::capability::HasVelocity;
 use faer::prelude::ReborrowMut;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::math::skew;
-use crate::factors::common::validate::expect_block_sizes;
 
 /// A wheeled vehicle does not slide sideways or leave the ground: in the body
 /// frame its velocity has no lateral or vertical component.
@@ -23,31 +23,39 @@ use crate::factors::common::validate::expect_block_sizes;
 /// violated by skidding, by lifting a wheel, and by any vehicle that can
 /// translate sideways.
 ///
-/// # Parameter layout (1 block, 9 DOF)
+/// # Parameter layout (1 block)
 ///
 /// ```text
-/// params[0]: SE23 navigation state — 10D, 9 DOF
+/// params[0]: navigation state with a velocity block (`SE23`, `SGal3`)
 /// ```
-#[derive(Debug, Clone, Default)]
-pub struct NonholonomicFactor;
+#[derive(Debug, Clone)]
+pub struct NonholonomicFactor<G: HasVelocity> {
+    group: PhantomData<fn() -> G>,
+}
 
-impl NonholonomicFactor {
-    /// Create the constraint.
-    pub fn new() -> Self {
-        Self
+impl<G: HasVelocity> Default for NonholonomicFactor<G> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-impl Factor for NonholonomicFactor {
+impl<G: HasVelocity> NonholonomicFactor<G> {
+    /// Create the constraint.
+    pub fn new() -> Self {
+        Self { group: PhantomData }
+    }
+}
+
+impl<G: HasVelocity + Send + Sync + 'static> Factor for NonholonomicFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        let state = SE23::from_param_slice(params[0]);
-        let rotation = state.rotation_matrix();
-        let v_body = rotation.transpose() * state.velocity();
+        let state = G::from_param_slice(params[0]);
+        let rotation = state.body_to_world();
+        let v_body = rotation.transpose() * state.world_velocity();
         residual[0] = v_body.y;
         residual[1] = v_body.z;
 
@@ -58,13 +66,13 @@ impl Factor for NonholonomicFactor {
         //     ∂v_body/∂ν = I,  ∂v_body/∂θ = [v_body]ₓ,  ∂v_body/∂ρ = 0.
         let d_theta = skew(&v_body);
         for (row, component) in [1usize, 2].iter().enumerate() {
-            for col in 0..9 {
+            for col in 0..G::DOF {
                 *jac.rb_mut().get_mut(row, col) = 0.0;
             }
             for col in 0..3 {
-                *jac.rb_mut().get_mut(row, 3 + col) = d_theta[(*component, col)];
+                *jac.rb_mut().get_mut(row, G::ROTATION_AT + col) = d_theta[(*component, col)];
             }
-            *jac.rb_mut().get_mut(row, 6 + *component) = 1.0;
+            *jac.rb_mut().get_mut(row, G::VELOCITY_AT + *component) = 1.0;
         }
     }
 
@@ -73,14 +81,13 @@ impl Factor for NonholonomicFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (2, 9)
+        (2, G::DOF)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        expect_block_sizes(
-            variables,
-            &[SE23::REP_SIZE],
-            "NonholonomicFactor expects [SE23 state]",
-        )
+        match variables {
+            [state] if state.manifold_type_name() == G::NAME => Ok(()),
+            _ => Err(format!("NonholonomicFactor expects [{} state]", G::NAME)),
+        }
     }
 }

@@ -26,14 +26,13 @@ use std::marker::PhantomData;
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SymmetricEigen, Vector3};
 
+use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
-use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::CoreError;
 use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use crate::factors::common::group_point::acts_on_points;
 use crate::factors::common::validate::expect_manifolds;
 
 use super::map_plane::lidar_point_chain;
@@ -71,7 +70,7 @@ pub fn fit_plane_pca(points: &[Vector3<f64>]) -> Option<(Vector3<f64>, Vector3<f
 ///
 /// Whitens internally: register with `NoiseModel::null()`.
 #[derive(Clone)]
-pub struct LidarPlaneBundleFactor<G: LieGroup> {
+pub struct LidarPlaneBundleFactor<G: ActsOnPoints3> {
     extrinsic: SE3,
     /// Per block, its points in the LiDAR frame.
     points: Vec<Vec<Vector3<f64>>>,
@@ -82,7 +81,7 @@ pub struct LidarPlaneBundleFactor<G: LieGroup> {
     group: PhantomData<fn() -> G>,
 }
 
-impl<G: LieGroup> LidarPlaneBundleFactor<G> {
+impl<G: ActsOnPoints3> LidarPlaneBundleFactor<G> {
     /// A plane seen by `points.len()` frames.
     ///
     /// # Errors
@@ -97,12 +96,6 @@ impl<G: LieGroup> LidarPlaneBundleFactor<G> {
         sigma: f64,
     ) -> CoreResult<Self> {
         let name = "LidarPlaneBundleFactor";
-        if !acts_on_points::<G>() {
-            return Err(CoreError::InvalidInput(format!(
-                "{name}: {} does not act on 3-D points",
-                G::NAME
-            )));
-        }
         if points.is_empty() || points.iter().any(Vec::is_empty) {
             return Err(CoreError::InvalidInput(format!(
                 "{name}: every frame needs at least one point"
@@ -147,14 +140,14 @@ impl<G: LieGroup> LidarPlaneBundleFactor<G> {
     }
 }
 
-impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneBundleFactor<G> {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for LidarPlaneBundleFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         // Every free point carried to the world, with its frame's chain.
         let chains: Vec<(usize, super::map_plane::LidarPointChain)> = self
             .points
@@ -209,10 +202,7 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneBundleFactor<G> {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (
-            self.residual_dim(),
-            self.points.len() * G::TangentVector::DIM,
-        )
+        (self.residual_dim(), self.points.len() * G::DOF)
     }
 
     fn whitens_internally(&self) -> bool {
@@ -233,6 +223,7 @@ mod tests {
     use super::*;
     use apex_manifolds::se23::SE23;
     use apex_manifolds::sim3::Sim3;
+    use apex_manifolds::{LieGroup, Tangent};
     use faer::Mat;
     use nalgebra::UnitQuaternion;
 
@@ -245,7 +236,7 @@ mod tests {
 
     /// Points on the plane `n·x = 2` (tilted), as seen from `state`, with a
     /// few millimetres of off-plane noise.
-    fn plane_points<G: LieGroup>(state: &G, seed: usize) -> Vec<Vector3<f64>> {
+    fn plane_points<G: ActsOnPoints3>(state: &G, seed: usize) -> Vec<Vector3<f64>> {
         let normal = Vector3::new(0.2, -0.3, 0.93).normalize();
         let a = normal.cross(&Vector3::x()).normalize();
         let b = normal.cross(&a);
@@ -266,7 +257,7 @@ mod tests {
             .collect()
     }
 
-    fn cost<G: LieGroup + Send + Sync + 'static>(
+    fn cost<G: ActsOnPoints3 + Send + Sync + 'static>(
         factor: &LidarPlaneBundleFactor<G>,
         states: &[G],
     ) -> f64 {
@@ -279,11 +270,11 @@ mod tests {
 
     /// `Jᵀr` is the gradient of the plane-eliminated cost — checked against
     /// central differences of the cost itself, plane re-fitted each time.
-    fn check_gradient<G: LieGroup + Send + Sync + 'static>(
+    fn check_gradient<G: ActsOnPoints3 + Send + Sync + 'static>(
         states: Vec<G>,
     ) -> Result<(), CoreError> {
         const EPS: f64 = 1e-6;
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         let points: Vec<Vec<Vector3<f64>>> = states
             .iter()
             .enumerate()

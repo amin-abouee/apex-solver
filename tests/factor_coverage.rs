@@ -37,15 +37,15 @@ use apex_solver::factors::lidar::{
     PointMoments, PrecomputedPlane, SubmapAlignmentFactor, lidar_plane_factor_isotropic,
 };
 use apex_solver::factors::navigation::{GpsAsyncFactor, GpsFactor};
-use apex_solver::factors::ranging::bearing::{BearingFactor, BearingFactorSe23};
+use apex_solver::factors::ranging::bearing::BearingFactor;
 use apex_solver::factors::ranging::range::PosePoseRangeFactor;
 use apex_solver::factors::visual::{
     DepthFactor, EssentialMatrixConstraint, EssentialMatrixFactor, HomogeneousPointFactor,
     OneSidedDepthFactor,
 };
 use apex_solver::factors::visual::{IntensityImage, PhotometricPatchFactor};
-use apex_solver::factors::visual::{InverseDepthBearingSe23Factor, InverseDepthSe23Factor};
-use apex_solver::factors::visual::{InverseRangeProjectionSe23Factor, StereoInverseRangeFactor};
+use apex_solver::factors::visual::{InverseDepthBearingFactor, InverseDepthPlaneFactor};
+use apex_solver::factors::visual::{InverseRangeProjectionFactor, StereoInverseRangeFactor};
 use apex_solver::factors::visual::{PhotometricTwoViewFactor, PlanePoint, ReferenceView};
 use nalgebra::{DVector, UnitQuaternion, Vector2, Vector3, Vector4};
 
@@ -597,7 +597,7 @@ fn gps_factor_recovers_poses_and_the_frame_transform() {
         let measured = c_gw * antenna_world + t_gw.translation();
         problem.add_residual_block(
             &[*key, frame_key],
-            Box::new(GpsFactor::new_isotropic(measured, lever, 0.05)),
+            Box::new(GpsFactor::<SE3>::new_isotropic(measured, lever, 0.05)),
             None,
         );
     }
@@ -755,7 +755,7 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
             poses[k].rotation_so3().rotation_matrix().transpose() * (delta / delta.norm());
         problem.add_residual_block(
             &[*key, lm_key],
-            Box::new(BearingFactor::new_isotropic(bearing, 0.01)),
+            Box::new(BearingFactor::<SE3>::new_isotropic(bearing, 0.01)),
             None,
         );
     }
@@ -764,7 +764,7 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
     let baseline = (poses[0].translation() - poses[3].translation()).norm();
     problem.add_residual_block_with_noise(
         &[pose_keys[0], pose_keys[3]],
-        Box::new(PosePoseRangeFactor::new(baseline)),
+        Box::new(PosePoseRangeFactor::<SE3>::new(baseline)),
         None,
         NoiseModel::from_sigmas(&[0.01]).unwrap_or_else(|e| panic!("{e}")),
     );
@@ -821,7 +821,7 @@ fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
         let bearing = states[k].rotation_matrix().transpose() * (delta / delta.norm());
         problem.add_residual_block(
             &[*key, lm_key],
-            Box::new(BearingFactorSe23::new_isotropic(bearing, 0.01)),
+            Box::new(BearingFactor::<SE23>::new_isotropic(bearing, 0.01)),
             None,
         );
     }
@@ -853,7 +853,7 @@ fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
 /// monocular graph cannot otherwise see); keyframe 2 and every inverse depth
 /// start perturbed and must be recovered.
 #[test]
-fn inverse_depth_se23_recovers_a_pose_and_its_depths() {
+fn inverse_depth_plane_recovers_a_pose_and_its_depths() {
     let states: Vec<SE23> = [0.0, 0.6, 1.25]
         .iter()
         .enumerate()
@@ -932,7 +932,7 @@ fn inverse_depth_se23_recovers_a_pose_and_its_depths() {
             let measurement = Vector2::new(point.x / point.z, point.y / point.z);
             problem.add_residual_block_with_noise(
                 &[state_keys[0], state_keys[observer], extrinsic_key, key],
-                Box::new(InverseDepthSe23Factor::new(bearing, measurement)),
+                Box::new(InverseDepthPlaneFactor::<SE23>::new(bearing, measurement)),
                 None,
                 noise.clone(),
             );
@@ -972,7 +972,7 @@ fn inverse_depth_se23_recovers_a_pose_and_its_depths() {
 ///
 /// Here neither happens: the residual is an angle everywhere.
 #[test]
-fn inverse_depth_bearing_se23_recovers_depths_across_a_fisheye_field() {
+fn inverse_depth_bearing_recovers_depths_across_a_fisheye_field() {
     let states: Vec<SE23> = [0.0, 0.6, 1.25]
         .iter()
         .enumerate()
@@ -1065,7 +1065,7 @@ fn inverse_depth_bearing_se23_recovers_depths_across_a_fisheye_field() {
             if point.z < 0.18 * point.norm() {
                 steep += 1;
             }
-            let factor = InverseDepthBearingSe23Factor::new_isotropic(bearing, point, sigma)
+            let factor = InverseDepthBearingFactor::<SE23>::new_isotropic(bearing, point, sigma)
                 .unwrap_or_else(|e| panic!("{e}"));
             problem.add_residual_block_with_noise(
                 &[state_keys[0], state_keys[observer], extrinsic_key, key],
@@ -1293,7 +1293,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
             // Through the generic distance-field entry point.
             problem.add_residual_block(
                 &[key_a, key_b],
-                Box::new(IcpFactor::new(
+                Box::new(IcpFactor::<SE3, _>::new(
                     PrecomputedPlane::new(*point_on_plane, *normal),
                     p_b,
                     0.02,
@@ -1304,7 +1304,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
             // Through the LOAM plane helper (the same factor, aliased).
             problem.add_residual_block(
                 &[key_a, key_b],
-                Box::new(lidar_plane_factor_isotropic(
+                Box::new(lidar_plane_factor_isotropic::<SE3>(
                     p_b,
                     *point_on_plane,
                     *normal,
@@ -1326,7 +1326,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
             .act(&t_wa.act(&on_line, None, None), None, None);
         problem.add_residual_block(
             &[key_a, key_b],
-            Box::new(LidarEdgeFactor::new_isotropic(
+            Box::new(LidarEdgeFactor::<SE3>::new_isotropic(
                 p_b, edge_point, edge_dir, 0.02,
             )),
             None,
@@ -2070,13 +2070,13 @@ fn motion_constraints_pin_a_stopped_ground_vehicle() {
 
     problem.add_residual_block_with_noise(
         &[state_key],
-        Box::new(ZeroVelocityFactor::new()),
+        Box::new(ZeroVelocityFactor::<SE23>::new()),
         None,
         NoiseModel::from_sigmas(&[0.01; 3]).unwrap_or_else(|e| panic!("{e}")),
     );
     problem.add_residual_block_with_noise(
         &[state_key],
-        Box::new(NonholonomicFactor::new()),
+        Box::new(NonholonomicFactor::<SE23>::new()),
         None,
         NoiseModel::from_sigmas(&[0.05; 2]).unwrap_or_else(|e| panic!("{e}")),
     );
@@ -2088,7 +2088,7 @@ fn motion_constraints_pin_a_stopped_ground_vehicle() {
     );
     problem.add_residual_block_with_noise(
         &[pose_key],
-        Box::new(PlanarMotionFactor::new(0.1)),
+        Box::new(PlanarMotionFactor::<SE3>::new(0.1)),
         None,
         NoiseModel::from_sigmas(&[0.01; 3]).unwrap_or_else(|e| panic!("{e}")),
     );
@@ -2376,7 +2376,7 @@ fn time_offset_projection_recovers_the_clock_offset() {
 /// fails here rather than going unnoticed.
 /// A stereo rig: landmarks hosted in camera 0 at keyframe 0, seen by camera
 /// 1 at the same instant ([`StereoInverseRangeFactor`]) and at keyframe 1
-/// ([`InverseRangeProjectionSe23Factor`]). The stereo pixels alone fix every
+/// ([`InverseRangeProjectionFactor`]). The stereo pixels alone fix every
 /// inverse range from the 11 cm baseline — the body state cancels — and the
 /// later views then recover keyframe 1, which starts 8 cm and 3° off.
 #[test]
@@ -2472,7 +2472,7 @@ fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
         .unwrap_or_else(|e| panic!("{e}"));
         problem.add_residual_block(&[b0_key, b1_key, key, k_key], Box::new(stereo), None);
 
-        let moving = InverseRangeProjectionSe23Factor::<KannalaBrandtCamera>::new(
+        let moving = InverseRangeProjectionFactor::<SE23, KannalaBrandtCamera>::new(
             bearing,
             pixel(&observer, &t_b1, world),
             0.5,
@@ -2502,6 +2502,90 @@ fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
     assert!(error < 1e-4, "keyframe 1 translation error {error:.3e}");
     let angle = (solved.rotation_quaternion().inverse() * observer.rotation_quaternion()).angle();
     assert!(angle < 1e-5, "keyframe 1 rotation error {angle:.3e}");
+}
+
+/// A four-degree-of-freedom pose graph: nodes are `Rn(4)` `[x, y, z, ψ]` with a
+/// constant tilt, and the relative-pose factors recover position and yaw.
+#[test]
+fn relative_4dof_factor_recovers_positions_and_yaws() {
+    use apex_solver::factors::pose::Relative4DofFactor;
+    use nalgebra::Matrix3;
+
+    let rot_z = |yaw: f64| {
+        let (s, c) = yaw.sin_cos();
+        Matrix3::new(c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0)
+    };
+    let tilt = |roll: f64, pitch: f64| {
+        let (sr, cr) = roll.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+        let rx = Matrix3::new(1.0, 0.0, 0.0, 0.0, cr, -sr, 0.0, sr, cr);
+        let ry = Matrix3::new(cp, 0.0, sp, 0.0, 1.0, 0.0, -sp, 0.0, cp);
+        ry * rx
+    };
+
+    let truth: [[f64; 4]; 4] = [
+        [0.0, 0.0, 0.0, 0.0],
+        [1.0, 0.2, 0.1, 0.3],
+        [1.8, 1.1, 0.25, 0.6],
+        [2.2, 2.0, 0.3, 1.0],
+    ];
+    let tilts = [
+        tilt(0.02, -0.01),
+        tilt(0.01, 0.03),
+        tilt(-0.02, 0.02),
+        tilt(0.0, 0.0),
+    ];
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let keys: Vec<_> = truth
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            // Anchor node 0 at the truth; start the others off by a few
+            // centimetres and degrees.
+            let offset = if index == 0 { 0.0 } else { 0.05 * index as f64 };
+            problem.add_variable(
+                ManifoldType::RN,
+                DVector::from_vec(vec![
+                    node[0] + offset,
+                    node[1] - offset,
+                    node[2] + 0.5 * offset,
+                    node[3] + 2.0 * offset,
+                ]),
+            )
+        })
+        .collect();
+    anchor_rn(&mut problem, keys[0], &truth[0]);
+
+    let noise =
+        NoiseModel::from_sigmas(&[0.01, 0.01, 0.01, 0.005]).unwrap_or_else(|e| panic!("{e}"));
+    for (i, j) in [(0, 1), (1, 2), (2, 3), (0, 2)] {
+        let (a, b) = (&truth[i], &truth[j]);
+        let rotation = rot_z(a[3]) * tilts[i];
+        let delta = rotation.transpose()
+            * (Vector3::new(b[0], b[1], b[2]) - Vector3::new(a[0], a[1], a[2]));
+        problem.add_residual_block_with_noise(
+            &[keys[i], keys[j]],
+            Box::new(Relative4DofFactor::new(tilts[i], delta, b[3] - a[3])),
+            None,
+            noise.clone(),
+        );
+    }
+
+    let result = lm_solver(100)
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("4-DoF graph failed: {e}"));
+    for (key, expected) in keys.iter().zip(&truth) {
+        let got = result.parameters[*key].as_param_slice();
+        for axis in 0..4 {
+            assert!(
+                (got[axis] - expected[axis]).abs() < 1e-6,
+                "axis {axis}: {} != {}",
+                got[axis],
+                expected[axis]
+            );
+        }
+    }
 }
 
 #[test]

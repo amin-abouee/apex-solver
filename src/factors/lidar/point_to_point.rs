@@ -10,60 +10,59 @@
 //! factor only evaluates the single matched pair. Used for lidar/depth
 //! odometry and as a building block for point-based loop closure.
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use std::marker::PhantomData;
+
+use apex_manifolds::capability::ActsOnPoints3;
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix3, Vector3};
+use nalgebra::Vector3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::common::group_point::{act_point, expect_state_and_point};
 
-/// Pose-to-point factor over `[T_wr, p_body]`.
+/// Pose-to-point factor over `[T_wr, p_body]`, for any state that moves points.
 #[derive(Clone)]
-pub struct PoseToPointFactor {
+pub struct PoseToPointFactor<G: ActsOnPoints3> {
     /// 3D point measured in the world/target frame.
     pub measurement: Vector3<f64>,
+    group: PhantomData<fn() -> G>,
 }
 
-impl PoseToPointFactor {
+impl<G: ActsOnPoints3> PoseToPointFactor<G> {
     /// Create the factor from the world-frame measured point.
     pub fn new(measurement: Vector3<f64>) -> Self {
-        Self { measurement }
+        Self {
+            measurement,
+            group: PhantomData,
+        }
     }
 }
 
-impl Factor for PoseToPointFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for PoseToPointFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "PoseToPointFactor expects [T_wr, p_body]");
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 3, "params[1] must be a 3D point");
-
-        let pose = SE3::from_param_slice(params[0]);
+        let pose = G::from_param_slice(params[0]);
         let p_body = Vector3::new(params[1][0], params[1][1], params[1][2]);
 
-        // `act` reports its own derivatives in SE(3)'s right convention:
-        // `∂(T·p)/∂(δρ, δθ)` in the top 3×6 of `j_pose`, and `∂(T·p)/∂p` in
-        // `j_point`. Asking the manifold keeps this factor on the group's
-        // conventions instead of a second, hand-derived copy of them.
-        let mut j_pose = SE3::zero_jacobian();
-        let mut j_point = Matrix3::zeros();
-        let predicted = pose.act(&p_body, Some(&mut j_pose), Some(&mut j_point));
-        let r = predicted - self.measurement;
+        // `act` reports its own derivatives in the group's right convention:
+        // asking the manifold keeps this factor on the group's conventions
+        // instead of a second, hand-derived copy of them.
+        let acted = act_point(&pose, &p_body);
+        let r = acted.world - self.measurement;
         residual.copy_from_slice(r.as_slice());
 
         let Some(mut jac) = jacobian else { return };
 
         for row in 0..3 {
-            for col in 0..6 {
-                *jac.rb_mut().get_mut(row, col) = j_pose[(row, col)];
+            for col in 0..G::DOF {
+                *jac.rb_mut().get_mut(row, col) = acted.d_state[(row, col)];
             }
             for col in 0..3 {
-                *jac.rb_mut().get_mut(row, 6 + col) = j_point[(row, col)];
+                *jac.rb_mut().get_mut(row, G::DOF + col) = acted.d_point[(row, col)];
             }
         }
     }
@@ -73,24 +72,20 @@ impl Factor for PoseToPointFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (3, 9)
+        (3, G::DOF + 3)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2
-            || variables[0].as_param_slice().len() != SE3::REP_SIZE
-            || variables[1].as_param_slice().len() != 3
-        {
-            return Err("PoseToPointFactor expects [SE3 pose, 3D point]".into());
-        }
-        Ok(())
+        expect_state_and_point::<G>(variables, "PoseToPointFactor")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apex_manifolds::LieGroup;
     use apex_manifolds::Tangent;
+    use apex_manifolds::se3::SE3;
     use apex_manifolds::se3::SE3Tangent;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -103,7 +98,7 @@ mod tests {
         ));
         let p_body = Vector3::new(0.4, -0.2, 2.5);
         let measured = pose.act(&p_body, None, None);
-        let factor = PoseToPointFactor::new(measured);
+        let factor = PoseToPointFactor::<SE3>::new(measured);
 
         let mut residual = vec![0.0; 3];
         factor.linearize(
@@ -125,7 +120,7 @@ mod tests {
         ));
         let p_body = Vector3::new(0.3, 0.1, 1.8);
         let measured = pose.act(&p_body, None, None);
-        let factor = PoseToPointFactor::new(measured);
+        let factor = PoseToPointFactor::<SE3>::new(measured);
         let pose_vec: Vec<f64> = pose.as_param_slice().to_vec();
         let body_vec = [p_body.x, p_body.y, p_body.z];
 

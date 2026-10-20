@@ -34,6 +34,7 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Vector2, Vector3};
 
 use apex_camera_models::CameraModel;
+use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::{LieGroup, Tangent};
 
@@ -42,7 +43,6 @@ use crate::core::CoreError;
 use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use crate::factors::common::group_point::acts_on_points;
 use crate::factors::common::validate::expect_manifolds;
 
 /// Finite-difference step on the tangent.
@@ -50,7 +50,7 @@ const STEP: f64 = 1e-6;
 
 /// The reference view: its image and the body pose it was taken from.
 #[derive(Clone)]
-pub struct ReferenceView<G: LieGroup> {
+pub struct ReferenceView<G: ActsOnPoints3> {
     /// The reference image.
     pub image: Arc<IntensityImage>,
     /// Body pose at the reference image (held).
@@ -70,7 +70,7 @@ pub struct PlanePoint {
 ///
 /// Blocks `[X ∈ G, T_SC ∈ SE3]`. Whitens internally: register with
 /// `NoiseModel::null()`.
-pub struct PhotometricTwoViewFactor<G: LieGroup, CAM: CameraModel> {
+pub struct PhotometricTwoViewFactor<G: ActsOnPoints3, CAM: CameraModel> {
     camera: CAM,
     current: Arc<IntensityImage>,
     reference: Arc<IntensityImage>,
@@ -85,7 +85,7 @@ pub struct PhotometricTwoViewFactor<G: LieGroup, CAM: CameraModel> {
     group: PhantomData<fn() -> G>,
 }
 
-impl<G: LieGroup, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
+impl<G: ActsOnPoints3, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
     /// A plane point `point` with unit normal `normal`, seen in `reference`
     /// from body pose `reference_body` and in `current`.
     ///
@@ -105,12 +105,6 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
     ) -> CoreResult<Self> {
         let PlanePoint { point, normal } = plane;
         let name = "PhotometricTwoViewFactor";
-        if !acts_on_points::<G>() {
-            return Err(CoreError::InvalidInput(format!(
-                "{name}: {} does not act on 3-D points",
-                G::NAME
-            )));
-        }
         let offsets = offsets.into();
         if offsets.len() < 2 {
             return Err(CoreError::InvalidInput(format!(
@@ -223,7 +217,7 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
 
 impl<G, CAM> Factor for PhotometricTwoViewFactor<G, CAM>
 where
-    G: LieGroup + Send + Sync + 'static,
+    G: ActsOnPoints3 + Send + Sync + 'static,
     CAM: CameraModel,
 {
     fn linearize(

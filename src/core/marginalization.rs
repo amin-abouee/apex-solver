@@ -44,7 +44,7 @@ use apex_manifolds::{LieGroup, ManifoldType, Tangent, rn, se2, se3, se23, sgal3,
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, FactorKey, VarKey};
-use crate::factors::marginal::{LocalLogFn, MarginalPriorFactor};
+use crate::factors::marginal::{LocalLogFn, MarginalPriorFactor, MarginalPriorFactorT};
 use crate::linearizer::LinearizerError;
 use crate::linearizer::{JacobianEvaluation, compute_block_into_with};
 
@@ -556,6 +556,35 @@ impl Marginal {
         self.clone().into_factor()
     }
 
+    /// The prior as a [`MarginalPriorFactorT`], for a marginal whose kept
+    /// blocks all live on `G`. The returned keys are [`Self::kept`], in order,
+    /// with the positional caveat documented on [`Self::to_factor`].
+    ///
+    /// # Errors
+    ///
+    /// [`MarginalizationError::Factor`] if a kept block is not on `G`, or the
+    /// factor rejects the dimensions.
+    pub fn to_typed_factor<G: LieGroup>(
+        &self,
+    ) -> MarginalizationResult<(Vec<VarKey>, MarginalPriorFactorT<G>)> {
+        let wanted = ManifoldType::from_name(G::NAME);
+        if let Some(other) = self.manifolds.iter().find(|m| Some(**m) != wanted) {
+            return Err(MarginalizationError::Factor(format!(
+                "kept block on {other:?} but the typed prior is for {}",
+                G::NAME
+            )));
+        }
+        let anchors = self
+            .linearization_point
+            .iter()
+            .map(|x0| G::from_param_slice(x0.as_slice()))
+            .collect();
+        let factor =
+            MarginalPriorFactorT::new(anchors, self.sqrt_information.clone(), self.offset.clone())
+                .map_err(|e| MarginalizationError::Factor(e.to_string()))?;
+        Ok((self.kept.clone(), factor))
+    }
+
     /// Build the prior. The returned keys are [`Self::kept`], in order, with
     /// the positional caveat documented on [`Self::to_factor`].
     ///
@@ -702,6 +731,7 @@ pub type MarginalizationResult<T> = Result<T, MarginalizationError>;
 mod tests {
     use super::*;
     use crate::core::noise::NoiseModel;
+    use crate::factors::Factor;
     use crate::factors::pose::{BetweenFactor, EuclideanPriorFactor};
     use crate::linalg::JacobianMode;
     use crate::optimizer::levenberg_marquardt::LevenbergMarquardt;
@@ -861,6 +891,71 @@ mod tests {
         assert!(
             (x1 - x1_full).abs() < 1e-6 && (x2 - x2_full).abs() < 1e-6,
             "reduced ({x1:.6}, {x2:.6}) != full ({x1_full:.6}, {x2_full:.6})"
+        );
+        Ok(())
+    }
+
+    /// The typed prior is the boxed one without the closure: same residual,
+    /// same Jacobian, and it reproduces the full solution when used in place
+    /// of the boxed prior.
+    #[test]
+    fn the_typed_prior_matches_the_boxed_prior_and_the_full_solution() -> TestResult {
+        let (mut full, keys, _blocks) = linear_chain([2.0, 5.0, 9.0]);
+        let expected = solver().optimize(&mut full)?;
+        let x1_full = expected.parameters[keys[1]].as_param_slice()[0];
+
+        let (mut reduced, keys, _blocks) = linear_chain([2.0, 5.0, 9.0]);
+        let marginal = Marginalizer::new().compute(&reduced, &[keys[0]])?;
+        let (_, boxed) = marginal.to_factor()?;
+        let (kept, typed) = marginal.to_typed_factor::<Rn>()?;
+
+        let probe = [vec![0.7, -0.2], vec![1.9, 0.4]];
+        let params: Vec<&[f64]> = probe.iter().map(Vec::as_slice).collect();
+        let rows = boxed.residual_dim();
+        let (mut r_boxed, mut r_typed) = (vec![0.0; rows], vec![0.0; rows]);
+        let cols = boxed.jacobian_shape().1;
+        let (mut j_boxed, mut j_typed) = (vec![0.0; rows * cols], vec![0.0; rows * cols]);
+        boxed.linearize(
+            &params,
+            &mut r_boxed,
+            Some(faer::mat::MatMut::from_column_major_slice_mut(
+                &mut j_boxed,
+                rows,
+                cols,
+            )),
+        );
+        typed.linearize(
+            &params,
+            &mut r_typed,
+            Some(faer::mat::MatMut::from_column_major_slice_mut(
+                &mut j_typed,
+                rows,
+                cols,
+            )),
+        );
+        assert_eq!(r_boxed, r_typed);
+        assert_eq!(j_boxed, j_typed);
+
+        let removed = marginal.absorbed.clone();
+        reduced.remove_residual_blocks(&removed);
+        reduced.try_remove_variable(keys[0])?;
+        reduced.try_add_residual_block(&kept, Box::new(typed), None)?;
+        reduced.set_variable_params(keys[1], &[-4.0, 0.0])?;
+        reduced.set_variable_params(keys[2], &[7.5, 0.0])?;
+        let got = solver().optimize(&mut reduced)?;
+        let x1 = got.parameters[keys[1]].as_param_slice()[0];
+        assert!((x1 - x1_full).abs() < 1e-6, "{x1} != {x1_full}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_typed_prior_for_the_wrong_group_is_rejected() -> TestResult {
+        let (problem, keys, _blocks) = linear_chain([0.0, 1.0, 2.0]);
+        let marginal = Marginalizer::new().compute(&problem, &[keys[0]])?;
+        assert!(
+            marginal
+                .to_typed_factor::<apex_manifolds::se3::SE3>()
+                .is_err()
         );
         Ok(())
     }

@@ -7,12 +7,15 @@
 //! r = (z_pose + bias) − z_measured
 //! ```
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use std::marker::PhantomData;
+
+use apex_manifolds::capability::ActsOnPoints3;
 use faer::prelude::ReborrowMut;
+use nalgebra::Vector3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::common::group_point::act_point;
 
 /// Barometric altitude factor over `[pose (7), baro bias (1)]`
 /// (GTSAM `BarometricFactor` layout).
@@ -22,43 +25,39 @@ use crate::factors::Factor;
 /// The z-Jacobian follows the world-to-body pose retraction:
 /// `∂z/∂δρ = R[2,:]`, `∂z/∂δθ = −(R·p̂_w)[2,:]`.
 #[derive(Clone)]
-pub struct BarometricFactor {
+pub struct BarometricFactor<G: ActsOnPoints3> {
     /// Measured altitude [m].
     pub measured_height: f64,
+    group: PhantomData<fn() -> G>,
 }
 
-impl BarometricFactor {
+impl<G: ActsOnPoints3> BarometricFactor<G> {
     /// Create the factor from the pressure-derived altitude.
     pub fn new(measured_height: f64) -> Self {
-        Self { measured_height }
+        Self {
+            measured_height,
+            group: PhantomData,
+        }
     }
 }
 
-impl Factor for BarometricFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for BarometricFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "BarometricFactor expects [pose, bias]");
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 1, "params[1] must be a scalar bias");
-
-        let pose = SE3::from_param_slice(params[0]);
-        let p_world = pose.translation();
+        let origin = act_point(&G::from_param_slice(params[0]), &Vector3::zeros());
         let bias = params[1][0];
-        residual[0] = p_world.z + bias - self.measured_height;
+        residual[0] = origin.world.z + bias - self.measured_height;
 
         let Some(mut jac) = jacobian else { return };
-        // Retraction t' = t + R·δρ: ∂z/∂δρ = R[2,:]; rotation does not move
-        // the origin; ∂z/∂bias = 1.
-        let rotation = pose.rotation_so3().rotation_matrix();
-        for col in 0..3 {
-            *jac.rb_mut().get_mut(0, col) = rotation[(2, col)];
-            *jac.rb_mut().get_mut(0, 3 + col) = 0.0;
+        // ∂z/∂state is the z row of the origin's chain; ∂z/∂bias = 1.
+        for col in 0..G::DOF {
+            *jac.rb_mut().get_mut(0, col) = origin.d_state[(2, col)];
         }
-        *jac.rb_mut().get_mut(0, 6) = 1.0;
+        *jac.rb_mut().get_mut(0, G::DOF) = 1.0;
     }
 
     fn residual_dim(&self) -> usize {
@@ -66,22 +65,28 @@ impl Factor for BarometricFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (1, 7)
+        (1, G::DOF + 1)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2
-            || variables[0].as_param_slice().len() != SE3::REP_SIZE
-            || variables[1].as_param_slice().len() != 1
-        {
-            return Err("BarometricFactor expects [SE3 pose, R¹ baro bias]".into());
+        match variables {
+            [state, bias]
+                if state.manifold_type_name() == G::NAME && bias.as_param_slice().len() == 1 =>
+            {
+                Ok(())
+            }
+            _ => Err(format!(
+                "BarometricFactor expects [{} state, R¹ baro bias]",
+                G::NAME
+            )),
         }
-        Ok(())
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apex_manifolds::LieGroup;
+    use apex_manifolds::se3::SE3;
     use nalgebra::UnitQuaternion as UQ;
 
     #[test]
@@ -95,7 +100,7 @@ mod tests {
         ));
         let pose_v: Vec<f64> = pose.as_param_slice().to_vec();
         let bias = vec![1.0];
-        let factor = BarometricFactor::new(50.0);
+        let factor = BarometricFactor::<SE3>::new(50.0);
 
         let mut residual = vec![0.0; 1];
         let mut jac_buf = vec![0.0; 7];

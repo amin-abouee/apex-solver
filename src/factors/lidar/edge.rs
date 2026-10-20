@@ -29,19 +29,18 @@
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, Vector3};
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use apex_manifolds::capability::ActsOnPoints3;
+use std::marker::PhantomData;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use crate::factors::common::math::skew;
-use crate::factors::common::validate::expect_block_sizes;
+use crate::factors::common::group_point::{expect_two_states, relative_point};
 
 /// Point-to-edge (point-to-line) LOAM factor.
 ///
 /// Aligns a query point from frame B against a matched edge line (point +
 /// unit direction) defined in frame A.
-pub struct LidarEdgeFactor {
+pub struct LidarEdgeFactor<G: ActsOnPoints3> {
     /// Query point in frame B.
     point_b: Vector3<f64>,
     /// A point on the matched edge line, in frame A.
@@ -50,9 +49,10 @@ pub struct LidarEdgeFactor {
     edge_direction: Vector3<f64>,
     /// Square-root information matrix (3×3, `W` s.t. `Wᵀ W = Σ⁻¹`).
     sqrt_information: SMatrix<f64, 3, 3>,
+    group: PhantomData<fn() -> G>,
 }
 
-impl LidarEdgeFactor {
+impl<G: ActsOnPoints3> LidarEdgeFactor<G> {
     /// Create a point-to-edge factor.
     ///
     /// # Arguments
@@ -72,6 +72,7 @@ impl LidarEdgeFactor {
             edge_point,
             edge_direction: edge_direction.normalize(),
             sqrt_information,
+            group: PhantomData,
         }
     }
 
@@ -87,32 +88,19 @@ impl LidarEdgeFactor {
     }
 }
 
-impl Factor for LidarEdgeFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for LidarEdgeFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(
-            params.len(),
-            2,
-            "LidarEdgeFactor expects 2 parameter blocks"
-        );
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 7, "params[1] must be SE3 (7D)");
+        let t_wa = G::from_param_slice(params[0]);
+        let t_wb = G::from_param_slice(params[1]);
 
-        let t_wa = SE3::from_param_slice(params[0]);
-        let t_wb = SE3::from_param_slice(params[1]);
-
-        let c_wa: Matrix3<f64> = t_wa.rotation_so3().rotation_matrix();
-        let c_wb: Matrix3<f64> = t_wb.rotation_so3().rotation_matrix();
-        let t_wa_pos = t_wa.translation();
-        let t_wb_pos = t_wb.translation();
-
-        // Transform point to frame A: p_A = C_WA^T * (C_WB * p_B + t_WB - t_WA)
-        let p_w = c_wb * self.point_b + t_wb_pos;
-        let p_a = c_wa.transpose() * (p_w - t_wa_pos);
+        // p_A = X_WA⁻¹ ⊙ (X_WB ⊙ p_B)
+        let chain = relative_point(&t_wa, &t_wb, &self.point_b);
+        let p_a = chain.point;
 
         // Perpendicular projector onto the plane orthogonal to the edge direction:
         // P = I - d*d^T  (dᵀd = 1 since edge_direction is normalized)
@@ -129,48 +117,16 @@ impl Factor for LidarEdgeFactor {
             return;
         };
 
-        // ── Jacobians (right SE3 perturbation, apex-solver convention) ─────────
-        //
-        // de/dp_A = sqrt_info * P   (3×3), where P = I - d*d^T is symmetric
-        //
-        // p_A = C_WA^T * (p_W - t_WA),  p_W = C_WB * p_B + t_WB
-        // Same chain rule as IcpFactor (see icp_factor.rs for the full derivation):
-        //   ∂p_A/∂δρ_WA = −I₃,             ∂p_A/∂δθ_WA = +[p_A]×
-        //   ∂p_A/∂δρ_WB = C_WA^T·C_WB,     ∂p_A/∂δθ_WB = −C_WA^T·C_WB·[p_B]×
-
-        let de_dp_a = self.sqrt_information * projector; // 3×3
-
-        let c_wa_t = c_wa.transpose();
-        let c_wa_t_c_wb = c_wa_t * c_wb;
-
-        // dp_A/dT_WA (3×6): [-I | [p_A]×]
-        let mut dpa_dtwa = SMatrix::<f64, 3, 6>::zeros();
-        dpa_dtwa
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&(-Matrix3::identity()));
-        dpa_dtwa.fixed_view_mut::<3, 3>(0, 3).copy_from(&skew(&p_a));
-
-        // dp_A/dT_WB (3×6): [C_WA^T·C_WB | -C_WA^T·C_WB·[p_B]×]
-        let mut dpa_dtwb = SMatrix::<f64, 3, 6>::zeros();
-        dpa_dtwb
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&c_wa_t_c_wb);
-        dpa_dtwb
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-c_wa_t_c_wb * skew(&self.point_b)));
-
-        // Chain rule
-        let j_twa: SMatrix<f64, 3, 6> = de_dp_a * dpa_dtwa;
-        let j_twb: SMatrix<f64, 3, 6> = de_dp_a * dpa_dtwb;
-
-        // Assemble 3×12 Jacobian
-        let mut j_full = SMatrix::<f64, 3, 12>::zeros();
-        j_full.fixed_view_mut::<3, 6>(0, 0).copy_from(&j_twa);
-        j_full.fixed_view_mut::<3, 6>(0, 6).copy_from(&j_twb);
+        // de/dp_A = sqrt_info * P   (3×3), P = I − d·dᵀ symmetric, carried
+        // through the group's own `inverse` and `act` Jacobians.
+        let de_dp_a = self.sqrt_information * projector;
+        let j_twa = de_dp_a * chain.d_a;
+        let j_twb = de_dp_a * chain.d_b;
 
         for row in 0..3 {
-            for col in 0..12 {
-                *jac.rb_mut().get_mut(row, col) = j_full[(row, col)];
+            for col in 0..G::DOF {
+                *jac.rb_mut().get_mut(row, col) = j_twa[(row, col)];
+                *jac.rb_mut().get_mut(row, G::DOF + col) = j_twb[(row, col)];
             }
         }
     }
@@ -180,15 +136,11 @@ impl Factor for LidarEdgeFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (3, 12)
+        (3, 2 * G::DOF)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        expect_block_sizes(
-            variables,
-            &[SE3::REP_SIZE, SE3::REP_SIZE],
-            "LidarEdgeFactor expects [SE3 T_WA, SE3 T_WB]",
-        )
+        expect_two_states::<G>(variables, "LidarEdgeFactor")
     }
 
     /// This factor whitens with the 3×3 sqrt-information supplied at construction,
@@ -204,6 +156,7 @@ mod tests {
     use crate::factors::common::test_utils::{
         compute_residual, compute_with_jacobian, identity_pose, make_pose, perturb_se3,
     };
+    use apex_manifolds::se3::SE3;
     use nalgebra::UnitQuaternion;
 
     // ── LidarEdgeFactor ──────────────────────────────────────────────────────
@@ -214,7 +167,8 @@ mod tests {
         let t_wb = identity_pose();
         let point_b = Vector3::new(0.0, 0.0, 5.0);
 
-        let factor = LidarEdgeFactor::new_isotropic(point_b, Vector3::zeros(), Vector3::z(), 1.0);
+        let factor =
+            LidarEdgeFactor::<SE3>::new_isotropic(point_b, Vector3::zeros(), Vector3::z(), 1.0);
         let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
         let norm: f64 = r.iter().map(|x| x * x).sum::<f64>().sqrt();
         assert!(norm < 1e-10, "residual norm = {norm} should be zero");
@@ -227,7 +181,8 @@ mod tests {
         // Point offset by (3, 4, 0) perpendicular to a z-axis edge.
         let point_b = Vector3::new(3.0, 4.0, 5.0);
 
-        let factor = LidarEdgeFactor::new_isotropic(point_b, Vector3::zeros(), Vector3::z(), 1.0);
+        let factor =
+            LidarEdgeFactor::<SE3>::new_isotropic(point_b, Vector3::zeros(), Vector3::z(), 1.0);
         let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
         let norm: f64 = r.iter().map(|x| x * x).sum::<f64>().sqrt();
         // Perpendicular distance from (3,4,5) to the z-axis is 5.
@@ -245,8 +200,12 @@ mod tests {
         let direction = Vector3::new(1.0, 2.0, 3.0).normalize();
         let point_b = Vector3::new(-1.0, 2.0, 6.0);
 
-        let factor =
-            LidarEdgeFactor::new_isotropic(point_b, Vector3::new(0.5, -0.5, 1.0), direction, 1.0);
+        let factor = LidarEdgeFactor::<SE3>::new_isotropic(
+            point_b,
+            Vector3::new(0.5, -0.5, 1.0),
+            direction,
+            1.0,
+        );
         let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
         let r_vec = Vector3::new(r[0], r[1], r[2]);
         assert!(
@@ -270,8 +229,12 @@ mod tests {
         let t_wb = make_pose(2.0, 1.0, -0.2, q_b);
         let point_b = Vector3::new(0.5, -0.3, 4.0);
 
-        let factor =
-            LidarEdgeFactor::new_isotropic(point_b, Vector3::new(0.0, 0.0, 2.0), Vector3::z(), 0.5);
+        let factor = LidarEdgeFactor::<SE3>::new_isotropic(
+            point_b,
+            Vector3::new(0.0, 0.0, 2.0),
+            Vector3::z(),
+            0.5,
+        );
 
         let (r0, jac) = compute_with_jacobian(&factor, t_wa.as_slice(), t_wb.as_slice());
 
@@ -328,7 +291,8 @@ mod tests {
         let edge_direction = Vector3::new(0.4, -0.6, 0.7);
         let edge_point = Vector3::new(0.2, 0.4, -0.1);
 
-        let factor = LidarEdgeFactor::new_isotropic(point_b, edge_point, edge_direction, 0.3);
+        let factor =
+            LidarEdgeFactor::<SE3>::new_isotropic(point_b, edge_point, edge_direction, 0.3);
 
         let (r0, jac) = compute_with_jacobian(&factor, t_wa.as_slice(), t_wb.as_slice());
 
@@ -370,8 +334,12 @@ mod tests {
 
     #[test]
     fn edge_dimension_is_three() {
-        let factor =
-            LidarEdgeFactor::new_isotropic(Vector3::zeros(), Vector3::zeros(), Vector3::z(), 1.0);
+        let factor = LidarEdgeFactor::<SE3>::new_isotropic(
+            Vector3::zeros(),
+            Vector3::zeros(),
+            Vector3::z(),
+            1.0,
+        );
         assert_eq!(factor.residual_dim(), 3);
         assert_eq!(factor.jacobian_shape(), (3, 12));
     }

@@ -360,6 +360,7 @@ fn information_repair_separates_rank_deficiency_from_indefiniteness() -> TestRes
 /// mistake has to be caught at registration.
 #[test]
 fn internally_whitened_factor_rejects_a_noise_model() {
+    use apex_manifolds::se3::SE3;
     use apex_solver::factors::lidar::GicpFactor;
 
     let mut problem = Problem::new(JacobianMode::Dense);
@@ -370,7 +371,7 @@ fn internally_whitened_factor_rejects_a_noise_model() {
     let point = problem.add_variable(ManifoldType::RN, nalgebra::dvector![1.0, 0.0, 0.0]);
 
     let make = || {
-        GicpFactor::new(
+        GicpFactor::<SE3>::new(
             nalgebra::Vector3::new(1.0, 0.0, 0.0),
             nalgebra::Matrix3::identity(),
             nalgebra::Matrix3::identity(),

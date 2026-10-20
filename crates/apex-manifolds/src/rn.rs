@@ -353,6 +353,10 @@ impl LieGroup for Rn {
         Rn::jacobian_identity_with_dim(self.dim())
     }
 
+    fn zero_jacobian_for(&self) -> Self::JacobianMatrix {
+        DMatrix::zeros(self.dim(), self.dim())
+    }
+
     fn normalize(&mut self) {
         let norm = self.data.norm();
         if norm > 1e-12 {

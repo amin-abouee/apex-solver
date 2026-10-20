@@ -7,4 +7,4 @@
 
 pub mod marginal_prior;
 
-pub use marginal_prior::{LocalLogFn, MarginalPriorFactor};
+pub use marginal_prior::{LocalLogFn, MarginalPriorFactor, MarginalPriorFactorT};

@@ -39,7 +39,6 @@
 
 use apex_manifolds::sgal3::{SGal3, SGal3Tangent};
 use apex_manifolds::{LieGroup, Tangent};
-use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, SVector, UnitQuaternion, Vector3};
 
 /// A 10×10 SGal(3) Jacobian.
@@ -49,6 +48,7 @@ use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_block_sizes;
+use crate::factors::imu::common::{split_bias, write_jacobian};
 use crate::factors::imu::preintegration::ImuPreintegration;
 use crate::factors::imu::types::SpeedAndBiasExt;
 
@@ -262,24 +262,6 @@ fn kinematic_rows() -> SMatrix<f64, 9, 10> {
     p.fixed_view_mut::<3, 3>(3, 6).copy_from(&id); // θ
     p.fixed_view_mut::<3, 3>(6, 3).copy_from(&id); // ν
     p
-}
-
-fn split_bias(block: &[f64]) -> (Vector3<f64>, Vector3<f64>) {
-    (
-        Vector3::new(block[0], block[1], block[2]),
-        Vector3::new(block[3], block[4], block[5]),
-    )
-}
-
-fn write_jacobian<const R: usize, const C: usize>(
-    weighted: &SMatrix<f64, R, C>,
-    jac: &mut faer::mat::MatMut<'_, f64>,
-) {
-    for row in 0..R {
-        for col in 0..C {
-            *jac.rb_mut().get_mut(row, col) = weighted[(row, col)];
-        }
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

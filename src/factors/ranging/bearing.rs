@@ -1,236 +1,52 @@
 //! Bearing measurement factor for direction-only landmark observations.
 //!
-//! Implements a bearing factor that constrains the direction from a pose to a
-//! 3D landmark, operating on the S² manifold (unit sphere).
+//! Constrains the direction from a body (or a camera rigidly mounted on it) to
+//! a 3-D landmark. One type serves every group that moves 3-D points
+//! ([`ActsOnPoints3`]): `SE3` for a pose, `SE23` for the navigation state a
+//! visual-inertial window carries, `Sim3`, `SO3`.
 //!
 //! # Mathematical Formulation
 //!
 //! ```text
-//! p_body = R_iᵀ (p_j − t_i)                    (point in body frame)
-//! n_est  = p_body / ‖p_body‖                    (estimated bearing)
-//! e_3d   = n_est − n_meas                       (3D bearing difference)
-//! e      = sqrt_info · Eᵀ · e_3d   ∈ R²        (projected to tangent plane)
+//! p_body = X⁻¹ ⊙ p_j                           (landmark in the body frame)
+//! p_cam  = R_bcᵀ (p_body − t_bc)                (… in the camera frame)
+//! n_est  = p_cam / ‖p_cam‖                      (estimated bearing)
+//! e      = sqrt_info · Eᵀ · (n_est − n_meas)    ∈ R²
 //! ```
 //!
-//! where `E` (3×2) is an orthonormal basis for the tangent plane at `n_meas`.
+//! where `E` (3×2) is an orthonormal basis for the tangent plane at `n_meas`
+//! and `t_bc` is the fixed body-from-camera calibration (identity by default).
 //!
-//! # Parameter Layout (2 blocks, 9 DOF total)
+//! # Parameter Layout (2 blocks)
 //!
 //! ```text
-//! params[0]: T_i  — body pose in world frame (7D [tx,ty,tz,qw,qx,qy,qz], 6 DOF)
-//! params[1]: p_j  — 3D landmark in world frame (3D, 3 DOF)
+//! params[0]: X   — the state, G::DOF degrees of freedom
+//! params[1]: p_j — 3-D landmark in the world frame
 //! ```
 //!
-//! # Jacobians (2×9)
+//! # Jacobian (2 × (DOF + 3))
 //!
-//! Using right SE3 perturbation and chain rule through unit-vector normalization.
+//! Chain rule through the group's own `inverse` and `act` Jacobians and the
+//! unit-vector normalization. Components of the tangent that do not move
+//! points — the velocity of `SE23` — get exactly zero columns: a bearing
+//! measures direction only.
+
+use std::marker::PhantomData;
 
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
+use nalgebra::{Matrix3, SMatrix, Vector3};
 
-use apex_manifolds::LieGroup;
+use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
-use apex_manifolds::se23::SE23;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use crate::factors::common::math::{skew, tangent_basis};
-use crate::factors::common::validate::expect_block_sizes;
+use crate::factors::common::group_point::into_anchor;
+use crate::factors::common::math::tangent_basis;
 
-/// Bearing factor: constrains the direction from a pose to a 3D landmark.
-pub struct BearingFactor {
-    /// Measured unit bearing vector in body frame.
-    measured_bearing: Vector3<f64>,
-    /// Square-root information matrix (2×2).
-    sqrt_information: SMatrix<f64, 2, 2>,
-    /// Precomputed tangent basis at `measured_bearing` (3×2).
-    tangent_basis: SMatrix<f64, 3, 2>,
-}
-
-impl BearingFactor {
-    /// Create a bearing factor.
-    ///
-    /// # Arguments
-    /// * `measured_bearing` — unit vector in body frame (will be normalized)
-    /// * `sqrt_information` — 2×2 square-root information matrix
-    pub fn new(measured_bearing: Vector3<f64>, sqrt_information: SMatrix<f64, 2, 2>) -> Self {
-        let n = measured_bearing.normalize();
-        let basis = tangent_basis(&n);
-        Self {
-            measured_bearing: n,
-            sqrt_information,
-            tangent_basis: basis,
-        }
-    }
-
-    /// Create with isotropic noise (scalar standard deviation in radians).
-    pub fn new_isotropic(measured_bearing: Vector3<f64>, sigma: f64) -> Self {
-        let sqrt_info = SMatrix::<f64, 2, 2>::identity() * (1.0 / sigma);
-        Self::new(measured_bearing, sqrt_info)
-    }
-}
-
-/// Write zeros across a `2 × cols` Jacobian block.
-fn zero_jacobian(jac: &mut faer::mat::MatMut<'_, f64>, cols: usize) {
-    for row in 0..2 {
-        for col in 0..cols {
-            *jac.rb_mut().get_mut(row, col) = 0.0;
-        }
-    }
-}
-
-/// The part of the bearing residual that does not depend on how the pose is
-/// parameterized.
-///
-/// [`BearingFactor`] and [`BearingFactorSe23`] differ only in which columns
-/// their Jacobian has: the residual, the normalization Jacobian and the
-/// body-frame point are functions of `R_i`, `t_i` and `p_j` alone. Deriving
-/// them once here is what keeps the two from drifting apart.
-struct BearingGeometry {
-    /// Weighted residual `sqrt_info · Eᵀ · (n_est − n_meas)`.
-    residual: SVector<f64, 2>,
-    /// `sqrt_info · Eᵀ · ∂n/∂p_body`, the shared 2×3 Jacobian prefix.
-    prefix: SMatrix<f64, 2, 3>,
-    /// The landmark in the body frame.
-    p_body: Vector3<f64>,
-}
-
-/// `None` when the landmark sits on the pose origin, where no bearing is defined.
-fn bearing_geometry(
-    measured_bearing: &Vector3<f64>,
-    tangent_basis: &SMatrix<f64, 3, 2>,
-    sqrt_information: &SMatrix<f64, 2, 2>,
-    r_i: &Matrix3<f64>,
-    t_i: &Vector3<f64>,
-    p_j: &Vector3<f64>,
-) -> Option<BearingGeometry> {
-    let p_body = r_i.transpose() * (p_j - t_i);
-    let norm = p_body.norm();
-    if norm < 1e-16 {
-        return None;
-    }
-
-    let n_est = p_body / norm;
-    let e_2d = tangent_basis.transpose() * (n_est - measured_bearing);
-
-    // ∂n/∂p_body = (I₃ − n·nᵀ) / ‖p_body‖, the unit-vector normalization Jacobian.
-    let dn_dp = (Matrix3::identity() - n_est * n_est.transpose()) / norm;
-
-    Some(BearingGeometry {
-        residual: sqrt_information * e_2d,
-        prefix: sqrt_information * tangent_basis.transpose() * dn_dp,
-        p_body,
-    })
-}
-
-impl Factor for BearingFactor {
-    fn linearize(
-        &self,
-        params: &[&[f64]],
-        residual: &mut [f64],
-        jacobian: Option<faer::mat::MatMut<'_, f64>>,
-    ) {
-        debug_assert_eq!(params.len(), 2, "BearingFactor expects 2 parameter blocks");
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 3, "params[1] must be 3D point");
-
-        let t_i = SE3::from_param_slice(params[0]);
-        let p_j = Vector3::new(params[1][0], params[1][1], params[1][2]);
-        let r_i = t_i.rotation_so3().rotation_matrix();
-
-        let Some(geometry) = bearing_geometry(
-            &self.measured_bearing,
-            &self.tangent_basis,
-            &self.sqrt_information,
-            &r_i,
-            &t_i.translation(),
-            &p_j,
-        ) else {
-            residual[0] = 0.0;
-            residual[1] = 0.0;
-            if let Some(mut jac) = jacobian {
-                zero_jacobian(&mut jac, 9);
-            }
-            return;
-        };
-
-        residual[0] = geometry.residual[0];
-        residual[1] = geometry.residual[1];
-
-        let Some(mut jac) = jacobian else {
-            return;
-        };
-
-        // Right perturbation T_i → T_i · Exp([δρ, δθ]):
-        //   ∂p_body/∂δρ = −I₃,  ∂p_body/∂δθ = +[p_body]×  (note the sign),
-        //   ∂p_body/∂p_j = R_iᵀ.
-        let mut j_full = SMatrix::<f64, 2, 9>::zeros();
-        j_full
-            .fixed_view_mut::<2, 3>(0, 0)
-            .copy_from(&(-geometry.prefix));
-        j_full
-            .fixed_view_mut::<2, 3>(0, 3)
-            .copy_from(&(geometry.prefix * skew(&geometry.p_body)));
-        j_full
-            .fixed_view_mut::<2, 3>(0, 6)
-            .copy_from(&(geometry.prefix * r_i.transpose()));
-
-        for row in 0..2 {
-            for col in 0..9 {
-                *jac.rb_mut().get_mut(row, col) = j_full[(row, col)];
-            }
-        }
-    }
-
-    fn residual_dim(&self) -> usize {
-        2
-    }
-
-    fn jacobian_shape(&self) -> (usize, usize) {
-        (2, 9)
-    }
-
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        expect_block_sizes(
-            variables,
-            &[SE3::REP_SIZE, 3],
-            "BearingFactor expects [SE3 pose, 3D point]",
-        )
-    }
-
-    /// This factor whitens with the 2×2 sqrt-information supplied at construction,
-    /// so it must be registered with `NoiseModel::null()`.
-    fn whitens_internally(&self) -> bool {
-        true
-    }
-}
-
-/// Bearing factor over an `SE23` navigation state.
-///
-/// Identical measurement model to [`BearingFactor`] — same residual, same
-/// tangent-plane projection — but attached to the `SE_2(3)` state a
-/// visual-inertial window carries, so a bearing observation can constrain the
-/// same variable the IMU factor does.
-///
-/// # Parameter layout (2 blocks, 12 DOF)
-///
-/// ```text
-/// params[0]: SE23 state — 10D [tx,ty,tz,qw,qx,qy,qz,vx,vy,vz], 9 DOF
-/// params[1]: p_j        — 3D landmark in world frame
-/// ```
-///
-/// # Jacobian (2×12), columns `[ρ(3) | θ(3) | ν(3) | p_j(3)]`
-///
-/// The velocity columns are **exactly zero**, and that is the model, not an
-/// omission: a bearing measures direction only, so it carries no information
-/// about how fast the body is moving. Velocity is observable here only through
-/// the IMU factors that share this state.
-///
-/// To first order `SE23 ⊞ δ` moves translation and rotation exactly as `SE3`
-/// does — the group's left Jacobian is the identity at zero — so the `ρ` and `θ`
-/// columns are the `SE3` ones unchanged.
-pub struct BearingFactorSe23 {
-    /// Measured unit bearing vector in body frame.
+/// Bearing factor: constrains the direction from a state to a 3-D landmark.
+pub struct BearingFactor<G: ActsOnPoints3> {
+    /// Measured unit bearing vector in the camera (or body) frame.
     measured_bearing: Vector3<f64>,
     /// Square-root information matrix (2×2).
     sqrt_information: SMatrix<f64, 2, 2>,
@@ -238,23 +54,17 @@ pub struct BearingFactorSe23 {
     tangent_basis: SMatrix<f64, 3, 2>,
     /// Fixed body-from-camera calibration.
     t_bc: SE3,
+    group: PhantomData<fn() -> G>,
 }
 
-impl BearingFactorSe23 {
-    /// Create a bearing factor over an `SE23` state.
+impl<G: ActsOnPoints3> BearingFactor<G> {
+    /// Create a bearing factor.
     ///
     /// # Arguments
-    /// * `measured_bearing` — unit vector in body frame (will be normalized)
+    /// * `measured_bearing` — unit vector in the body frame (will be normalized)
     /// * `sqrt_information` — 2×2 square-root information matrix
     pub fn new(measured_bearing: Vector3<f64>, sqrt_information: SMatrix<f64, 2, 2>) -> Self {
-        let n = measured_bearing.normalize();
-        let basis = tangent_basis(&n);
-        Self {
-            measured_bearing: n,
-            sqrt_information,
-            tangent_basis: basis,
-            t_bc: SE3::identity(),
-        }
+        Self::new_with_extrinsic(measured_bearing, sqrt_information, SE3::identity())
     }
 
     /// Create with isotropic noise (scalar standard deviation in radians).
@@ -271,12 +81,12 @@ impl BearingFactorSe23 {
         t_bc: SE3,
     ) -> Self {
         let n = measured_bearing.normalize();
-        let basis = tangent_basis(&n);
         Self {
             measured_bearing: n,
             sqrt_information,
-            tangent_basis: basis,
+            tangent_basis: tangent_basis(&n),
             t_bc,
+            group: PhantomData,
         }
     }
 
@@ -292,42 +102,37 @@ impl BearingFactorSe23 {
     }
 }
 
-impl Factor for BearingFactorSe23 {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for BearingFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(
-            params.len(),
-            2,
-            "BearingFactorSe23 expects 2 parameter blocks"
-        );
-        debug_assert_eq!(params[0].len(), 10, "params[0] must be SE23 (10D)");
-        debug_assert_eq!(params[1].len(), 3, "params[1] must be 3D point");
-
-        let state = SE23::from_param_slice(params[0]);
+        let state = G::from_param_slice(params[0]);
         let p_j = Vector3::new(params[1][0], params[1][1], params[1][2]);
-        let r_i = state.rotation_matrix();
-        let p_body = r_i.transpose() * (p_j - state.translation());
-        let r_bc = self.t_bc.rotation_so3().rotation_matrix();
-        let p_camera = r_bc.transpose() * (p_body - self.t_bc.translation());
+        let dof = G::DOF;
+
+        let chain = into_anchor(&state, &p_j);
+        let camera_from_body = self.t_bc.rotation_so3().rotation_matrix().transpose();
+        let p_camera = camera_from_body * (chain.point - self.t_bc.translation());
         let norm = p_camera.norm();
         if norm < 1e-16 {
             residual[0] = 0.0;
             residual[1] = 0.0;
             if let Some(mut jac) = jacobian {
-                zero_jacobian(&mut jac, 12);
+                for row in 0..2 {
+                    for col in 0..dof + 3 {
+                        *jac.rb_mut().get_mut(row, col) = 0.0;
+                    }
+                }
             }
             return;
         }
 
         let n_est = p_camera / norm;
-        let e_2d = self.tangent_basis.transpose() * (n_est - self.measured_bearing);
-        let dn_dp = (Matrix3::identity() - n_est * n_est.transpose()) / norm;
-        let prefix = self.sqrt_information * self.tangent_basis.transpose() * dn_dp;
-        let weighted = self.sqrt_information * e_2d;
+        let weighted = self.sqrt_information
+            * (self.tangent_basis.transpose() * (n_est - self.measured_bearing));
         residual[0] = weighted[0];
         residual[1] = weighted[1];
 
@@ -335,23 +140,20 @@ impl Factor for BearingFactorSe23 {
             return;
         };
 
-        // The velocity columns stay zero. Pose derivatives are transported
-        // through the fixed body-from-camera calibration, including its lever arm.
-        let camera_from_body = r_bc.transpose();
-        let mut j_full = SMatrix::<f64, 2, 12>::zeros();
-        j_full
-            .fixed_view_mut::<2, 3>(0, 0)
-            .copy_from(&(-prefix * camera_from_body));
-        j_full
-            .fixed_view_mut::<2, 3>(0, 3)
-            .copy_from(&(prefix * camera_from_body * skew(&p_body)));
-        j_full
-            .fixed_view_mut::<2, 3>(0, 9)
-            .copy_from(&(prefix * camera_from_body * r_i.transpose()));
-
+        // ∂n/∂p_cam = (I₃ − n·nᵀ) / ‖p_cam‖, carried to the body frame.
+        let dn_dp = (Matrix3::identity() - n_est * n_est.transpose()) / norm;
+        let prefix = self.sqrt_information * self.tangent_basis.transpose() * dn_dp;
+        let through_mount = prefix * camera_from_body;
+        for (col, axis) in chain.d_anchor.iter().enumerate() {
+            let column = through_mount * Vector3::from_column_slice(axis);
+            for row in 0..2 {
+                *jac.rb_mut().get_mut(row, col) = column[row];
+            }
+        }
+        let landmark = through_mount * chain.d_world;
         for row in 0..2 {
-            for col in 0..12 {
-                *jac.rb_mut().get_mut(row, col) = j_full[(row, col)];
+            for col in 0..3 {
+                *jac.rb_mut().get_mut(row, dof + col) = landmark[(row, col)];
             }
         }
     }
@@ -361,19 +163,23 @@ impl Factor for BearingFactorSe23 {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (2, 12)
+        (2, G::DOF + 3)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        expect_block_sizes(
-            variables,
-            &[SE23::REP_SIZE, 3],
-            "BearingFactorSe23 expects [SE23 state, 3D point]",
-        )
+        let message = "BearingFactor expects [state, 3D point]";
+        match variables {
+            [state, point]
+                if state.manifold_type_name() == G::NAME && point.as_param_slice().len() == 3 =>
+            {
+                Ok(())
+            }
+            _ => Err(format!("{message} for {}", G::NAME)),
+        }
     }
 
-    /// Whitens with the 2×2 sqrt-information supplied at construction, so it
-    /// must be registered with `NoiseModel::null()`.
+    /// This factor whitens with the 2×2 sqrt-information supplied at construction,
+    /// so it must be registered with `NoiseModel::null()`.
     fn whitens_internally(&self) -> bool {
         true
     }
@@ -382,9 +188,15 @@ impl Factor for BearingFactorSe23 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::factors::common::conformance::{Block, finite_diff_jacobian_parity};
+    use apex_manifolds::LieGroup;
     use apex_manifolds::Tangent;
+    use apex_manifolds::se3::SE3;
     use apex_manifolds::se3::SE3Tangent;
+    use apex_manifolds::se23::SE23;
     use apex_manifolds::se23::SE23Tangent;
+    use apex_manifolds::sim3::Sim3;
+    use apex_manifolds::so3::SO3;
     use nalgebra::{DMatrix, DVector, UnitQuaternion, Vector3};
 
     fn make_pose(tx: f64, ty: f64, tz: f64, q: UnitQuaternion<f64>) -> DVector<f64> {
@@ -407,14 +219,14 @@ mod tests {
         p_body.normalize()
     }
 
-    fn compute_residual(factor: &BearingFactor, pose: &[f64], point: &[f64]) -> Vec<f64> {
+    fn compute_residual(factor: &BearingFactor<SE3>, pose: &[f64], point: &[f64]) -> Vec<f64> {
         let mut residual = vec![0.0f64; factor.residual_dim()];
         factor.linearize(&[pose, point], &mut residual, None);
         residual
     }
 
     fn compute_with_jacobian(
-        factor: &BearingFactor,
+        factor: &BearingFactor<SE3>,
         pose: &[f64],
         point: &[f64],
     ) -> (Vec<f64>, DMatrix<f64>) {
@@ -440,7 +252,7 @@ mod tests {
         let point_dv = DVector::from_iterator(3, point.iter().copied());
 
         let bearing = compute_bearing(pose.as_slice(), &point);
-        let factor = BearingFactor::new_isotropic(bearing, 1.0);
+        let factor = BearingFactor::<SE3>::new_isotropic(bearing, 1.0);
         let r = compute_residual(&factor, pose.as_slice(), point_dv.as_slice());
 
         for (i, ri) in r.iter().enumerate().take(2) {
@@ -478,7 +290,7 @@ mod tests {
 
         // Use a slightly different bearing to get non-zero residual
         let bearing = compute_bearing(pose.as_slice(), &(point + Vector3::new(0.1, -0.05, 0.02)));
-        let factor = BearingFactor::new_isotropic(bearing, 0.5);
+        let factor = BearingFactor::<SE3>::new_isotropic(bearing, 0.5);
 
         let (r0, jac) = compute_with_jacobian(&factor, pose.as_slice(), point_dv.as_slice());
 
@@ -525,10 +337,10 @@ mod tests {
 
     #[test]
     fn dimension_is_two() {
-        let factor = BearingFactor::new_isotropic(Vector3::z(), 1.0);
+        let factor = BearingFactor::<SE3>::new_isotropic(Vector3::z(), 1.0);
         assert_eq!(factor.residual_dim(), 2);
     }
-    // ── BearingFactorSe23 ───────────────────────────────────────────────────
+    // ── BearingFactor<SE23> ───────────────────────────────────────────────────
 
     fn make_state(
         tx: f64,
@@ -547,14 +359,14 @@ mod tests {
         DVector::from_column_slice(se23.right_plus(&tan, None, None).as_param_slice())
     }
 
-    fn se23_residual(factor: &BearingFactorSe23, state: &[f64], point: &[f64]) -> Vec<f64> {
+    fn se23_residual(factor: &BearingFactor<SE23>, state: &[f64], point: &[f64]) -> Vec<f64> {
         let mut residual = vec![0.0f64; factor.residual_dim()];
         factor.linearize(&[state, point], &mut residual, None);
         residual
     }
 
     fn se23_with_jacobian(
-        factor: &BearingFactorSe23,
+        factor: &BearingFactor<SE23>,
         state: &[f64],
         point: &[f64],
     ) -> (Vec<f64>, DMatrix<f64>) {
@@ -566,7 +378,7 @@ mod tests {
         (residual, DMatrix::from_column_slice(rows, cols, &jac_buf))
     }
 
-    fn se23_fixture() -> (BearingFactorSe23, DVector<f64>, DVector<f64>) {
+    fn se23_fixture() -> (BearingFactor<SE23>, DVector<f64>, DVector<f64>) {
         let q = UnitQuaternion::from_axis_angle(
             &nalgebra::Unit::new_normalize(Vector3::new(0.3, -0.7, 0.4)),
             0.6,
@@ -581,7 +393,7 @@ mod tests {
         // the Jacobian, is exercised away from zero.
         let measured = (p_body.normalize() + Vector3::new(0.02, -0.015, 0.01)).normalize();
         (
-            BearingFactorSe23::new_isotropic(measured, 0.5),
+            BearingFactor::<SE23>::new_isotropic(measured, 0.5),
             state,
             point,
         )
@@ -599,7 +411,7 @@ mod tests {
         let se23 = SE23::from_param_slice(state.as_slice());
         let p_body = se23.rotation_matrix().transpose()
             * (Vector3::new(point[0], point[1], point[2]) - se23.translation());
-        let factor = BearingFactorSe23::new_isotropic(p_body.normalize(), 1.0);
+        let factor = BearingFactor::<SE23>::new_isotropic(p_body.normalize(), 1.0);
 
         let r = se23_residual(&factor, state.as_slice(), point.as_slice());
         for (i, ri) in r.iter().enumerate() {
@@ -680,7 +492,7 @@ mod tests {
             state[0], state[1], state[2], state[3], state[4], state[5], state[6],
         ]);
         let se3_factor =
-            BearingFactor::new(se23_factor.measured_bearing, se23_factor.sqrt_information);
+            BearingFactor::<SE3>::new(se23_factor.measured_bearing, se23_factor.sqrt_information);
 
         let (r23, j23) = se23_with_jacobian(&se23_factor, state.as_slice(), point.as_slice());
         let (r3, j3) = compute_with_jacobian(&se3_factor, se3_pose.as_slice(), point.as_slice());
@@ -700,5 +512,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn conforms<G: ActsOnPoints3 + Send + Sync + 'static>(t_bc: SE3) -> Result<(), String> {
+        let state = G::random();
+        let landmark = [4.0, -3.0, 6.0];
+        let measured = Vector3::new(0.3, -0.2, 1.0);
+        let factor = BearingFactor::<G>::new_isotropic_with_extrinsic(measured, 0.5, t_bc);
+        finite_diff_jacobian_parity(
+            &factor,
+            &[Block::lie(&state), Block::euclidean(&landmark)],
+            1e-5,
+        )
+        .map_err(|e| format!("{}: {e}", G::NAME))
+    }
+
+    /// One type, every group that moves points, with and without a mount.
+    #[test]
+    fn jacobian_conforms_on_every_admitted_group() -> Result<(), String> {
+        let mount = SE3::new(
+            Vector3::new(0.05, -0.02, 0.1),
+            UnitQuaternion::from_euler_angles(0.1, -0.2, 0.3),
+        );
+        for t_bc in [SE3::identity(), mount] {
+            conforms::<SO3>(t_bc.clone())?;
+            conforms::<SE3>(t_bc.clone())?;
+            conforms::<SE23>(t_bc.clone())?;
+            conforms::<Sim3>(t_bc)?;
+        }
+        Ok(())
     }
 }

@@ -28,15 +28,14 @@
 //! ```
 
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix3, SMatrix, Vector3};
+use nalgebra::{SMatrix, Vector3};
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use apex_manifolds::capability::ActsOnPoints3;
+use std::marker::PhantomData;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use crate::factors::common::math::skew;
-use crate::factors::common::validate::expect_block_sizes;
+use crate::factors::common::group_point::{expect_two_states, relative_point};
 
 /// Trait for querying a distance/occupancy field.
 ///
@@ -50,16 +49,17 @@ pub trait DistanceField: Send + Sync {
 }
 
 /// ICP factor: aligns a single point from frame B against a field in frame A.
-pub struct IcpFactor<F: DistanceField> {
+pub struct IcpFactor<G: ActsOnPoints3, F: DistanceField> {
     /// The distance/occupancy field defined in frame A.
     field: F,
     /// Query point in frame B.
     point_b: Vector3<f64>,
     /// Measurement noise standard deviation [m].
     sigma_measurement: f64,
+    group: PhantomData<fn() -> G>,
 }
 
-impl<F: DistanceField> IcpFactor<F> {
+impl<G: ActsOnPoints3, F: DistanceField> IcpFactor<G, F> {
     /// Create an ICP factor.
     ///
     /// # Arguments
@@ -71,37 +71,29 @@ impl<F: DistanceField> IcpFactor<F> {
             field,
             point_b,
             sigma_measurement,
+            group: PhantomData,
         }
     }
 }
 
-impl<F: DistanceField> Factor for IcpFactor<F> {
+impl<G: ActsOnPoints3 + Send + Sync + 'static, F: DistanceField> Factor for IcpFactor<G, F> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "IcpFactor expects 2 parameter blocks");
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 7, "params[1] must be SE3 (7D)");
+        let t_wa = G::from_param_slice(params[0]);
+        let t_wb = G::from_param_slice(params[1]);
 
-        let t_wa = SE3::from_param_slice(params[0]);
-        let t_wb = SE3::from_param_slice(params[1]);
-
-        let c_wa: Matrix3<f64> = t_wa.rotation_so3().rotation_matrix();
-        let c_wb: Matrix3<f64> = t_wb.rotation_so3().rotation_matrix();
-        let t_wa_pos = t_wa.translation();
-        let t_wb_pos = t_wb.translation();
-
-        // Transform point to frame A: p_A = C_WA^T * (C_WB * p_B + t_WB - t_WA)
-        let p_w = c_wb * self.point_b + t_wb_pos;
-        let p_a = c_wa.transpose() * (p_w - t_wa_pos);
+        // p_A = X_WA⁻¹ ⊙ (X_WB ⊙ p_B)
+        let chain = relative_point(&t_wa, &t_wb, &self.point_b);
+        let p_a = chain.point;
 
         let zero_out = |residual: &mut [f64], jacobian: Option<faer::mat::MatMut<'_, f64>>| {
             residual[0] = 0.0;
             if let Some(mut jac) = jacobian {
-                for col in 0..12 {
+                for col in 0..2 * G::DOF {
                     *jac.rb_mut().get_mut(0, col) = 0.0;
                 }
             }
@@ -132,72 +124,16 @@ impl<F: DistanceField> Factor for IcpFactor<F> {
             return;
         };
 
-        // ── Jacobians (right SE3 perturbation, apex-solver convention) ─────────
-        //
-        // de/dp_A = sqrt_info * grad / grad_norm   (1×3)
-        //
-        // p_A = C_WA^T * (p_W - t_WA),  p_W = C_WB * p_B + t_WB
-        //
-        // ── Right perturbation of T_WA: T_WA → T_WA · Exp([δρ, δθ]) ──────────
-        //   t_WA → t_WA + C_WA · δρ
-        //   C_WA → C_WA · Exp(δθ)  →  C_WA^T → Exp(−δθ) · C_WA^T ≈ (I−[δθ]×)·C_WA^T
-        //
-        //   p_A_new = (I − [δθ]×) · C_WA^T · (p_W − t_WA − C_WA · δρ)
-        //           ≈ p_A − [δθ]× · p_A − δρ
-        //           = p_A − δρ + [p_A]× · δθ
-        //
-        //   ∂p_A/∂δρ = −I₃
-        //   ∂p_A/∂δθ = +[p_A]×
-        //
-        // ── Right perturbation of T_WB: T_WB → T_WB · Exp([δρ, δθ]) ──────────
-        //   t_WB → t_WB + C_WB · δρ
-        //   C_WB → C_WB · Exp(δθ)
-        //
-        //   p_W_new = C_WB · (I + [δθ]×) · p_B + t_WB + C_WB · δρ
-        //           ≈ p_W + C_WB · [δθ]× · p_B + C_WB · δρ
-        //
-        //   δp_A = C_WA^T · (C_WB · [δθ]× · p_B + C_WB · δρ)
-        //        = C_WA^T · C_WB · δρ + C_WA^T · C_WB · [δθ]× · p_B
-        //
-        //   Using [a]× · b = −[b]× · a:
-        //   C_WA^T · C_WB · [δθ]× · p_B = −C_WA^T · C_WB · [p_B]× · δθ
-        //
-        //   ∂p_A/∂δρ = C_WA^T · C_WB
-        //   ∂p_A/∂δθ = −C_WA^T · C_WB · [p_B]×
-
+        // de/dp_A = sqrt_info * grad / grad_norm   (1×3), carried through
+        // the group's own `inverse` and `act` Jacobians.
         let de_dp_a: SMatrix<f64, 1, 3> =
             SMatrix::<f64, 1, 3>::from_iterator((sqrt_info * gradient / grad_norm).iter().copied());
+        let j_twa = de_dp_a * chain.d_a;
+        let j_twb = de_dp_a * chain.d_b;
 
-        let c_wa_t = c_wa.transpose();
-        let c_wa_t_c_wb = c_wa_t * c_wb;
-
-        // dp_A/dT_WA (3×6): [-I | [p_A]×]
-        let mut dpa_dtwa = SMatrix::<f64, 3, 6>::zeros();
-        dpa_dtwa
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&(-Matrix3::identity()));
-        dpa_dtwa.fixed_view_mut::<3, 3>(0, 3).copy_from(&skew(&p_a));
-
-        // dp_A/dT_WB (3×6): [C_WA^T·C_WB | -C_WA^T·C_WB·[p_B]×]
-        let mut dpa_dtwb = SMatrix::<f64, 3, 6>::zeros();
-        dpa_dtwb
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&c_wa_t_c_wb);
-        dpa_dtwb
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-c_wa_t_c_wb * skew(&self.point_b)));
-
-        // Chain rule
-        let j_twa: SMatrix<f64, 1, 6> = de_dp_a * dpa_dtwa;
-        let j_twb: SMatrix<f64, 1, 6> = de_dp_a * dpa_dtwb;
-
-        // Assemble 1×12 Jacobian
-        let mut j_full = SMatrix::<f64, 1, 12>::zeros();
-        j_full.fixed_view_mut::<1, 6>(0, 0).copy_from(&j_twa);
-        j_full.fixed_view_mut::<1, 6>(0, 6).copy_from(&j_twb);
-
-        for col in 0..12 {
-            *jac.rb_mut().get_mut(0, col) = j_full[(0, col)];
+        for col in 0..G::DOF {
+            *jac.rb_mut().get_mut(0, col) = j_twa[(0, col)];
+            *jac.rb_mut().get_mut(0, G::DOF + col) = j_twb[(0, col)];
         }
     }
 
@@ -206,15 +142,11 @@ impl<F: DistanceField> Factor for IcpFactor<F> {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (1, 12)
+        (1, 2 * G::DOF)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        expect_block_sizes(
-            variables,
-            &[SE3::REP_SIZE, SE3::REP_SIZE],
-            "IcpFactor expects [SE3 T_WA, SE3 T_WB]",
-        )
+        expect_two_states::<G>(variables, "IcpFactor")
     }
 
     /// This factor whitens with the measurement sigma supplied at construction,
@@ -229,6 +161,7 @@ mod tests {
     use super::*;
     use apex_manifolds::LieGroup;
     use apex_manifolds::Tangent;
+    use apex_manifolds::se3::SE3;
     use apex_manifolds::se3::SE3Tangent;
     use nalgebra::{DMatrix, DVector, UnitQuaternion, Vector3};
 
@@ -278,7 +211,7 @@ mod tests {
     }
 
     fn compute_residual<F: DistanceField>(
-        factor: &IcpFactor<F>,
+        factor: &IcpFactor<SE3, F>,
         t_wa: &[f64],
         t_wb: &[f64],
     ) -> Vec<f64> {
@@ -288,7 +221,7 @@ mod tests {
     }
 
     fn compute_with_jacobian<F: DistanceField>(
-        factor: &IcpFactor<F>,
+        factor: &IcpFactor<SE3, F>,
         t_wa: &[f64],
         t_wb: &[f64],
     ) -> (Vec<f64>, DMatrix<f64>) {
@@ -315,7 +248,7 @@ mod tests {
         let t_wb = identity_pose();
         let point_b = Vector3::new(1.0, 2.0, 5.0); // on the plane
 
-        let factor = IcpFactor::new(field, point_b, 1.0);
+        let factor = IcpFactor::<SE3, _>::new(field, point_b, 1.0);
         let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
 
         assert!(r[0].abs() < 1e-10, "residual = {} should be zero", r[0]);
@@ -334,7 +267,7 @@ mod tests {
         let t_wb = identity_pose();
         let point_b = Vector3::new(1.0, 2.0, 7.0); // 2m above the plane
 
-        let factor = IcpFactor::new(field, point_b, 1.0);
+        let factor = IcpFactor::<SE3, _>::new(field, point_b, 1.0);
         let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
 
         // field_val = 7 - 5 = 2, grad_norm = 1, sqrt_info = 1
@@ -363,7 +296,7 @@ mod tests {
         let t_wb = make_pose(2.0, 1.0, -0.2, q_b);
         let point_b = Vector3::new(0.5, -0.3, 4.0);
 
-        let factor = IcpFactor::new(field, point_b, 0.5);
+        let factor = IcpFactor::<SE3, _>::new(field, point_b, 0.5);
 
         let (r0, jac) = compute_with_jacobian(&factor, t_wa.as_slice(), t_wb.as_slice());
 
@@ -423,7 +356,7 @@ mod tests {
         let t_wb = make_pose(-0.5, 1.0, 0.5, q_b);
         let point_b = Vector3::new(1.0, 0.5, 2.0);
 
-        let factor = IcpFactor::new(field, point_b, 0.3);
+        let factor = IcpFactor::<SE3, _>::new(field, point_b, 0.3);
 
         let (r0, jac) = compute_with_jacobian(&factor, t_wa.as_slice(), t_wb.as_slice());
 
@@ -469,7 +402,7 @@ mod tests {
             normal: Vector3::z(),
             offset: 0.0,
         };
-        let factor = IcpFactor::new(field, Vector3::zeros(), 1.0);
+        let factor = IcpFactor::<SE3, _>::new(field, Vector3::zeros(), 1.0);
         assert_eq!(factor.residual_dim(), 1);
     }
 }

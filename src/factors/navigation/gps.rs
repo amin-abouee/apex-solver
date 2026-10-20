@@ -34,13 +34,17 @@
 //! ∂e/∂δθ_GW =  C_GW · [t_antenna_W]×
 //! ```
 
+use std::marker::PhantomData;
+
 use apex_manifolds::LieGroup;
+use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::common::group_point::{act_point, expect_two_states};
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_block_sizes;
 use crate::factors::imu::preintegration::ImuPreintegration;
@@ -48,16 +52,17 @@ use crate::factors::imu::types::{SpeedAndBias, SpeedAndBiasExt};
 
 /// GPS synchronous factor: connects `T_WS` (robot pose) and `T_GW`
 /// (GPS-to-world) to a 3D GPS position measurement.
-pub struct GpsFactor {
+pub struct GpsFactor<G: ActsOnPoints3> {
     /// GPS measurement in the GPS frame [m].
     measurement: Vector3<f64>,
     /// Sensor-to-antenna lever arm in the sensor frame [m].
     antenna_offset: Vector3<f64>,
     /// Square-root information matrix (3×3 upper-triangular, `W` s.t. `Wᵀ W = Σ⁻¹`).
     sqrt_information: SMatrix<f64, 3, 3>,
+    group: PhantomData<fn() -> G>,
 }
 
-impl GpsFactor {
+impl<G: ActsOnPoints3> GpsFactor<G> {
     /// Create a GPS factor.
     ///
     /// # Arguments
@@ -74,6 +79,7 @@ impl GpsFactor {
             measurement,
             antenna_offset,
             sqrt_information,
+            group: PhantomData,
         }
     }
 
@@ -90,7 +96,7 @@ impl GpsFactor {
     }
 }
 
-impl Factor for GpsFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for GpsFactor<G> {
     /// Compute the weighted 3D residual and optional 3×12 Jacobian.
     fn linearize(
         &self,
@@ -98,28 +104,14 @@ impl Factor for GpsFactor {
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "GpsFactor expects 2 parameter blocks");
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 7, "params[1] must be SE3 (7D)");
+        let t_ws = G::from_param_slice(params[0]);
+        let t_gw = G::from_param_slice(params[1]);
 
-        let t_ws = SE3::from_param_slice(params[0]);
-        let t_gw = SE3::from_param_slice(params[1]);
+        // Antenna position in the world frame, then in the GPS frame.
+        let antenna = act_point(&t_ws, &self.antenna_offset);
+        let predicted = act_point(&t_gw, &antenna.world);
 
-        let c_ws: Matrix3<f64> = t_ws.rotation_so3().rotation_matrix();
-        let c_gw: Matrix3<f64> = t_gw.rotation_so3().rotation_matrix();
-        let pos_ws = t_ws.translation();
-        let pos_gw = t_gw.translation();
-
-        // Antenna position in world frame
-        let t_antenna_w: Vector3<f64> = pos_ws + c_ws * self.antenna_offset;
-
-        // Predicted GPS measurement
-        let predicted: Vector3<f64> = c_gw * t_antenna_w + pos_gw;
-
-        // Unweighted residual
-        let raw_err: Vector3<f64> = self.measurement - predicted;
-
-        // Weighted residual (apply sqrt_info)
+        let raw_err: Vector3<f64> = self.measurement - predicted.world;
         let weighted_err = self.sqrt_information * raw_err;
         for i in 0..3 {
             residual[i] = weighted_err[i];
@@ -129,46 +121,20 @@ impl Factor for GpsFactor {
             return;
         };
 
-        // ── Jacobians ─────────────────────────────────────────────────────────
-        //
-        // Right SE3 perturbation:  T ⊕ [δρ, δθ]
-        //   t → t + C·δρ  (to first order)
-        //   C → C·(I + [δθ]×)
-        //
-        // For T_WS:
-        //   t_antenna_W → (t_WS + C_WS·δρ_WS) + C_WS·(I+[δθ_WS]×)·r_SA
-        //                = t_antenna_W + C_WS·δρ_WS - C_WS·[r_SA]×·δθ_WS
-        //   predicted → predicted + C_GW·(C_WS·δρ_WS - C_WS·[r_SA]×·δθ_WS)
-        //   ∂e/∂δρ_WS = −C_GW·C_WS
-        //   ∂e/∂δθ_WS =  C_GW·C_WS·[r_SA]×
-        //
-        // For T_GW:
-        //   predicted → C_GW·(I+[δθ_GW]×)·t_antenna_W + t_GW + C_GW·δρ_GW
-        //             = predicted − C_GW·[t_antenna_W]×·δθ_GW + C_GW·δρ_GW
-        //   ∂e/∂δρ_GW = −C_GW
-        //   ∂e/∂δθ_GW =  C_GW·[t_antenna_W]×
-        //
-        // Each block is 3×3; full unweighted Jacobian is 3×12.
-        // After weighting: J_weighted = sqrt_info · J_raw.
-
-        let r_sa_hat = skew(&self.antenna_offset);
-        let t_ant_hat = skew(&t_antenna_w);
-
-        let de_drho_ws = -(c_gw * c_ws);
-        let de_dtheta_ws = c_gw * c_ws * r_sa_hat;
-        let de_drho_gw = -c_gw;
-        let de_dtheta_gw = c_gw * t_ant_hat;
-
-        let mut j_raw = SMatrix::<f64, 3, 12>::zeros();
-        j_raw.fixed_view_mut::<3, 3>(0, 0).copy_from(&de_drho_ws);
-        j_raw.fixed_view_mut::<3, 3>(0, 3).copy_from(&de_dtheta_ws);
-        j_raw.fixed_view_mut::<3, 3>(0, 6).copy_from(&de_drho_gw);
-        j_raw.fixed_view_mut::<3, 3>(0, 9).copy_from(&de_dtheta_gw);
-
-        let j_weighted = self.sqrt_information * j_raw;
+        // e = z − X_GW ⊙ (X_WS ⊙ r_SA), each factor through the group's own
+        // `act` Jacobians, then weighted by sqrt_info.
+        let de_dws = -(predicted.d_point * antenna.d_state);
+        let de_dgw = -predicted.d_state;
         for row in 0..3 {
-            for col in 0..12 {
-                *jac.rb_mut().get_mut(row, col) = j_weighted[(row, col)];
+            for col in 0..G::DOF {
+                let mut ws = 0.0;
+                let mut gw = 0.0;
+                for k in 0..3 {
+                    ws += self.sqrt_information[(row, k)] * de_dws[(k, col)];
+                    gw += self.sqrt_information[(row, k)] * de_dgw[(k, col)];
+                }
+                *jac.rb_mut().get_mut(row, col) = ws;
+                *jac.rb_mut().get_mut(row, G::DOF + col) = gw;
             }
         }
     }
@@ -178,15 +144,11 @@ impl Factor for GpsFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (3, 12)
+        (3, 2 * G::DOF)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        expect_block_sizes(
-            variables,
-            &[SE3::REP_SIZE, SE3::REP_SIZE],
-            "GpsFactor expects [SE3 T_WS, SE3 T_GW]",
-        )
+        expect_two_states::<G>(variables, "GpsFactor")
     }
 
     /// This factor whitens with the 3×3 sqrt-information supplied at construction,
@@ -472,14 +434,14 @@ mod tests {
         DVector::from_column_slice(se3.right_plus(&tan, None, None).as_param_slice())
     }
 
-    fn compute_residual_gps(factor: &GpsFactor, pose_ws: &[f64], pose_gw: &[f64]) -> Vec<f64> {
+    fn compute_residual_gps(factor: &GpsFactor<SE3>, pose_ws: &[f64], pose_gw: &[f64]) -> Vec<f64> {
         let mut residual = vec![0.0f64; factor.residual_dim()];
         factor.linearize(&[pose_ws, pose_gw], &mut residual, None);
         residual
     }
 
     fn compute_with_jacobian_gps(
-        factor: &GpsFactor,
+        factor: &GpsFactor<SE3>,
         pose_ws: &[f64],
         pose_gw: &[f64],
     ) -> (Vec<f64>, DMatrix<f64>) {
@@ -533,7 +495,7 @@ mod tests {
         let pose_gw = identity_pose(); // C_GW=I, t_GW=0 → GPS frame == world frame
 
         let measurement = t_ws_pos; // No offset, no T_GW rotation
-        let factor = GpsFactor::new_isotropic(measurement, Vector3::zeros(), 1.0);
+        let factor = GpsFactor::<SE3>::new_isotropic(measurement, Vector3::zeros(), 1.0);
         let r = compute_residual_gps(&factor, pose_ws.as_slice(), pose_gw.as_slice());
 
         for (i, ri) in r.iter().enumerate().take(3) {
@@ -569,7 +531,7 @@ mod tests {
         let pose_ws = make_pose(t_ws.x, t_ws.y, t_ws.z, q_ws);
         let pose_gw = make_pose(t_gw_pos.x, t_gw_pos.y, t_gw_pos.z, q_gw);
 
-        let factor = GpsFactor::new_isotropic(measurement, r_sa, 1.0);
+        let factor = GpsFactor::<SE3>::new_isotropic(measurement, r_sa, 1.0);
         let r = compute_residual_gps(&factor, pose_ws.as_slice(), pose_gw.as_slice());
 
         for (i, ri) in r.iter().enumerate().take(3) {
@@ -603,7 +565,7 @@ mod tests {
         let pose_ws = make_pose(t_ws.x, t_ws.y, t_ws.z, q_ws);
         let pose_gw = make_pose(t_gw_pos.x, t_gw_pos.y, t_gw_pos.z, q_gw);
 
-        let factor = GpsFactor::new_isotropic(measurement, r_sa, 0.5);
+        let factor = GpsFactor::<SE3>::new_isotropic(measurement, r_sa, 0.5);
         let (r0, jac) = compute_with_jacobian_gps(&factor, pose_ws.as_slice(), pose_gw.as_slice());
 
         const EPS: f64 = 1e-6;

@@ -58,6 +58,7 @@ use std::ops::{Mul, Neg};
 /// threshold is `√(1e-10) ≈ 1e-5` radians (~0.00057°).
 pub const SMALL_ANGLE_THRESHOLD: f64 = 1e-10;
 
+pub mod capability;
 pub mod rn;
 pub mod se2;
 pub mod se23;
@@ -66,6 +67,7 @@ pub mod sgal3;
 pub mod sim3;
 pub mod so2;
 pub mod so3;
+pub mod util;
 
 /// Errors that can occur during manifold operations.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -244,6 +246,12 @@ pub trait LieGroup: Clone + PartialEq {
     /// overrides it with its runtime dimension.
     fn jacobian_identity_for(&self) -> Self::JacobianMatrix {
         Self::jacobian_identity()
+    }
+
+    /// Zero Jacobian sized for *this element's* tangent space; the instance
+    /// counterpart of [`Self::zero_jacobian`] (see [`Self::jacobian_identity_for`]).
+    fn zero_jacobian_for(&self) -> Self::JacobianMatrix {
+        Self::zero_jacobian()
     }
 
     /// Normalize/project the element to the manifold.

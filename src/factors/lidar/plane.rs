@@ -20,14 +20,16 @@
 //! [`IcpFactor`](crate::factors::lidar::distance_field::IcpFactor) it evaluates a single
 //! matched correspondence.
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use std::marker::PhantomData;
+
+use apex_manifolds::capability::ActsOnPoints3;
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix3, Vector3};
+use nalgebra::Vector3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
 use crate::factors::Factor;
+use crate::factors::common::group_point::{act_point, expect_state_and_point};
 use crate::factors::lidar::distance_field::{DistanceField, IcpFactor};
 
 /// A plane `nᵀ·x + d = 0` with a unit normal.
@@ -66,50 +68,47 @@ impl Plane {
 /// formulation where scan points are treated as measurements with fixed
 /// position but the factor still exposes the block for flexibility.
 #[derive(Clone)]
-pub struct PointToPlaneFactor {
+pub struct PointToPlaneFactor<G: ActsOnPoints3> {
     /// Target-frame plane.
     pub plane: Plane,
+    group: PhantomData<fn() -> G>,
 }
 
-impl PointToPlaneFactor {
+impl<G: ActsOnPoints3> PointToPlaneFactor<G> {
     /// Create the factor from the target plane.
     pub fn new(plane: Plane) -> Self {
-        Self { plane }
+        Self {
+            plane,
+            group: PhantomData,
+        }
     }
 }
 
-impl Factor for PointToPlaneFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for PointToPlaneFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "PointToPlaneFactor expects [T_wr, p_body]");
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 3, "params[1] must be a 3D point");
-
-        let pose = SE3::from_param_slice(params[0]);
+        let pose = G::from_param_slice(params[0]);
         let p_body = Vector3::new(params[1][0], params[1][1], params[1][2]);
 
-        // `act` reports `∂(T·p)/∂(δρ, δθ)` (top 3×6 of `j_pose`) and
-        // `∂(T·p)/∂p` (`j_point`) in SE(3)'s own right convention; the plane
-        // residual is then just `nᵀ` applied to those.
-        let mut j_pose = SE3::zero_jacobian();
-        let mut j_point = Matrix3::zeros();
-        let predicted = pose.act(&p_body, Some(&mut j_pose), Some(&mut j_point));
-        residual[0] = self.plane.normal.dot(&predicted) + self.plane.offset;
+        // `act` reports `∂(T·p)/∂T` and `∂(T·p)/∂p` in the group's own right
+        // convention; the plane residual is then just `nᵀ` applied to those.
+        let acted = act_point(&pose, &p_body);
+        residual[0] = self.plane.normal.dot(&acted.world) + self.plane.offset;
 
         let Some(mut jac) = jacobian else { return };
 
         let n_t = self.plane.normal.transpose();
-        let d_pose = n_t * j_pose.fixed_view::<3, 6>(0, 0); // 1×6
-        let d_point = n_t * j_point; // 1×3
-        for col in 0..6 {
+        let d_pose = n_t * acted.d_state;
+        let d_point = n_t * acted.d_point;
+        for col in 0..G::DOF {
             *jac.rb_mut().get_mut(0, col) = d_pose[(0, col)];
         }
         for col in 0..3 {
-            *jac.rb_mut().get_mut(0, 6 + col) = d_point[(0, col)];
+            *jac.rb_mut().get_mut(0, G::DOF + col) = d_point[(0, col)];
         }
     }
 
@@ -118,17 +117,11 @@ impl Factor for PointToPlaneFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (1, 9)
+        (1, G::DOF + 3)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2
-            || variables[0].as_param_slice().len() != SE3::REP_SIZE
-            || variables[1].as_param_slice().len() != 3
-        {
-            return Err("PointToPlaneFactor expects [SE3 pose, 3D point]".into());
-        }
-        Ok(())
+        expect_state_and_point::<G>(variables, "PointToPlaneFactor")
     }
 }
 
@@ -168,7 +161,7 @@ impl DistanceField for PrecomputedPlane {
 /// `sqrt_info · n·(p_A − q)` and its Jacobian are exactly `IcpFactor`'s
 /// generic field-alignment math evaluated against a plane whose gradient is
 /// its (constant) normal everywhere.
-pub type LidarPlaneFactor = IcpFactor<PrecomputedPlane>;
+pub type LidarPlaneFactor<G> = IcpFactor<G, PrecomputedPlane>;
 
 /// Construct a point-to-plane LOAM factor with isotropic noise.
 ///
@@ -177,12 +170,12 @@ pub type LidarPlaneFactor = IcpFactor<PrecomputedPlane>;
 /// * `plane_point` — a point on the matched plane, in frame A
 /// * `plane_normal` — normal of the matched plane, in frame A (normalized internally)
 /// * `sigma` — measurement noise standard deviation
-pub fn lidar_plane_factor_isotropic(
+pub fn lidar_plane_factor_isotropic<G: ActsOnPoints3>(
     point_b: Vector3<f64>,
     plane_point: Vector3<f64>,
     plane_normal: Vector3<f64>,
     sigma: f64,
-) -> LidarPlaneFactor {
+) -> LidarPlaneFactor<G> {
     IcpFactor::new(
         PrecomputedPlane::new(plane_point, plane_normal),
         point_b,
@@ -193,7 +186,9 @@ pub fn lidar_plane_factor_isotropic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apex_manifolds::LieGroup;
     use apex_manifolds::Tangent;
+    use apex_manifolds::se3::SE3;
     use apex_manifolds::se3::SE3Tangent;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -213,7 +208,7 @@ mod tests {
             nalgebra::Translation3::from(translation),
             rotation_q,
         ));
-        let factor = PointToPlaneFactor::new(plane);
+        let factor = PointToPlaneFactor::<SE3>::new(plane);
 
         let mut residual = vec![0.0; 1];
         factor.linearize(
@@ -233,7 +228,7 @@ mod tests {
             nalgebra::UnitQuaternion::from_euler_angles(0.03, 0.05, -0.02),
         ));
         let p_body = Vector3::new(0.2, 0.6, -0.3);
-        let factor = PointToPlaneFactor::new(plane);
+        let factor = PointToPlaneFactor::<SE3>::new(plane);
         let pose_vec: Vec<f64> = pose.as_param_slice().to_vec();
         let body_vec = [p_body.x, p_body.y, p_body.z];
 
@@ -306,8 +301,12 @@ mod tests {
         let t_wb = identity_pose();
         let point_b = Vector3::new(1.0, 2.0, 5.0); // on the z=5 plane
 
-        let factor =
-            lidar_plane_factor_isotropic(point_b, Vector3::new(0.0, 0.0, 5.0), Vector3::z(), 1.0);
+        let factor = lidar_plane_factor_isotropic::<SE3>(
+            point_b,
+            Vector3::new(0.0, 0.0, 5.0),
+            Vector3::z(),
+            1.0,
+        );
         let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
         assert!(r[0].abs() < 1e-10, "residual = {} should be zero", r[0]);
     }
@@ -318,8 +317,12 @@ mod tests {
         let t_wb = identity_pose();
         let point_b = Vector3::new(1.0, 2.0, 7.0); // 2m above the z=5 plane
 
-        let factor =
-            lidar_plane_factor_isotropic(point_b, Vector3::new(0.0, 0.0, 5.0), Vector3::z(), 1.0);
+        let factor = lidar_plane_factor_isotropic::<SE3>(
+            point_b,
+            Vector3::new(0.0, 0.0, 5.0),
+            Vector3::z(),
+            1.0,
+        );
         let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
         // n·(p - q) = (0,0,1)·(1,2,2) = 2, sqrt_info = 1
         assert!((r[0] - 2.0).abs() < 1e-10, "residual = {}", r[0]);
@@ -341,7 +344,7 @@ mod tests {
 
         let normal = Vector3::new(0.0, 0.3, 0.9).normalize();
         let factor =
-            lidar_plane_factor_isotropic(point_b, Vector3::new(0.0, 0.0, 3.0), normal, 0.5);
+            lidar_plane_factor_isotropic::<SE3>(point_b, Vector3::new(0.0, 0.0, 3.0), normal, 0.5);
 
         let (r0, jac) = compute_with_jacobian(&factor, t_wa.as_slice(), t_wb.as_slice());
 
@@ -379,8 +382,12 @@ mod tests {
 
     #[test]
     fn plane_dimension_is_one() {
-        let factor =
-            lidar_plane_factor_isotropic(Vector3::zeros(), Vector3::zeros(), Vector3::z(), 1.0);
+        let factor = lidar_plane_factor_isotropic::<SE3>(
+            Vector3::zeros(),
+            Vector3::zeros(),
+            Vector3::z(),
+            1.0,
+        );
         assert_eq!(factor.residual_dim(), 1);
         assert_eq!(factor.jacobian_shape(), (1, 12));
     }

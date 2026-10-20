@@ -1,190 +1,112 @@
-# GNSS & Navigation
+# Navigation Factors
 
-`factors::navigation` — satellite positioning and the auxiliary sensors that
-bound inertial drift.
+GNSS and its aids are the measurements that break the gauge. A camera-and-IMU
+system is defined up to a global position and a global heading; a GNSS
+position fixes the first, a velocity fixes the second, and everything else in
+this family is a refinement of that idea. This chapter is the six factors that
+bring absolute information into a graph.
 
----
+## 1. The family
 
-## `GpsFactor` — position fix with a lever arm and frame transform
+<div class="apx-table">
+<span class="apx-title">`factors::navigation`</span>
 
-The receiver reports position in *its* frame, and the antenna is not at the
-body origin. Both matter: the frame transform is often unsurveyed, and the
-lever arm couples attitude into the position measurement.
+| Factor | Measurement | Typical use |
+|---|---|---|
+| `GpsFactor` | a GNSS position with its covariance | the position observation of a multi-GNSS session |
+| `GpsAsyncFactor` | the same, for an asynchronous (out-of-frame) measurement | a GNSS fix that arrives between two frames |
+| `GpsVelocityFactor` | a GNSS velocity | the heading observation a position fix cannot give |
+| `PseudorangeFactor` | a raw pseudorange to a satellite | the tightest GNSS observable, and the hardest to model |
+| `DopplerFactor` | a raw Doppler measurement | the velocity observable, in the satellite's own frame |
+| `BarometricFactor` | a barometric altitude | a height that is better than the GNSS's, in a building |
+| `AttitudeFactor` | an attitude from gravity or a magnetometer | a roll and pitch observation independent of the IMU's estimate |
 
-**Blocks** $[T_{WS},\ T_{GW}]$ — residual 3, Jacobian $3\times12$. Whitens
-internally.
+</div>
 
-### Error
+## 2. Position fixes and the gauge
 
-$$
-\mathbf{t}_{A}^{W} = \mathbf{t}_{WS} + C_{WS}\,\mathbf{r}_{SA},
-\qquad
-\hat{\mathbf{z}} = C_{GW}\,\mathbf{t}_{A}^{W} + \mathbf{t}_{GW},
-\qquad
-\mathbf{r} = W\left(\tilde{\mathbf{z}} - \hat{\mathbf{z}}\right)
-$$
+A GNSS position factor says "this frame's origin is at $\mathbf{p}$". Two
+consequences make it different from every other factor in the crate:
 
-with $\mathbf{r}_{SA}$ the sensor-to-antenna lever arm in the sensor frame.
+- it is **absolute**, so it fixes the gauge the rest of the graph is free in;
+- it is **correlated in time** — the receiver's error drifts slowly, so
+  successive fixes are not independent, and a graph that treats them as
+  independent is over-confident in the slow modes.
 
-### Jacobian
+The first is why a GNSS factor is often the only thing that makes a
+camera-only graph's trajectory absolute. The second is why the factor's
+covariance is the receiver's, and why a session with twenty fixes of the same
+error does not constrain twenty times as much as twenty independent fixes
+would.
 
-$$
-\frac{\partial\mathbf{e}}{\partial\delta\boldsymbol{\rho}_{WS}} = -C_{GW}C_{WS},
-\qquad
-\frac{\partial\mathbf{e}}{\partial\delta\boldsymbol{\theta}_{WS}} = C_{GW}C_{WS}\,[\mathbf{r}_{SA}]_\times
-$$
+## 3. `GpsAsyncFactor`
 
-$$
-\frac{\partial\mathbf{e}}{\partial\delta\boldsymbol{\rho}_{GW}} = -C_{GW},
-\qquad
-\frac{\partial\mathbf{e}}{\partial\delta\boldsymbol{\theta}_{GW}} = C_{GW}\,[\mathbf{t}_{A}^{W}]_\times
-$$
+A GNSS fix that arrives *between* two camera frames. The factor's blocks
+then straddle the interval, and the state it refers to is not the frame's
+state but the state interpolated to the fix's time — which is why this factor
+exists separately rather than as a flag on `GpsFactor`. The crate's
+factor-family convention (pose-and-point versus two-pose) is the same
+distinction: an asynchronous measurement does not belong to a frame.
 
-then scaled by $W$. Note the attitude column is proportional to the lever arm:
-with $\mathbf{r}_{SA} = 0$ a position fix says nothing about orientation.
+## 4. `PseudorangeFactor` and `DopplerFactor`
 
-> **Observability.** Each pose owns three translation degrees of freedom and
-> receives one 3D fix, so the poses can absorb *any* frame transform — with
-> $T_{GW}$ fully free the graph has a six-dimensional null space and a
-> zero-cost family of solutions. Survey the frame rotation (or anchor enough
-> poses) before estimating it.
+The *raw* GNSS observables, rather than the solution the receiver computes.
+A pseudorange is the measured distance to a satellite, including the clock
+bias and the atmosphere; a Doppler is the range rate. Working with the raw
+observables removes the receiver's own error processing from the loop — at the
+cost of modelling satellite positions, the clock, and the atmosphere
+explicitly.
 
----
+The payoff is accuracy: a receiver's filtered solution has already
+discarded information, and the graph can use the raw measurement with a
+covariance that reflects the *observation* rather than the *solution*.
 
-## `GpsAsyncFactor` — a fix that lands between keyframes
+## 5. `GpsVelocityFactor`
 
-GNSS epochs rarely coincide with keyframes. This propagates the keyframe state
-forward with an IMU preintegration to the fix timestamp, then applies the same
-position error.
+A GNSS velocity fixes the heading — the direction the gravity vector cannot
+see. A system that knows its acceleration in world axes but not its heading has
+a one-dimensional gauge freedom that no amount of visual or inertial
+measurement resolves. A velocity measurement closes it.
 
-**Blocks** $[T_{WS},\ \text{speed-and-bias}(9),\ T_{GW}]$ — residual 3,
-Jacobian $3\times21$. Whitens internally.
+## 6. `BarometricFactor` and `AttitudeFactor`
 
-### Error
+Two cheap aids with narrow jobs. A barometer gives a *height* far better than
+GNSS does in a building (GNSS's vertical error is two to three times its
+horizontal one), which is what makes it worth a factor. An attitude factor
+gives roll and pitch from gravity or from a magnetometer — the IMU's own
+estimate of gravity is integrated and drifts, and an absolute attitude
+observation stops it.
 
-$$
-\mathbf{p}_g = \mathbf{p}_k + \mathbf{v}_k\Delta t
-\;-\; \tfrac12\,\mathbf{g}\,\Delta t^2
-\;+\; C_{WS,k}\,\Delta\mathbf{p}_\text{body},
-\qquad
-C_{WS,g} = C_{WS,k}\,\Delta R
-$$
+## 7. Worked example
 
-$$
-\Delta\mathbf{p}_\text{body} = \Delta\mathbf{p}_\text{nom}
-+ \frac{\partial\Delta\mathbf{p}}{\partial\mathbf{b}_g}\delta\mathbf{b}_g
-+ C_{\!\iint}\,\delta\mathbf{b}_a
-$$
+A vehicle with a camera, an IMU and a GNSS receiver. The graph carries the
+camera factors, the IMU factors, one `GpsFactor` per fix (with the
+receiver's covariance), and one `GpsVelocityFactor` per velocity solution. The
+GNSS factors are what make the trajectory absolute; without them the graph is
+defined up to a global rigid motion, and any alignment against a map has to
+estimate it.
 
-then $\mathbf{t}_A^W = \mathbf{p}_g + C_{WS,g}\mathbf{r}_{SA}$ and the same
-projection into the GNSS frame as `GpsFactor`.
+## 8. The catch
 
-The $-\tfrac12\mathbf{g}\Delta t^2$ term is easy to lose: every preintegrated
-quantity is **gravity-free**, so gravity has to be reinstated here exactly as
-the IMU factors do when they build their gravity-corrected state. Omitting it
-biases the predicted antenna position by 0.44 m after only 0.3 s, growing
-quadratically.
+<div class="apx-warning">
+<span class="apx-title">Warning — a GNSS factor's covariance is not independent of the others</span>
 
----
+A receiver's errors are temporally correlated, and a graph that treats each
+fix as an independent measurement will produce a covariance that is too
+optimistic along the slow error modes — a slow drift in the position, which is
+precisely the mode that matters for a long trajectory. The fix is not in the
+factor (which is honest about the *measurement*) but in the graph's structure:
+a factor that models the correlation, or a covariance that is deliberately
+inflated to account for it.
 
-## `GpsVelocityFactor`
+</div>
 
-**Blocks** $[\mathbf{v}]$ — residual 3, Jacobian $3\times3 = I$.
+<div class="apx-note">
+<span class="apx-title">Note — the frame of the GNSS measurement is the receiver's antenna</span>
 
-$$
-\mathbf{r} = \mathbf{v} - \tilde{\mathbf{v}}
-$$
+Every factor here measures from a *sensor*, and the sensor is not at the
+state's origin. The antenna's lever arm is part of the model, and a factor
+that ignores it is wrong by that offset — which for a vehicle's roof-mounted
+receiver is metres.
 
-A Doppler-derived velocity in the local tangent frame, on a plain
-$\mathbb{R}^3$ variable. For a *raw* range-rate along a satellite line of sight
-use `DopplerFactor` instead.
-
----
-
-## `PseudorangeFactor`
-
-Raw ranging to one satellite, before any position solution has been formed.
-
-**Blocks** $[\mathbf{x},\ b]$ — receiver position and clock bias, the latter in
-**metres** (already range-equivalent). Residual 1, Jacobian $1\times4$.
-
-$$
-r = \lVert\mathbf{s} - \mathbf{x}\rVert + b - \tilde{\rho},
-\qquad
-\frac{\partial r}{\partial\mathbf{x}} = -\hat{\mathbf{f}}^\top,
-\qquad
-\frac{\partial r}{\partial b} = 1,
-\qquad
-\hat{\mathbf{f}} = \frac{\mathbf{s} - \mathbf{x}}{\lVert\mathbf{s} - \mathbf{x}\rVert}
-$$
-
-The position and clock columns are separable only when the line-of-sight
-directions span three dimensions — the reason a fix needs four satellites, and
-why poor geometry is penalized rather than silently accepted.
-
----
-
-## `DopplerFactor`
-
-Range rate along the same line of sight.
-
-**Blocks** $[\mathbf{x},\ \mathbf{v}]$ — residual 1, Jacobian $1\times6$.
-
-$$
-r = \hat{\mathbf{f}}^\top(\mathbf{v}_s - \mathbf{v}_r) - \tilde{\dot{\rho}},
-\qquad
-\frac{\partial r}{\partial\mathbf{v}_r} = -\hat{\mathbf{f}}^\top
-$$
-
-The position column carries the derivative of $\hat{\mathbf{f}}$ itself,
-
-$$
-\frac{\partial \hat{\mathbf{f}}}{\partial\mathbf{x}}
-= -\frac{1}{\lVert\mathbf{s}-\mathbf{x}\rVert}\left(I - \hat{\mathbf{f}}\hat{\mathbf{f}}^\top\right)
-$$
-
-which is small at typical satellite ranges — velocity is what this measurement
-really informs.
-
----
-
-## `BarometricFactor`
-
-**Blocks** $[T,\ b]$ — pose and a slowly-varying altimeter bias. Residual 1,
-Jacobian $1\times7$.
-
-$$
-r = (z_\text{pose} + b) - \tilde{z},
-\qquad
-\frac{\partial r}{\partial\delta\boldsymbol{\rho}} = \mathbf{e}_3^\top R,
-\qquad
-\frac{\partial r}{\partial b} = 1
-$$
-
-The pose block is the third row of $R$, not $\mathbf{e}_3^\top$, because the
-right perturbation moves the origin by $R\,\delta\boldsymbol{\rho}$.
-
-Height and bias are only separable if the bias is otherwise constrained — give
-it a prior and a random walk, or the pair drifts together.
-
----
-
-## `AttitudeFactor`
-
-Constrains rotation so a known world direction maps onto the direction the
-sensor measures in the body frame — gravity from an accelerometer at rest, or
-the field from a magnetometer.
-
-**Blocks** $[T]$ — residual 3, Jacobian $3\times6$.
-
-$$
-\mathbf{r} = R\,\mathbf{d}_\text{world} - \tilde{\mathbf{d}}_\text{body},
-\qquad
-\frac{\partial\mathbf{r}}{\partial\delta\boldsymbol{\rho}} = 0,
-\qquad
-\frac{\partial\mathbf{r}}{\partial\delta\boldsymbol{\theta}} = -R\,[\mathbf{d}_\text{world}]_\times
-$$
-
-The Jacobian is rank 2: rotation about the reference direction leaves it
-unchanged, so **one such factor pins two of the three rotational degrees of
-freedom**. Add a gravity factor and a magnetometer factor for a full AHRS.
+</div>

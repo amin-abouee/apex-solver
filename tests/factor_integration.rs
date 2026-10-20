@@ -499,7 +499,7 @@ fn lidar_scan_matching_recovers_transform() {
         if i < 9 {
             problem.add_residual_block(
                 &[pose_key, p_key],
-                Box::new(PointToPlaneFactor::new(plane.clone())),
+                Box::new(PointToPlaneFactor::<SE3>::new(plane.clone())),
                 None,
             );
         }
@@ -509,7 +509,7 @@ fn lidar_scan_matching_recovers_transform() {
             problem.add_residual_block(
                 &[pose_key, p_key],
                 Box::new(
-                    GicpFactor::new(
+                    GicpFactor::<SE3>::new(
                         scan_target[i],
                         plane_cov,
                         plane_cov,
@@ -537,7 +537,7 @@ fn lidar_scan_matching_recovers_transform() {
         );
         problem.add_residual_block(
             &[pose_key, p_key],
-            Box::new(PoseToPointFactor::new(scan_target[i])),
+            Box::new(PoseToPointFactor::<SE3>::new(scan_target[i])),
             None,
         );
     }
@@ -957,7 +957,7 @@ fn barometer_and_attitude_factors_constrain_a_hover() {
 
     problem.add_residual_block(
         &[pose_key, bias_key],
-        Box::new(BarometricFactor::new(50.0)),
+        Box::new(BarometricFactor::<SE3>::new(50.0)),
         None,
     );
     // Gravity reads (0,0,-1) in the body frame when level.
@@ -965,7 +965,7 @@ fn barometer_and_attitude_factors_constrain_a_hover() {
     problem.add_residual_block(
         &[pose_key],
         Box::new(
-            AttitudeFactor::new(Vector3::new(0.0, 0.0, -1.0), g_body)
+            AttitudeFactor::<SE3>::new(Vector3::new(0.0, 0.0, -1.0), g_body)
                 .unwrap_or_else(|e| panic!("{e}")),
         ),
         None,
@@ -1026,7 +1026,9 @@ fn bearing_range_and_gps_velocity_graph() {
     anchor_se3(&mut problem, pose_key, &pose_true);
     problem.add_residual_block(
         &[pose_key, lm_key],
-        Box::new(BearingRangeFactor::new(bearing, delta.norm()).unwrap_or_else(|e| panic!("{e}"))),
+        Box::new(
+            BearingRangeFactor::<SE3>::new(bearing, delta.norm()).unwrap_or_else(|e| panic!("{e}")),
+        ),
         None,
     );
     problem.add_residual_block_with_noise(
@@ -1047,5 +1049,5 @@ fn bearing_range_and_gps_velocity_graph() {
         + (lm_hat[2] - landmark.z).powi(2))
     .sqrt();
     assert!(err < 1e-3, "landmark not recovered: {err:.5}");
-    let _ = PosePointRangeFactor::new(1.0); // smoke: type is public
+    let _ = PosePointRangeFactor::<SE3>::new(1.0); // smoke: type is public
 }

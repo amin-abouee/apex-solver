@@ -1,6 +1,6 @@
 //! Numerical utilities shared by factor implementations.
 
-use nalgebra::{DMatrix, Matrix3, SMatrix, Vector3};
+use nalgebra::{DMatrix, SMatrix, Vector3};
 
 /// Numerically stable sinc: `sinc(x) = sin(x) / x`.
 ///
@@ -14,14 +14,7 @@ pub fn sinc(x: f64) -> f64 {
     }
 }
 
-/// Skew-symmetric (cross-product) matrix: `[v]× w = v × w`.
-pub fn skew(v: &Vector3<f64>) -> Matrix3<f64> {
-    Matrix3::new(
-        0.0, -v.z, v.y, //
-        v.z, 0.0, -v.x, //
-        -v.y, v.x, 0.0,
-    )
-}
+pub use apex_manifolds::util::skew;
 
 /// Orthonormal basis (3×2) for the tangent plane of `S²` at the unit vector `n`.
 ///

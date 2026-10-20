@@ -4,19 +4,12 @@
 //! `X⁻¹ ⊙ p`; both, with their Jacobians in the group's own chart, come from
 //! the group's `act` and `inverse`.
 
-use nalgebra::{Matrix3, Vector3};
+use nalgebra::{Matrix3, SMatrix, Vector3};
+use smallvec::SmallVec;
 
-use apex_manifolds::{LieGroup, Tangent};
+use apex_manifolds::capability::ActsOnPoints3;
 
-/// Whether group `G` moves 3-D points: a fixed-size tangent and an `act` that
-/// is a group action on 3-D points, so `X⁻¹ ⊙ (X ⊙ x) = x`.
-///
-/// Excluded: `SE2`/`SO2` act in the plane, `Rn` has a runtime dimension, and
-/// `SGal3::act` adds `t·v` — not a group action, so its inverse does not undo
-/// it.
-pub fn acts_on_points<G: LieGroup>() -> bool {
-    !G::TangentVector::is_dynamic() && !matches!(G::NAME, "SE2" | "SO2" | "SGal3")
-}
+use apex_manifolds::LieGroup;
 
 /// A world point carried into an anchor's frame, with its derivatives.
 #[derive(Clone, Debug)]
@@ -24,16 +17,16 @@ pub struct AnchorChain {
     /// The point in the anchor frame, `p_A = X_a⁻¹ ⊙ w`.
     pub point: Vector3<f64>,
     /// `∂p_A/∂X_a`, `3 × dof(G)`, one `[x, y, z]` column per tangent axis.
-    pub d_anchor: Vec<[f64; 3]>,
+    pub d_anchor: SmallVec<[[f64; 3]; MAX_ACT_DOF]>,
     /// `∂p_A/∂w`.
     pub d_world: Matrix3<f64>,
 }
 
 /// Carry world point `world` into the frame of `anchor`.
 pub fn into_anchor<G: LieGroup>(anchor: &G, world: &Vector3<f64>) -> AnchorChain {
-    let mut d_inverse = G::zero_jacobian();
+    let mut d_inverse = anchor.zero_jacobian_for();
     let inverse = anchor.inverse(Some(&mut d_inverse));
-    let mut d_act = G::zero_jacobian();
+    let mut d_act = anchor.zero_jacobian_for();
     let mut d_world = Matrix3::zeros();
     let point = inverse.act(world, Some(&mut d_act), Some(&mut d_world));
     let dof = anchor.tangent_dim();
@@ -55,16 +48,94 @@ pub fn into_anchor<G: LieGroup>(anchor: &G, world: &Vector3<f64>) -> AnchorChain
     }
 }
 
+/// Largest tangent dimension of a group that moves 3-D points (`SE23`).
+pub const MAX_ACT_DOF: usize = 9;
+
+/// A body point carried to the world, with its derivatives.
+#[derive(Clone, Debug)]
+pub struct PointAct {
+    /// `X ⊙ p`.
+    pub world: Vector3<f64>,
+    /// `∂(X ⊙ p)/∂X`, one column per tangent axis (the rest zero).
+    pub d_state: SMatrix<f64, 3, MAX_ACT_DOF>,
+    /// `∂(X ⊙ p)/∂p`.
+    pub d_point: Matrix3<f64>,
+}
+
+/// Carry body point `point` to the world by `state`.
+pub fn act_point<G: ActsOnPoints3>(state: &G, point: &Vector3<f64>) -> PointAct {
+    const { assert!(G::DOF <= MAX_ACT_DOF) };
+    let mut jacobian = state.zero_jacobian_for();
+    let mut d_point = Matrix3::zeros();
+    let world = state.act(point, Some(&mut jacobian), Some(&mut d_point));
+    PointAct {
+        world,
+        d_state: SMatrix::from_fn(|row, col| {
+            if col < G::DOF {
+                jacobian[(row, col)]
+            } else {
+                0.0
+            }
+        }),
+        d_point,
+    }
+}
+
+/// A point of frame B seen from frame A, `p_A = X_a⁻¹ ⊙ (X_b ⊙ p_B)`.
+#[derive(Clone, Debug)]
+pub struct RelativePoint {
+    /// `p_A`.
+    pub point: Vector3<f64>,
+    /// `∂p_A/∂X_a`.
+    pub d_a: SMatrix<f64, 3, MAX_ACT_DOF>,
+    /// `∂p_A/∂X_b`.
+    pub d_b: SMatrix<f64, 3, MAX_ACT_DOF>,
+}
+
+/// Carry `point_b` from frame B into frame A.
+pub fn relative_point<G: ActsOnPoints3>(a: &G, b: &G, point_b: &Vector3<f64>) -> RelativePoint {
+    let act_b = act_point(b, point_b);
+    let chain = into_anchor(a, &act_b.world);
+    RelativePoint {
+        point: chain.point,
+        d_a: SMatrix::from_fn(|row, col| chain.d_anchor.get(col).map_or(0.0, |axis| axis[row])),
+        d_b: chain.d_world * act_b.d_state,
+    }
+}
+
+/// Registration check for a `[state, 3-D point]` factor.
+pub(crate) fn expect_state_and_point<G: ActsOnPoints3>(
+    variables: &[&dyn crate::core::variable::ManifoldVariable],
+    name: &str,
+) -> Result<(), String> {
+    match variables {
+        [state, point]
+            if state.manifold_type_name() == G::NAME && point.as_param_slice().len() == 3 =>
+        {
+            Ok(())
+        }
+        _ => Err(format!("{name} expects [{} state, 3D point]", G::NAME)),
+    }
+}
+
+/// Registration check for a `[state, state]` factor.
+pub(crate) fn expect_two_states<G: ActsOnPoints3>(
+    variables: &[&dyn crate::core::variable::ManifoldVariable],
+    name: &str,
+) -> Result<(), String> {
+    match variables {
+        [a, b] if a.manifold_type_name() == G::NAME && b.manifold_type_name() == G::NAME => Ok(()),
+        _ => Err(format!("{name} expects [{0} state, {0} state]", G::NAME)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_manifolds::rn::Rn;
-    use apex_manifolds::se2::SE2;
     use apex_manifolds::se3::SE3;
     use apex_manifolds::se23::SE23;
     use apex_manifolds::sgal3::SGal3;
     use apex_manifolds::sim3::Sim3;
-    use apex_manifolds::so2::SO2;
     use apex_manifolds::so3::SO3;
     use nalgebra::UnitQuaternion;
 
@@ -116,12 +187,5 @@ mod tests {
             0.3,
         );
         assert!(!inverse_undoes_act(&sgal3));
-        assert!(!acts_on_points::<SGal3>());
-    }
-
-    #[test]
-    fn only_three_dimensional_fixed_size_groups_move_points() {
-        assert!(acts_on_points::<SE3>() && acts_on_points::<Sim3>());
-        assert!(!acts_on_points::<SE2>() && !acts_on_points::<SO2>() && !acts_on_points::<Rn>());
     }
 }

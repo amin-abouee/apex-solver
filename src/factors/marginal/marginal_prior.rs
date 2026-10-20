@@ -23,6 +23,9 @@
 
 use faer::prelude::ReborrowMut;
 use nalgebra::{DMatrix, DVector};
+use smallvec::SmallVec;
+
+use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
@@ -32,6 +35,9 @@ use crate::factors::Factor;
 /// variables (one `&[f64]` param slice per block, in block order) into the
 /// output buffer (length = sum of block tangent dims, same order).
 pub type LocalLogFn = Box<dyn Fn(&[&[f64]], &mut [f64]) + Send + Sync>;
+
+/// Tangent dimension a prior evaluates without touching the heap.
+const INLINE_DIM: usize = 128;
 
 /// Gaussian marginal prior over one or more variables.
 pub struct MarginalPriorFactor {
@@ -105,7 +111,7 @@ impl Factor for MarginalPriorFactor {
         );
 
         let total = self.total_dim();
-        let mut delta = vec![0.0f64; total];
+        let mut delta: SmallVec<[f64; INLINE_DIM]> = SmallVec::from_elem(0.0, total);
         (self.local_log)(params, &mut delta);
 
         let rows = self.sqrt_info.nrows();
@@ -160,6 +166,128 @@ impl Factor for MarginalPriorFactor {
                 return Err(format!(
                     "MarginalPriorFactor block {i} declares tangent dim {dim} but the \
                      registered variable has dof {dof}"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// [`MarginalPriorFactor`] for blocks that all live on one group `G`.
+///
+/// The local chart `θ(x ⊟ x₀)` is `G::right_minus` against stored anchors, so
+/// there is no closure to box and no per-call dispatch: one monomorphization
+/// per group. The residual and Jacobian are those of the boxed factor.
+pub struct MarginalPriorFactorT<G: LieGroup> {
+    sqrt_info: DMatrix<f64>,
+    offset: DVector<f64>,
+    /// The linearization point `x₀` of each block.
+    anchors: Vec<G>,
+    /// Tangent dimension of each block.
+    dims: Vec<usize>,
+}
+
+impl<G: LieGroup> MarginalPriorFactorT<G> {
+    /// Create the prior over blocks anchored at `anchors`.
+    ///
+    /// `sqrt_info` is `S` (Σdims × Σdims) and `offset` is `b` (length Σdims),
+    /// as for [`MarginalPriorFactor::new`].
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::DimensionMismatch`] if `sqrt_info` or `offset` do not
+    /// match the anchors' total tangent dimension.
+    pub fn new(anchors: Vec<G>, sqrt_info: DMatrix<f64>, offset: DVector<f64>) -> CoreResult<Self> {
+        let dims: Vec<usize> = anchors.iter().map(LieGroup::tangent_dim).collect();
+        let total: usize = dims.iter().sum();
+        if sqrt_info.nrows() != total || sqrt_info.ncols() != total {
+            return Err(CoreError::DimensionMismatch(format!(
+                "sqrt_info is {}x{}, expected {total}x{total}",
+                sqrt_info.nrows(),
+                sqrt_info.ncols()
+            )));
+        }
+        if offset.len() != total {
+            return Err(CoreError::DimensionMismatch(format!(
+                "offset has length {}, expected {total}",
+                offset.len()
+            )));
+        }
+        Ok(Self {
+            sqrt_info,
+            offset,
+            anchors,
+            dims,
+        })
+    }
+
+    fn total_dim(&self) -> usize {
+        self.dims.iter().sum()
+    }
+}
+
+impl<G: LieGroup + Send + Sync + 'static> Factor for MarginalPriorFactorT<G> {
+    fn linearize(
+        &self,
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
+        let total = self.total_dim();
+        let mut delta: SmallVec<[f64; INLINE_DIM]> = SmallVec::from_elem(0.0, total);
+        let mut at = 0usize;
+        for ((anchor, &dim), param) in self.anchors.iter().zip(&self.dims).zip(params) {
+            let tangent = G::from_param_slice(param).right_minus(anchor, None, None);
+            let slice = tangent.as_slice();
+            let n = slice.len().min(dim);
+            delta[at..at + n].copy_from_slice(&slice[..n]);
+            at += dim;
+        }
+
+        let rows = self.sqrt_info.nrows();
+        for (i, r) in residual.iter_mut().enumerate().take(rows) {
+            let mut acc = 0.0;
+            for (j, d) in delta.iter().enumerate() {
+                acc += self.sqrt_info[(i, j)] * (d - self.offset[j]);
+            }
+            *r = acc;
+        }
+
+        let Some(mut jac) = jacobian else { return };
+        for i in 0..rows {
+            for j in 0..total {
+                *jac.rb_mut().get_mut(i, j) = self.sqrt_info[(i, j)];
+            }
+        }
+    }
+
+    fn residual_dim(&self) -> usize {
+        self.sqrt_info.nrows()
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        (self.sqrt_info.nrows(), self.total_dim())
+    }
+
+    fn whitens_internally(&self) -> bool {
+        true
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        if variables.len() != self.dims.len() {
+            return Err(format!(
+                "MarginalPriorFactorT expects {} variables, got {}",
+                self.dims.len(),
+                variables.len()
+            ));
+        }
+        for (i, (variable, &dim)) in variables.iter().zip(&self.dims).enumerate() {
+            if variable.manifold_type_name() != G::NAME || variable.dof() != dim {
+                return Err(format!(
+                    "MarginalPriorFactorT block {i} expects {} with dof {dim}, got {} with dof {}",
+                    G::NAME,
+                    variable.manifold_type_name(),
+                    variable.dof()
                 ));
             }
         }

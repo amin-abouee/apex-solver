@@ -23,14 +23,16 @@
 //!
 //! Parameter blocks: `[T_wr (7), p_body (3)]` — 9 minimal DOF, 3D residual.
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use std::marker::PhantomData;
+
+use apex_manifolds::capability::ActsOnPoints3;
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
 use crate::factors::Factor;
+use crate::factors::common::group_point::{act_point, expect_state_and_point};
 
 /// Minimum eigenvalue clamp used when whitening the combined covariance, so
 /// near-flat tangential directions do not blow the inverse up.
@@ -38,7 +40,7 @@ const MIN_EIGENVALUE: f64 = 1e-9;
 
 /// GICP plane-to-plane factor over `[T_wr, p_body]`.
 #[derive(Clone)]
-pub struct GicpFactor {
+pub struct GicpFactor<G: ActsOnPoints3> {
     /// Target point (world frame).
     pub target_point: Vector3<f64>,
     /// Target-plane local covariance (world frame), e.g. from the target
@@ -49,9 +51,10 @@ pub struct GicpFactor {
     /// Combined covariance frozen at construction:
     /// `C_target + R_hint·C_body·R_hintᵀ`.
     pub combined: Matrix3<f64>,
+    group: PhantomData<fn() -> G>,
 }
 
-impl GicpFactor {
+impl<G: ActsOnPoints3> GicpFactor<G> {
     /// Create the factor. Covariances must be finite; degenerate (zero)
     /// covariances are clamped to a small isotropic floor when whitening.
     pub fn new(
@@ -75,6 +78,7 @@ impl GicpFactor {
             target_covariance,
             body_covariance,
             combined,
+            group: PhantomData,
         })
     }
 
@@ -90,24 +94,18 @@ impl GicpFactor {
     }
 }
 
-impl Factor for GicpFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for GicpFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "GicpFactor expects [T_wr, p_body]");
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 3, "params[1] must be a 3D point");
-
-        let pose = SE3::from_param_slice(params[0]);
+        let pose = G::from_param_slice(params[0]);
         let p_body = Vector3::new(params[1][0], params[1][1], params[1][2]);
 
-        let mut j_pose_act = SE3::zero_jacobian();
-        let mut j_point_act = Matrix3::zeros();
-        let predicted = pose.act(&p_body, Some(&mut j_pose_act), Some(&mut j_point_act));
-        let e = predicted - self.target_point;
+        let acted = act_point(&pose, &p_body);
+        let e = acted.world - self.target_point;
 
         // Whitening is applied internally (this factor *is* the noise model);
         // register it with NoiseModel::null().
@@ -117,19 +115,19 @@ impl Factor for GicpFactor {
 
         let Some(mut jac) = jacobian else { return };
 
-        // `act` supplies ∂e/∂(δρ, δθ) and ∂e/∂p_body in SE(3)'s right
+        // `act` supplies ∂e/∂(state) and ∂e/∂p_body in the group's right
         // convention; whitening left-multiplies by C^{-1/2} (the
         // rotation-dependence of C is dropped: standard small-angle
         // approximation, see module docs).
-        let j_pose = c_inv_sqrt * j_pose_act.fixed_view::<3, 6>(0, 0);
-        let j_point = c_inv_sqrt * j_point_act;
+        let j_pose = c_inv_sqrt * acted.d_state;
+        let j_point = c_inv_sqrt * acted.d_point;
 
         for row in 0..3 {
-            for col in 0..6 {
+            for col in 0..G::DOF {
                 *jac.rb_mut().get_mut(row, col) = j_pose[(row, col)];
             }
             for col in 0..3 {
-                *jac.rb_mut().get_mut(row, 6 + col) = j_point[(row, col)];
+                *jac.rb_mut().get_mut(row, G::DOF + col) = j_point[(row, col)];
             }
         }
     }
@@ -139,17 +137,11 @@ impl Factor for GicpFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (3, 9)
+        (3, G::DOF + 3)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2
-            || variables[0].as_param_slice().len() != SE3::REP_SIZE
-            || variables[1].as_param_slice().len() != 3
-        {
-            return Err("GicpFactor expects [SE3 pose, 3D point]".into());
-        }
-        Ok(())
+        expect_state_and_point::<G>(variables, "GicpFactor")
     }
 
     /// This factor whitens with the combined point covariance, frozen at construction,
@@ -162,7 +154,9 @@ impl Factor for GicpFactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apex_manifolds::LieGroup;
     use apex_manifolds::Tangent;
+    use apex_manifolds::se3::SE3;
     use apex_manifolds::se3::SE3Tangent;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -180,7 +174,7 @@ mod tests {
         ));
         let p_body = Vector3::new(0.5, 0.2, 1.4);
         let target = pose.act(&p_body, None, None);
-        let factor = GicpFactor::new(
+        let factor = GicpFactor::<SE3>::new(
             target,
             plane_cov_along_z(),
             plane_cov_along_z(),
@@ -207,7 +201,7 @@ mod tests {
         ));
         let p_body = Vector3::new(0.6, -0.3, 2.0);
         let target = pose.act(&p_body, None, None);
-        let factor = GicpFactor::new(
+        let factor = GicpFactor::<SE3>::new(
             target + Vector3::new(0.01, -0.02, 0.03),
             plane_cov_along_z(),
             plane_cov_along_z(),
@@ -268,7 +262,7 @@ mod tests {
         // nothing, while a normal-direction error of the same size must
         // survive — this is what makes GICP plane-to-plane.
         let pose = SE3::identity();
-        let factor = GicpFactor::new(
+        let factor = GicpFactor::<SE3>::new(
             Vector3::new(0.0, 0.0, 1.0), // 1 m normal error
             plane_cov_along_z(),
             plane_cov_along_z(),
@@ -286,7 +280,7 @@ mod tests {
             "normal error should stay large: {normal_component}"
         );
 
-        let tangential = GicpFactor::new(
+        let tangential = GicpFactor::<SE3>::new(
             Vector3::new(1.0, 0.0, 0.0), // 1 m tangential error
             plane_cov_along_z(),
             plane_cov_along_z(),
@@ -306,7 +300,7 @@ mod tests {
         let mut bad = plane_cov_along_z();
         bad[(0, 0)] = f64::NAN;
         assert!(
-            GicpFactor::new(
+            GicpFactor::<SE3>::new(
                 Vector3::zeros(),
                 bad,
                 plane_cov_along_z(),
@@ -315,7 +309,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            GicpFactor::new(
+            GicpFactor::<SE3>::new(
                 Vector3::zeros(),
                 plane_cov_along_z(),
                 bad,

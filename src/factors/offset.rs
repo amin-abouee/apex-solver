@@ -15,15 +15,23 @@
 use faer::prelude::Reborrow;
 use faer::prelude::ReborrowMut;
 use nalgebra::DMatrix;
+use smallvec::SmallVec;
 
-use apex_manifolds::{LieGroup, Tangent};
+use apex_manifolds::capability::ConstDoF;
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
 use crate::factors::{Factor, NormalBlocks};
 
+/// Most blocks an inner factor takes without the parameter list spilling to
+/// the heap.
+const INLINE_BLOCKS: usize = 8;
+
+/// Largest tangent dimension a wrapped group may have.
+const MAX_DOF: usize = 16;
+
 /// `inner` with block `block` (of group `G`) evaluated at `X·Δ`.
-pub struct RightOffset<F: Factor, G: LieGroup> {
+pub struct RightOffset<F: Factor, G: ConstDoF> {
     inner: F,
     block: usize,
     offset: G,
@@ -33,7 +41,7 @@ pub struct RightOffset<F: Factor, G: LieGroup> {
     column: usize,
 }
 
-impl<F: Factor, G: LieGroup> RightOffset<F, G> {
+impl<F: Factor, G: ConstDoF> RightOffset<F, G> {
     /// Wrap `inner`, offsetting block `block` by `offset`. `column` is the
     /// block's first column in the inner Jacobian.
     ///
@@ -42,7 +50,8 @@ impl<F: Factor, G: LieGroup> RightOffset<F, G> {
     /// A block column that does not fit the inner Jacobian, as
     /// [`CoreError::DimensionMismatch`].
     pub fn new(inner: F, block: usize, column: usize, offset: G) -> CoreResult<Self> {
-        let dof = G::TangentVector::DIM;
+        const { assert!(G::DOF <= MAX_DOF) };
+        let dof = G::DOF;
         if column + dof > inner.jacobian_shape().1 {
             return Err(CoreError::DimensionMismatch(format!(
                 "RightOffset: block columns {column}..{} exceed the factor's {}",
@@ -69,7 +78,7 @@ impl<F: Factor, G: LieGroup> RightOffset<F, G> {
     }
 }
 
-impl<F: Factor, G: LieGroup + Send + Sync + 'static> Factor for RightOffset<F, G> {
+impl<F: Factor, G: ConstDoF + Send + Sync + 'static> Factor for RightOffset<F, G> {
     fn linearize(
         &self,
         params: &[&[f64]],
@@ -77,7 +86,7 @@ impl<F: Factor, G: LieGroup + Send + Sync + 'static> Factor for RightOffset<F, G
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
         let moved = G::from_param_slice(params[self.block]).compose(&self.offset, None, None);
-        let mut shifted: Vec<&[f64]> = params.to_vec();
+        let mut shifted: SmallVec<[&[f64]; INLINE_BLOCKS]> = SmallVec::from_slice(params);
         shifted[self.block] = moved.as_param_slice();
         let Some(mut jac) = jacobian else {
             self.inner.linearize(&shifted, residual, None);
@@ -86,8 +95,9 @@ impl<F: Factor, G: LieGroup + Send + Sync + 'static> Factor for RightOffset<F, G
         // The inner factor writes straight into `jac`; the block's columns are
         // then right-multiplied by `Ad(Δ⁻¹)` in place, a row at a time.
         self.inner.linearize(&shifted, residual, Some(jac.rb_mut()));
-        let dof = G::TangentVector::DIM;
-        let mut row_values = vec![0.0; dof];
+        let dof = G::DOF;
+        let mut row_values = [0.0; MAX_DOF];
+        let row_values = &mut row_values[..dof];
         for row in 0..jac.nrows() {
             for (k, value) in row_values.iter_mut().enumerate() {
                 *value = (0..dof)
@@ -107,12 +117,12 @@ impl<F: Factor, G: LieGroup + Send + Sync + 'static> Factor for RightOffset<F, G
         blocks: Option<&mut NormalBlocks<'_>>,
     ) -> Option<f64> {
         let moved = G::from_param_slice(params[self.block]).compose(&self.offset, None, None);
-        let mut shifted: Vec<&[f64]> = params.to_vec();
+        let mut shifted: SmallVec<[&[f64]; INLINE_BLOCKS]> = SmallVec::from_slice(params);
         shifted[self.block] = moved.as_param_slice();
         let Some(blocks) = blocks else {
             return self.inner.accumulate_normal(&shifted, None);
         };
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         let adjoint = DMatrix::from_row_slice(dof, dof, &self.adjoint);
         self.inner
             .accumulate_normal(&shifted, Some(&mut blocks.transformed(self.block, adjoint)))
@@ -140,6 +150,7 @@ mod tests {
     use super::*;
     use crate::factors::lidar::{LidarMapPlanesFactor, Plane, PlaneMatch};
     use apex_manifolds::se23::SE23;
+    use apex_manifolds::{LieGroup, Tangent};
     use faer::Mat;
     use nalgebra::{UnitQuaternion, Vector3};
 

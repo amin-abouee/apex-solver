@@ -1,138 +1,100 @@
-# Range & Bearing
+# Range and Bearing Factors
 
-`factors::ranging` — distance and direction measurements: UWB, radar, sonar,
-acoustic angle-of-arrival, and bearing-only landmark observation.
+Not every measurement is a camera. Radar, sonar, UWB, acoustic angle-of-arrival
+and laser rangefinders all produce *ranges* and *bearings* — and the bearing
+family lives in its own module rather than under `visual`, because a bearing
+is not a camera concept. This chapter is that family: three range factors and
+two bearing factors, and the convention they share.
 
-Bearing lives here rather than under `visual` because a direction measurement
-is not camera-specific — and keeping the two bearing residuals adjacent is what
-keeps them on one SE(3) convention.
+## 1. The family
 
-**Convention.** Poses are body-in-world, so the body-frame direction to a world
-landmark is
+<div class="apx-table">
+<span class="apx-title">`factors::ranging`</span>
 
-$$
-\mathbf{p}_\text{body} = R^\top\!\left(\mathbf{p}_j - \mathbf{t}_i\right)
-$$
+| Factor | Blocks | Measurement |
+|---|---|---|
+| `PosePoseRangeFactor` | two poses | the distance between two frames' origins |
+| `PosePointRangeFactor` | a pose, a point | the distance from a pose's origin to a known point |
+| `BearingRangeFactor` | a pose, a point | a distance **and** a direction, together |
+| `BearingFactor<G>` | a state of any group that moves points | the direction from the state's origin to a known point |
 
-Getting this backwards ($R$ instead of $R^\top$) produces a residual that is
-self-consistent with its own Jacobian, so finite differences pass and only a
-hand-computed value catches it.
+</div>
 
----
+The module's own comment explains the grouping: "Bearing-only measurements
+are not camera-specific, so they live here rather than under `visual`; keeping
+`bearing` next to `bearing_range` also keeps the two bearing residuals on a
+single SE(3) convention."
 
-## `PosePoseRangeFactor`
+## 2. The two conventions in one module
 
-Distance between two poses' origins — a UWB or acoustic baseline.
+A **range** factor measures a distance. A **bearing** factor measures a
+direction. Both are usually expressed *relative to a frame's origin* — a
+rangefinder measures the distance from the sensor, a radar measures the
+direction from the sensor — and the factor's residual is the difference between
+that and what the state predicts.
 
-**Blocks** $[T_i,\ T_j]$ — residual 1, Jacobian $1\times12$.
+The subtlety is the **frame of the origin**. A radar mounted on a vehicle
+measures from the vehicle's reference point; a factor that assumes the camera
+centre will be wrong by the mount's lever arm. The crate's convention is that
+the origin is the frame's own origin, and the lever arm is a property of the
+model that composes the frames (an `SE3` between the sensor and the body),
+not of the factor.
 
-$$
-\mathbf{q} = \mathbf{t}_i - \mathbf{t}_j,
-\qquad
-d = \lVert\mathbf{q}\rVert,
-\qquad
-r = d - \tilde{d}
-$$
+## 3. `BearingRangeFactor`
 
-$$
-\frac{\partial r}{\partial \delta\boldsymbol{\rho}_i} = \hat{\mathbf{q}}^\top R_i,
-\qquad
-\frac{\partial r}{\partial \delta\boldsymbol{\rho}_j} = -\hat{\mathbf{q}}^\top R_j,
-\qquad
-\frac{\partial r}{\partial \delta\boldsymbol{\theta}} = 0,
-\qquad
-\hat{\mathbf{q}} = \frac{\mathbf{q}}{d}
-$$
+A combined measurement: a distance *and* a direction to the same point, in
+one factor. The two pieces are not redundant — a range alone constrains the
+radial direction, a bearing alone constrains the angular direction, and
+together they pin the point. A factor that combined them incorrectly (for
+example, weighting them as one residual) would lose the distinction between
+"the range is wrong" and "the direction is wrong", which matters when one of
+the two is corrupted.
 
-The rotation columns are exactly zero: a range between origins carries no
-attitude information. Below $d < 10^{-12}$ the direction is undefined and the
-Jacobian is zeroed rather than divided by zero.
+## 4. One factor, any state
 
----
+`BearingFactor<G>` takes its state group as a type parameter: a plain `SE3`
+pose, or an `SE23` state that carries the velocity along with the pose. The
+`SE23` instantiation
+is what a visual-inertial or LiDAR-inertial graph uses, because the interval
+between two states already carries the velocity, and a bearing measured in the
+middle of that interval belongs to a state that has one.
 
-## `PosePointRangeFactor`
+The residual is written on the sphere — the perpendicular
+component of the difference between the measured and predicted directions —
+which is the same projector $I - \mathbf{b}\mathbf{b}^\top$ the visual bearing
+factors use. The crate keeps one convention for the two, which is why the
+module's comment insists on it.
 
-Distance from a pose to a landmark.
+## 5. Worked example
 
-**Blocks** $[T,\ \mathbf{p}]$ — residual 1, Jacobian $1\times9$.
+A UWB tag on a backpack: the range factor measures 12.4 m, the bearing factor
+measures the direction. The two are registered on the same graph, and their
+noise models say how much each is trusted — a UWB range is often good to
+10 cm and its *bearing* poor, because the antenna array's baseline is short.
+A graph that weights them equally throws away the information the hardware
+provides.
 
-$$
-r = \lVert\mathbf{t} - \mathbf{p}\rVert - \tilde{d},
-\qquad
-\frac{\partial r}{\partial\delta\boldsymbol{\rho}} = \hat{\mathbf{q}}^\top R,
-\qquad
-\frac{\partial r}{\partial\mathbf{p}} = -\hat{\mathbf{q}}^\top
-$$
+## 6. The catch
 
-One constraint per measurement, along the line of sight only — trilateration
-needs three non-collinear anchors.
+<div class="apx-warning">
+<span class="apx-title">Warning — a range factor is not a point-to-point factor</span>
 
----
+`PosePoseRangeFactor` measures the distance between two frames' origins and
+nothing else: it is invariant to how the two frames are rotated about each
+other, and it constrains exactly one scalar per pair. A graph built from
+range factors alone has a large null space, and the states it does constrain
+can be rotated freely about the baseline. Using range factors as if they were
+full relative-pose constraints is a silent way to under-constrain a graph.
 
-## `BearingFactor`
+</div>
 
-Direction-only observation, on the unit sphere $S^2$.
+<div class="apx-note">
+<span class="apx-title">Note — the same lever-arm trap as the visual factors</span>
 
-**Blocks** $[T,\ \mathbf{p}]$ — residual 2, Jacobian $2\times9$. Whitens
-internally.
+Both factors measure from the *frame's origin*, and a sensor is rarely at the
+frame's origin. The composition between the sensor frame and the body frame
+carries the offset, and a factor that is given the body frame where the
+sensor frame belongs will be wrong by exactly that offset, in a way that looks
+like a scale error.
 
-### Error
-
-$$
-\mathbf{p}_\text{body} = R^\top(\mathbf{p} - \mathbf{t}),
-\qquad
-\mathbf{n} = \frac{\mathbf{p}_\text{body}}{\lVert\mathbf{p}_\text{body}\rVert},
-\qquad
-\mathbf{r} = W\,E^\top\left(\mathbf{n} - \tilde{\mathbf{n}}\right) \in \mathbb{R}^2
-$$
-
-where $E \in \mathbb{R}^{3\times2}$ is an orthonormal basis for the tangent
-plane at $\tilde{\mathbf{n}}$. The projection matters: the raw difference
-$\mathbf{n} - \tilde{\mathbf{n}}$ is a 3-vector confined to a 2-manifold, so
-using it directly would give a structurally rank-2 residual with three rows —
-a singular information block.
-
-### Jacobian
-
-With $d = \lVert\mathbf{p}_\text{body}\rVert$ and the normalization derivative
-$\dfrac{\partial\mathbf{n}}{\partial\mathbf{p}_\text{body}} = \dfrac{1}{d}\left(I - \mathbf{n}\mathbf{n}^\top\right)$,
-
-$$
-\frac{\partial\mathbf{p}_\text{body}}{\partial\delta\boldsymbol{\rho}} = -I,
-\qquad
-\frac{\partial\mathbf{p}_\text{body}}{\partial\delta\boldsymbol{\theta}} = [\mathbf{p}_\text{body}]_\times,
-\qquad
-\frac{\partial\mathbf{p}_\text{body}}{\partial\mathbf{p}} = R^\top
-$$
-
-all pre-multiplied by $W E^\top \frac{1}{d}(I - \mathbf{n}\mathbf{n}^\top)$.
-
----
-
-## `BearingRangeFactor`
-
-Bearing and range together — a radar or sonar return, or a camera plus depth.
-
-**Blocks** $[T,\ \mathbf{p}]$ — residual 4, Jacobian $4\times9$. Takes an
-external `NoiseModel`.
-
-$$
-\mathbf{r} =
-\begin{bmatrix}
-\mathbf{b} - \tilde{\mathbf{b}} \\[2pt]
-d - \tilde{d}
-\end{bmatrix},
-\qquad
-\mathbf{b} = \frac{R^\top(\mathbf{p} - \mathbf{t})}{d},
-\qquad
-d = \lVert\mathbf{p} - \mathbf{t}\rVert
-$$
-
-The three bearing rows are the raw direction difference rather than a
-tangent-plane projection, so they are structurally rank 2 — give the bearing
-rows a common $\sigma$ and let the noise model handle it, or use
-`BearingFactor` plus `PosePointRangeFactor` if you need a full-rank
-information block.
-
-Bearing rows share `BearingFactor`'s derivatives; the range row is
-`PosePointRangeFactor`'s.
+</div>
