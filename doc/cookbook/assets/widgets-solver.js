@@ -60,7 +60,7 @@
           latex: "CombinedImuFactor — state and bias share the same rows" },
         { id: "v1", x: 170, y: 160, kind: "vis",  label: "bearing",
           nodes: ["s0", "s1", "l1"],
-          latex: "InverseDepthBearingSe23Factor — 2 rows per observation" },
+          latex: "InverseDepthBearingFactor — 2 rows per observation" },
         { id: "v2", x: 330, y: 160, kind: "vis",  label: "bearing",
           nodes: ["s1", "s2", "l2"],
           latex: "the same factor; the landmark is the only eliminable variable" },

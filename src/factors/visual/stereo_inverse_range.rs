@@ -1,7 +1,7 @@
 //! Pixel reprojection of an anchored inverse-range landmark into a **second
 //! camera** of a rig, with that camera's intrinsics as a variable.
 //!
-//! [`super::InverseDepthBearingSe23Factor`] measures a landmark in the camera
+//! [`super::InverseDepthBearingFactor`] measures a landmark in the camera
 //! that hosts it: one body-from-camera extrinsic serves both the host lift and
 //! the observer projection. A stereo rig breaks that symmetry. A landmark is
 //! anchored in camera 0 and seen by camera 1, so the two ends of the chain use
@@ -19,7 +19,7 @@
 //!
 //! Two factors share this chain:
 //!
-//! - [`InverseRangeProjectionSe23Factor`] — camera 1 at a **different**
+//! - [`InverseRangeProjectionFactor`] — camera 1 at a **different**
 //!   keyframe than the host: blocks `[host SE23, observer SE23, T_b0, T_b1, ρ,
 //!   K]`.
 //! - [`StereoInverseRangeFactor`] — camera 1 at the **same** instant: the body
@@ -33,14 +33,14 @@
 //! Jacobians follow the crate's right perturbation (`t ← t + R·δρ`,
 //! `R ← R·Exp(δθ)`). Summing the two extrinsic blocks of the moving-body factor
 //! with `T_b0 = T_b1` gives exactly the single-extrinsic block of
-//! [`super::InverseDepthSe23Factor`], which the tests pin.
+//! [`super::InverseDepthPlaneFactor`], which the tests pin.
 
 use std::marker::PhantomData;
 
 use apex_camera_models::CameraModel;
 use apex_manifolds::LieGroup;
+use apex_manifolds::capability::RigidPose;
 use apex_manifolds::se3::SE3;
-use apex_manifolds::se23::SE23;
 use faer::prelude::ReborrowMut;
 use nalgebra::{DMatrix, Matrix3, Vector2, Vector3};
 
@@ -52,9 +52,11 @@ use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEP
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_block_sizes;
 
-/// Geometric columns of [`InverseRangeProjectionSe23Factor`]: two `SE23`
-/// states (9 each), two `SE3` extrinsics (6 each) and `ρ`.
-const MOVING_COLUMNS: usize = 31;
+/// Geometric columns of [`InverseRangeProjectionFactor`] over pose group `G`:
+/// two states, two `SE3` extrinsics (6 each) and `ρ`.
+const fn moving_columns<G: RigidPose>() -> usize {
+    2 * G::DOF + 13
+}
 
 /// Geometric columns of [`StereoInverseRangeFactor`]: two extrinsics and `ρ`.
 const STEREO_COLUMNS: usize = 13;
@@ -199,12 +201,12 @@ fn extrinsic(params: &[f64]) -> (Matrix3<f64>, Vector3<f64>) {
 ///
 /// Whitens internally; register with a null noise model.
 #[derive(Debug, Clone)]
-pub struct InverseRangeProjectionSe23Factor<CAM> {
+pub struct InverseRangeProjectionFactor<G, CAM> {
     observation: Observation,
-    camera: PhantomData<CAM>,
+    marker: PhantomData<fn() -> (G, CAM)>,
 }
 
-impl<CAM> InverseRangeProjectionSe23Factor<CAM> {
+impl<G: RigidPose, CAM> InverseRangeProjectionFactor<G, CAM> {
     /// Create from the host's unit bearing, camera 1's pixel and the pixel
     /// noise.
     ///
@@ -219,13 +221,14 @@ impl<CAM> InverseRangeProjectionSe23Factor<CAM> {
     ) -> CoreResult<Self> {
         Ok(Self {
             observation: Observation::new(host_bearing, measurement, pixel_sigma)?,
-            camera: PhantomData,
+            marker: PhantomData,
         })
     }
 }
 
-impl<CAM> Factor for InverseRangeProjectionSe23Factor<CAM>
+impl<G, CAM> Factor for InverseRangeProjectionFactor<G, CAM>
 where
+    G: RigidPose + Send + Sync + 'static,
     CAM: CameraModel,
     for<'a> CAM: TryFrom<&'a [f64]>,
 {
@@ -248,37 +251,39 @@ where
             return;
         }
 
-        let host = SE23::from_param_slice(host);
-        let observer = SE23::from_param_slice(observer);
+        let host = G::from_param_slice(host);
+        let observer = G::from_param_slice(observer);
         let (r_b0, p_b0) = extrinsic(t_b0);
         let (r_b1, p_b1) = extrinsic(t_b1);
-        let r_k = host.rotation_matrix();
-        let r_i = observer.rotation_matrix();
+        let r_k = host.rotation();
+        let r_i = observer.rotation();
 
         let m = self.observation.host_bearing;
         let f = m / rho;
         let p_bk = r_b0 * f + p_b0;
-        let p_w = r_k * p_bk + host.translation();
-        let p_bi = r_i.transpose() * (p_w - observer.translation());
+        let p_w = r_k * p_bk + host.position();
+        let p_bi = r_i.transpose() * (p_w - observer.position());
         let point = r_b1.transpose() * (p_bi - p_b1);
 
         // Body of the host to camera 1 of the observer.
         let a = r_b1.transpose() * r_i.transpose() * r_k;
-        let mut d = DMatrix::<f64>::zeros(3, MOVING_COLUMNS);
+        let (observer_at, b0_at, b1_at) = (G::DOF, 2 * G::DOF, 2 * G::DOF + 6);
+        let mut d = DMatrix::<f64>::zeros(3, moving_columns::<G>());
         d.fixed_view_mut::<3, 3>(0, 0).copy_from(&a);
         d.fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&(-a * skew(&p_bk)));
-        d.fixed_view_mut::<3, 3>(0, 9)
+        d.fixed_view_mut::<3, 3>(0, observer_at)
             .copy_from(&(-r_b1.transpose()));
-        d.fixed_view_mut::<3, 3>(0, 12)
+        d.fixed_view_mut::<3, 3>(0, observer_at + 3)
             .copy_from(&(r_b1.transpose() * skew(&p_bi)));
-        d.fixed_view_mut::<3, 3>(0, 18).copy_from(&(a * r_b0));
-        d.fixed_view_mut::<3, 3>(0, 21)
+        d.fixed_view_mut::<3, 3>(0, b0_at).copy_from(&(a * r_b0));
+        d.fixed_view_mut::<3, 3>(0, b0_at + 3)
             .copy_from(&(-a * r_b0 * skew(&f)));
-        d.fixed_view_mut::<3, 3>(0, 24)
+        d.fixed_view_mut::<3, 3>(0, b1_at)
             .copy_from(&(-Matrix3::identity()));
-        d.fixed_view_mut::<3, 3>(0, 27).copy_from(&skew(&point));
-        d.fixed_view_mut::<3, 1>(0, 30)
+        d.fixed_view_mut::<3, 3>(0, b1_at + 3)
+            .copy_from(&skew(&point));
+        d.fixed_view_mut::<3, 1>(0, b1_at + 6)
             .copy_from(&(a * r_b0 * (-m / (rho * rho))));
 
         self.observation
@@ -290,21 +295,21 @@ where
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (2, MOVING_COLUMNS + CAM::INTRINSIC_DIM)
+        (2, moving_columns::<G>() + CAM::INTRINSIC_DIM)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
         expect_block_sizes(
             variables,
             &[
-                SE23::REP_SIZE,
-                SE23::REP_SIZE,
+                G::REP_SIZE,
+                G::REP_SIZE,
                 SE3::REP_SIZE,
                 SE3::REP_SIZE,
                 1,
                 CAM::INTRINSIC_DIM,
             ],
-            "InverseRangeProjectionSe23Factor expects [SE23 host, SE23 observer, SE3 T_b0, SE3 T_b1, Rn(1) rho, Rn(N) intrinsics]",
+            "InverseRangeProjectionFactor expects [SE23 host, SE23 observer, SE3 T_b0, SE3 T_b1, Rn(1) rho, Rn(N) intrinsics]",
         )
     }
 }
@@ -335,7 +340,7 @@ impl<CAM> StereoInverseRangeFactor<CAM> {
     ///
     /// # Errors
     ///
-    /// As [`InverseRangeProjectionSe23Factor::new`].
+    /// As [`InverseRangeProjectionFactor::new`].
     pub fn new(
         host_bearing: Vector3<f64>,
         measurement: Vector2<f64>,
@@ -415,7 +420,7 @@ mod tests {
     use apex_camera_models::{DistortionModel, KannalaBrandtCamera, PinholeParams, RadTanCamera};
     use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
-    use apex_manifolds::se23::SE23Tangent;
+    use apex_manifolds::se23::{SE23, SE23Tangent};
     use nalgebra::{DVector, UnitQuaternion};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -608,11 +613,11 @@ mod tests {
         let camera = kb()?;
         let (blocks, bearing, pixel) = moving_blocks(&camera, Vector3::new(0.8, 0.3, -1.5))?;
         let factor =
-            InverseRangeProjectionSe23Factor::<KannalaBrandtCamera>::new(bearing, pixel, 1.0)?;
+            InverseRangeProjectionFactor::<SE23, KannalaBrandtCamera>::new(bearing, pixel, 1.0)?;
         let (residual, _) = evaluate(&factor, &blocks);
         assert!(residual.iter().all(|r| r.abs() < 1e-8), "{residual:?}");
         // Off the truth, so the Jacobian is not checked at a degenerate point.
-        let factor = InverseRangeProjectionSe23Factor::<KannalaBrandtCamera>::new(
+        let factor = InverseRangeProjectionFactor::<SE23, KannalaBrandtCamera>::new(
             bearing,
             pixel + Vector2::new(1.5, -2.0),
             0.7,
@@ -624,7 +629,7 @@ mod tests {
     fn moving_factor_jacobian_matches_radtan() -> TestResult {
         let camera = radtan()?;
         let (blocks, bearing, pixel) = moving_blocks(&camera, Vector3::new(0.3, 0.2, -1.8))?;
-        let factor = InverseRangeProjectionSe23Factor::<RadTanCamera>::new(bearing, pixel, 1.0)?;
+        let factor = InverseRangeProjectionFactor::<SE23, RadTanCamera>::new(bearing, pixel, 1.0)?;
         check_jacobian(&factor, &blocks)
     }
 
@@ -658,7 +663,7 @@ mod tests {
         blocks[3] = blocks[2].clone();
         let bearing = Vector3::new(0.1, -0.2, 1.0);
         let factor =
-            InverseRangeProjectionSe23Factor::<KannalaBrandtCamera>::new(bearing, pixel, 1.0)?;
+            InverseRangeProjectionFactor::<SE23, KannalaBrandtCamera>::new(bearing, pixel, 1.0)?;
         let (_, jac) = evaluate(&factor, &blocks);
         let summed = jac.columns(18, 6) + jac.columns(24, 6);
         // Numerically perturb the shared extrinsic, both blocks at once.
@@ -688,7 +693,7 @@ mod tests {
         let (mut blocks, bearing, pixel) = moving_blocks(&camera, Vector3::new(0.8, 0.3, -1.5))?;
         blocks[4] = vec![-0.1];
         let factor =
-            InverseRangeProjectionSe23Factor::<KannalaBrandtCamera>::new(bearing, pixel, 1.0)?;
+            InverseRangeProjectionFactor::<SE23, KannalaBrandtCamera>::new(bearing, pixel, 1.0)?;
         let (residual, jac) = evaluate(&factor, &blocks);
         assert_eq!(residual, vec![CHEIRALITY_BASE_PENALTY; 2]);
         assert!(jac.iter().all(|v| *v == 0.0));

@@ -44,8 +44,8 @@ use apex_solver::factors::visual::{
     OneSidedDepthFactor,
 };
 use apex_solver::factors::visual::{IntensityImage, PhotometricPatchFactor};
-use apex_solver::factors::visual::{InverseDepthBearingSe23Factor, InverseDepthSe23Factor};
-use apex_solver::factors::visual::{InverseRangeProjectionSe23Factor, StereoInverseRangeFactor};
+use apex_solver::factors::visual::{InverseDepthBearingFactor, InverseDepthPlaneFactor};
+use apex_solver::factors::visual::{InverseRangeProjectionFactor, StereoInverseRangeFactor};
 use apex_solver::factors::visual::{PhotometricTwoViewFactor, PlanePoint, ReferenceView};
 use nalgebra::{DVector, UnitQuaternion, Vector2, Vector3, Vector4};
 
@@ -853,7 +853,7 @@ fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
 /// monocular graph cannot otherwise see); keyframe 2 and every inverse depth
 /// start perturbed and must be recovered.
 #[test]
-fn inverse_depth_se23_recovers_a_pose_and_its_depths() {
+fn inverse_depth_plane_recovers_a_pose_and_its_depths() {
     let states: Vec<SE23> = [0.0, 0.6, 1.25]
         .iter()
         .enumerate()
@@ -932,7 +932,7 @@ fn inverse_depth_se23_recovers_a_pose_and_its_depths() {
             let measurement = Vector2::new(point.x / point.z, point.y / point.z);
             problem.add_residual_block_with_noise(
                 &[state_keys[0], state_keys[observer], extrinsic_key, key],
-                Box::new(InverseDepthSe23Factor::new(bearing, measurement)),
+                Box::new(InverseDepthPlaneFactor::<SE23>::new(bearing, measurement)),
                 None,
                 noise.clone(),
             );
@@ -972,7 +972,7 @@ fn inverse_depth_se23_recovers_a_pose_and_its_depths() {
 ///
 /// Here neither happens: the residual is an angle everywhere.
 #[test]
-fn inverse_depth_bearing_se23_recovers_depths_across_a_fisheye_field() {
+fn inverse_depth_bearing_recovers_depths_across_a_fisheye_field() {
     let states: Vec<SE23> = [0.0, 0.6, 1.25]
         .iter()
         .enumerate()
@@ -1065,7 +1065,7 @@ fn inverse_depth_bearing_se23_recovers_depths_across_a_fisheye_field() {
             if point.z < 0.18 * point.norm() {
                 steep += 1;
             }
-            let factor = InverseDepthBearingSe23Factor::new_isotropic(bearing, point, sigma)
+            let factor = InverseDepthBearingFactor::<SE23>::new_isotropic(bearing, point, sigma)
                 .unwrap_or_else(|e| panic!("{e}"));
             problem.add_residual_block_with_noise(
                 &[state_keys[0], state_keys[observer], extrinsic_key, key],
@@ -2376,7 +2376,7 @@ fn time_offset_projection_recovers_the_clock_offset() {
 /// fails here rather than going unnoticed.
 /// A stereo rig: landmarks hosted in camera 0 at keyframe 0, seen by camera
 /// 1 at the same instant ([`StereoInverseRangeFactor`]) and at keyframe 1
-/// ([`InverseRangeProjectionSe23Factor`]). The stereo pixels alone fix every
+/// ([`InverseRangeProjectionFactor`]). The stereo pixels alone fix every
 /// inverse range from the 11 cm baseline — the body state cancels — and the
 /// later views then recover keyframe 1, which starts 8 cm and 3° off.
 #[test]
@@ -2472,7 +2472,7 @@ fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
         .unwrap_or_else(|e| panic!("{e}"));
         problem.add_residual_block(&[b0_key, b1_key, key, k_key], Box::new(stereo), None);
 
-        let moving = InverseRangeProjectionSe23Factor::<KannalaBrandtCamera>::new(
+        let moving = InverseRangeProjectionFactor::<SE23, KannalaBrandtCamera>::new(
             bearing,
             pixel(&observer, &t_b1, world),
             0.5,

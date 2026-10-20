@@ -18,7 +18,7 @@ changes the geometry of the residual:
 |---|---|---|
 | `HomogeneousPointFactor` | a 3-D point | unconstrained scenes; the classic formulation |
 | `InverseDepthFactor` | $\rho = 1/z$ along the optical axis | points in front of the camera, where $z$ is positive and $\rho$ varies smoothly |
-| `InverseDepthSe23Factor`, `InverseDepthBearingSe23Factor` | $\rho$ in an `SE23` frame | visual-inertial graphs, where the point's frame follows the body |
+| `InverseDepthPlaneFactor`, `InverseDepthBearingFactor` | $\rho$ in an `SE23` frame | visual-inertial graphs, where the point's frame follows the body |
 
 </div>
 
@@ -35,8 +35,8 @@ Three representations coexist, and the crate is explicit about which is which:
 - **pixels** — `ProjectionFactor`, `SmartProjectionFactor`,
   `DepthFactor`, `HomogeneousPointFactor`, the stereo pair; they take a
   calibration matrix $K$ and work in image space;
-- **unit bearings** — `InverseDepthBearingSe23Factor`,
-  `InverseRangeProjectionSe23Factor`, `StereoInverseRangeFactor`; the
+- **unit bearings** — `InverseDepthBearingFactor`,
+  `InverseRangeProjectionFactor`, `StereoInverseRangeFactor`; the
   measurement is a direction, and the residual lives on the sphere;
 - **relative pose** — `EssentialMatrixFactor` and
   `EssentialMatrixConstraint`, which take the epipolar constraint itself as
@@ -56,12 +56,12 @@ Three representations coexist, and the crate is explicit about which is which:
 | `HomogeneousPointFactor` | a homogeneous 3-D point, with the projection and the depth folded together |
 | `DepthFactor` | a point's depth along the ray, against a measured depth |
 | `InverseDepthFactor` | a point's inverse depth, against an inverse-depth measurement |
-| `InverseDepthSe23Factor` | a point in an `SE23` (body-anchored) frame, with a bearing measurement |
-| `InverseDepthBearingSe23Factor` | the same, with the residual on the bearing's tangent plane |
+| `InverseDepthPlaneFactor` | a point in an `SE23` (body-anchored) frame, with a bearing measurement |
+| `InverseDepthBearingFactor` | the same, with the residual on the bearing's tangent plane |
 | `EssentialMatrixFactor` | the epipolar constraint between two views, as a factor over the two poses |
 | `EssentialMatrixConstraint` | the same constraint, packaged for a pose-graph edge |
 | `StereoFactor` (+ `StereoCalibration`) | a stereo pair's relative pose, with the calibration as part of the state |
-| `InverseRangeProjectionSe23Factor` | a point seen by camera 1, with the rig's baseline in the chain |
+| `InverseRangeProjectionFactor` | a point seen by camera 1, with the rig's baseline in the chain |
 | `StereoInverseRangeFactor` | a point seen by both cameras of a rig, with the body state cancelling |
 | `ExtrinsicProjectionFactor` | the camera-to-body extrinsic, calibrated by the projections it appears in |
 | `TimeOffsetProjectionFactor` | a temporal offset between camera and IMU, calibrated by the same projections |
@@ -71,7 +71,7 @@ Three representations coexist, and the crate is explicit about which is which:
 ## 4. What the ecosystem uses, and why
 
 The VIO backend builds its graph from the bearing-based family
-(`InverseDepthBearingSe23Factor`, `InverseRangeProjectionSe23Factor`,
+(`InverseDepthBearingFactor`, `InverseRangeProjectionFactor`,
 `StereoInverseRangeFactor`) and the stereo calibration factors; the LIVO
 stack adds `ExtrinsicProjectionFactor` when the extrinsic is estimated online.
 The camera-agnostic choice — bearings instead of pixels — is what lets the same

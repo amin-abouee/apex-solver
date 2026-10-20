@@ -50,9 +50,11 @@
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, Vector2, Vector3};
 
+use std::marker::PhantomData;
+
 use apex_manifolds::LieGroup;
+use apex_manifolds::capability::RigidPose;
 use apex_manifolds::se3::SE3;
-use apex_manifolds::se23::SE23;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
@@ -63,18 +65,24 @@ use crate::factors::common::validate::expect_block_sizes;
 /// Depth below which the observer projection is treated as degenerate \[m\].
 const MIN_DEPTH: f64 = 1.0e-3;
 
-/// Columns of the Jacobian: 9 + 9 + 6 + 1.
-pub(super) const JACOBIAN_COLUMNS: usize = 25;
+/// Widest Jacobian, for the largest rigid pose (`SE23`): 9 + 9 + 6 + 1.
+pub(super) const MAX_COLUMNS: usize = 25;
+
+/// Columns of the Jacobian for pose group `G`: two states, `T_bc`, `ρ`.
+pub(super) const fn columns<G: RigidPose>() -> usize {
+    2 * G::DOF + 7
+}
 
 /// Reprojection of an inverse-depth landmark anchored in a host keyframe.
-pub struct InverseDepthSe23Factor {
+pub struct InverseDepthPlaneFactor<G: RigidPose> {
     /// Bearing of the feature in the host camera, normalized so `z = 1`.
     host_bearing: Vector3<f64>,
     /// Measured normalized coordinates in the observer camera.
     measurement: Vector2<f64>,
+    group: PhantomData<fn() -> G>,
 }
 
-impl InverseDepthSe23Factor {
+impl<G: RigidPose> InverseDepthPlaneFactor<G> {
     /// Create the factor from normalized-plane observations.
     ///
     /// `host_bearing` is rescaled to `z = 1`; a bearing whose `z` is not
@@ -89,6 +97,7 @@ impl InverseDepthSe23Factor {
         Self {
             host_bearing,
             measurement,
+            group: PhantomData,
         }
     }
 
@@ -103,19 +112,21 @@ impl InverseDepthSe23Factor {
     }
 }
 
-/// Write a `2 x 25` Jacobian into the caller's buffer.
+/// Write the first `columns` columns of a `2 x 25` Jacobian into the caller's
+/// buffer.
 pub(super) fn write_jacobian(
-    source: &SMatrix<f64, 2, JACOBIAN_COLUMNS>,
+    source: &SMatrix<f64, 2, MAX_COLUMNS>,
+    columns: usize,
     jac: &mut faer::mat::MatMut<'_, f64>,
 ) {
     for row in 0..2 {
-        for col in 0..JACOBIAN_COLUMNS {
+        for col in 0..columns {
             *jac.rb_mut().get_mut(row, col) = source[(row, col)];
         }
     }
 }
 
-impl Factor for InverseDepthSe23Factor {
+impl<G: RigidPose + Send + Sync + 'static> Factor for InverseDepthPlaneFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
@@ -126,15 +137,15 @@ impl Factor for InverseDepthSe23Factor {
             return;
         };
 
-        let host = SE23::from_param_slice(host_params);
-        let observer = SE23::from_param_slice(observer_params);
+        let host = G::from_param_slice(host_params);
+        let observer = G::from_param_slice(observer_params);
         let extrinsic = SE3::from_param_slice(extrinsic_params);
         let rho = rho_params[0];
 
         let r_bc = extrinsic.rotation_so3().rotation_matrix();
         let p_bc = extrinsic.translation();
-        let r_k = host.rotation_matrix();
-        let r_i = observer.rotation_matrix();
+        let r_k = host.rotation();
+        let r_i = observer.rotation();
 
         // An inverse depth at or behind the anchor is not a point at all, so it
         // gets a flat penalty and a **zero** Jacobian: leaving a gradient here
@@ -143,15 +154,19 @@ impl Factor for InverseDepthSe23Factor {
             residual[0] = CHEIRALITY_BASE_PENALTY;
             residual[1] = CHEIRALITY_BASE_PENALTY;
             if let Some(mut jac) = jacobian {
-                write_jacobian(&SMatrix::<f64, 2, JACOBIAN_COLUMNS>::zeros(), &mut jac);
+                write_jacobian(
+                    &SMatrix::<f64, 2, MAX_COLUMNS>::zeros(),
+                    columns::<G>(),
+                    &mut jac,
+                );
             }
             return;
         }
 
         let f = self.host_bearing / rho;
         let p_bk = r_bc * f + p_bc;
-        let p_w = r_k * p_bk + host.translation();
-        let p_bi = r_i.transpose() * (p_w - observer.translation());
+        let p_w = r_k * p_bk + host.position();
+        let p_bi = r_i.transpose() * (p_w - observer.position());
         let point = r_bc.transpose() * (p_bi - p_bc);
 
         // `A` is the host-camera to observer-camera rotation chain, and appears
@@ -177,14 +192,14 @@ impl Factor for InverseDepthSe23Factor {
                 // Gradient of the penalty through the observer-frame depth, so
                 // the solve is pushed back towards a valid configuration rather
                 // than sitting on a flat plateau.
-                let d_point = point_jacobians(&chain);
-                let mut full = SMatrix::<f64, 2, JACOBIAN_COLUMNS>::zeros();
-                for col in 0..JACOBIAN_COLUMNS {
+                let d_point = point_jacobians(&chain, G::DOF);
+                let mut full = SMatrix::<f64, 2, MAX_COLUMNS>::zeros();
+                for col in 0..MAX_COLUMNS {
                     let value = -CHEIRALITY_DEPTH_SCALE * d_point[(2, col)];
                     full[(0, col)] = value;
                     full[(1, col)] = value;
                 }
-                write_jacobian(&full, &mut jac);
+                write_jacobian(&full, columns::<G>(), &mut jac);
             }
             return;
         }
@@ -204,8 +219,8 @@ impl Factor for InverseDepthSe23Factor {
         d_projection[(1, 1)] = inverse_z;
         d_projection[(1, 2)] = -point.y * inverse_z * inverse_z;
 
-        let d_point = point_jacobians(&chain);
-        write_jacobian(&(d_projection * d_point), &mut jac);
+        let d_point = point_jacobians(&chain, G::DOF);
+        write_jacobian(&(d_projection * d_point), columns::<G>(), &mut jac);
     }
 
     fn residual_dim(&self) -> usize {
@@ -213,14 +228,14 @@ impl Factor for InverseDepthSe23Factor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (2, JACOBIAN_COLUMNS)
+        (2, columns::<G>())
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
         expect_block_sizes(
             variables,
-            &[SE23::REP_SIZE, SE23::REP_SIZE, SE3::REP_SIZE, 1],
-            "InverseDepthSe23Factor expects [SE23 host, SE23 observer, SE3 T_bc, Rn(1) rho]",
+            &[G::REP_SIZE, G::REP_SIZE, SE3::REP_SIZE, 1],
+            "InverseDepthPlaneFactor expects [host pose, observer pose, SE3 T_bc, Rn(1) rho]",
         )
     }
 }
@@ -242,8 +257,8 @@ pub(super) struct Chain {
     pub(super) f: Vector3<f64>,
     /// Anchoring bearing.
     ///
-    /// Scaled to `z = 1` by [`InverseDepthSe23Factor`] and left as a **unit**
-    /// vector by [`super::InverseDepthBearingSe23Factor`]. `point_jacobians`
+    /// Scaled to `z = 1` by [`InverseDepthPlaneFactor`] and left as a **unit**
+    /// vector by [`super::InverseDepthBearingFactor`]. `point_jacobians`
     /// works for either: `f = m/ρ` gives `∂f/∂ρ = −m/ρ²` whatever `m`'s length,
     /// and the scale is what makes `ρ` an inverse depth in the first case and
     /// an inverse range in the second.
@@ -252,16 +267,19 @@ pub(super) struct Chain {
     pub(super) rho: f64,
 }
 
-/// `∂P/∂(host, observer, T_bc, rho)`, a `3 x 25` block.
+/// `∂P/∂(host, observer, T_bc, rho)`, a `3 x 25` buffer whose first
+/// `2·dof + 7` columns are used.
 ///
 /// Every entry is derived under the crate's right perturbation, where a state's
 /// translation moves as `t ← t + R·δρ` and its rotation as `R ← R·Exp(δθ)`.
-/// The velocity columns 6..9 and 15..18 are **exactly zero**: a reprojection
-/// measures where a point appears, which says nothing about how fast the body
-/// carrying the camera is moving. Velocity is observable here only through the
-/// IMU factors that share these states.
-pub(super) fn point_jacobians(chain: &Chain) -> SMatrix<f64, 3, JACOBIAN_COLUMNS> {
-    let mut d = SMatrix::<f64, 3, JACOBIAN_COLUMNS>::zeros();
+/// Tangent axes of a pose past the first six (the `SE23` velocity) are
+/// **exactly zero**: a reprojection measures where a point appears, which says
+/// nothing about how fast the body carrying the camera is moving. Velocity is
+/// observable here only through the IMU factors that share these states.
+pub(super) fn point_jacobians(chain: &Chain, dof: usize) -> SMatrix<f64, 3, MAX_COLUMNS> {
+    let mut d = SMatrix::<f64, 3, MAX_COLUMNS>::zeros();
+    let observer = dof;
+    let extrinsic = 2 * dof;
 
     // Host: ∂P/∂δρ_k = A, ∂P/∂δθ_k = −A·[p_bk]ₓ.
     d.fixed_view_mut::<3, 3>(0, 0).copy_from(&chain.a);
@@ -269,20 +287,20 @@ pub(super) fn point_jacobians(chain: &Chain) -> SMatrix<f64, 3, JACOBIAN_COLUMNS
         .copy_from(&(-chain.a * skew(&chain.p_bk)));
 
     // Observer: ∂P/∂δρ_i = −R_bcᵀ, ∂P/∂δθ_i = +R_bcᵀ·[p_bi]ₓ.
-    d.fixed_view_mut::<3, 3>(0, 9)
+    d.fixed_view_mut::<3, 3>(0, observer)
         .copy_from(&(-chain.r_bc.transpose()));
-    d.fixed_view_mut::<3, 3>(0, 12)
+    d.fixed_view_mut::<3, 3>(0, observer + 3)
         .copy_from(&(chain.r_bc.transpose() * skew(&chain.p_bi)));
 
     // T_bc, summed over the host lift and the observer projection.
-    d.fixed_view_mut::<3, 3>(0, 18)
+    d.fixed_view_mut::<3, 3>(0, extrinsic)
         .copy_from(&(chain.a * chain.r_bc - Matrix3::identity()));
-    d.fixed_view_mut::<3, 3>(0, 21)
+    d.fixed_view_mut::<3, 3>(0, extrinsic + 3)
         .copy_from(&(-chain.a * chain.r_bc * skew(&chain.f) + skew(&chain.point)));
 
     // rho: f = m/ρ so ∂f/∂ρ = −m/ρ².
     let d_rho = chain.a * chain.r_bc * (-chain.host_bearing / (chain.rho * chain.rho));
-    d.fixed_view_mut::<3, 1>(0, 24).copy_from(&d_rho);
+    d.fixed_view_mut::<3, 1>(0, extrinsic + 6).copy_from(&d_rho);
 
     d
 }
@@ -292,7 +310,7 @@ mod tests {
     use super::*;
     use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
-    use apex_manifolds::se23::SE23Tangent;
+    use apex_manifolds::se23::{SE23, SE23Tangent};
     use nalgebra::{DMatrix, UnitQuaternion};
 
     /// Host state, observer state, `T_bc`, and `rho`, as parameter vectors.
@@ -331,7 +349,7 @@ mod tests {
         }
     }
 
-    fn residual_of(factor: &InverseDepthSe23Factor, s: &Setup) -> Vec<f64> {
+    fn residual_of(factor: &InverseDepthPlaneFactor<SE23>, s: &Setup) -> Vec<f64> {
         let mut residual = vec![0.0f64; 2];
         factor.linearize(
             &[&s.host, &s.observer, &s.extrinsic, &s.rho],
@@ -341,7 +359,7 @@ mod tests {
         residual
     }
 
-    fn jacobian_of(factor: &InverseDepthSe23Factor, s: &Setup) -> DMatrix<f64> {
+    fn jacobian_of(factor: &InverseDepthPlaneFactor<SE23>, s: &Setup) -> DMatrix<f64> {
         let (rows, cols) = factor.jacobian_shape();
         let mut residual = vec![0.0f64; rows];
         let mut buf = vec![0.0f64; rows * cols];
@@ -356,11 +374,11 @@ mod tests {
 
     /// Build the factor so that the residual is exactly zero at `s`, then offset
     /// the measurement so the Jacobian is exercised away from the minimum.
-    fn factor_at(s: &Setup, offset: Vector2<f64>) -> InverseDepthSe23Factor {
+    fn factor_at(s: &Setup, offset: Vector2<f64>) -> InverseDepthPlaneFactor<SE23> {
         let host_bearing = Vector3::new(0.12, -0.05, 1.0);
-        let zeroed = InverseDepthSe23Factor::new(host_bearing, Vector2::zeros());
+        let zeroed = InverseDepthPlaneFactor::<SE23>::new(host_bearing, Vector2::zeros());
         let r = residual_of(&zeroed, s);
-        InverseDepthSe23Factor::new(host_bearing, Vector2::new(r[0], r[1]) + offset)
+        InverseDepthPlaneFactor::<SE23>::new(host_bearing, Vector2::new(r[0], r[1]) + offset)
     }
 
     #[test]
@@ -548,7 +566,8 @@ mod tests {
     fn a_non_positive_rho_gets_a_flat_penalty_and_no_gradient() {
         let mut s = setup(0.5);
         s.rho = vec![-0.2];
-        let factor = InverseDepthSe23Factor::new(Vector3::new(0.1, 0.0, 1.0), Vector2::zeros());
+        let factor =
+            InverseDepthPlaneFactor::<SE23>::new(Vector3::new(0.1, 0.0, 1.0), Vector2::zeros());
 
         let r = residual_of(&factor, &s);
         assert!((r[0] - CHEIRALITY_BASE_PENALTY).abs() < 1e-12);
@@ -577,7 +596,8 @@ mod tests {
             Vector3::zeros(),
             UnitQuaternion::identity(),
         );
-        let factor = InverseDepthSe23Factor::new(Vector3::new(0.05, 0.02, 1.0), Vector2::zeros());
+        let factor =
+            InverseDepthPlaneFactor::<SE23>::new(Vector3::new(0.05, 0.02, 1.0), Vector2::zeros());
 
         let r = residual_of(&factor, &s);
         assert!(

@@ -28,6 +28,42 @@ impl ActsOnPoints3 for SE3 {}
 impl ActsOnPoints3 for SE23 {}
 impl ActsOnPoints3 for Sim3 {}
 
+/// A rigid pose whose tangent starts `[δρ, δθ, …]` under right perturbation:
+/// the translation moves as `t ← t + R·δρ`, the rotation as `R ← R·Exp(δθ)`,
+/// and every later tangent axis leaves the point action untouched.
+///
+/// That is the layout closed-form reprojection Jacobians are written against;
+/// `Sim3` (a scale axis scales the action) and `SO3` (no translation) do not
+/// fit it.
+pub trait RigidPose: ActsOnPoints3 {
+    /// Floats in the parameter block.
+    const REP_SIZE: usize;
+    /// The rotation matrix `R`.
+    fn rotation(&self) -> Matrix3<f64>;
+    /// The position `t`.
+    fn position(&self) -> Vector3<f64>;
+}
+
+impl RigidPose for SE3 {
+    const REP_SIZE: usize = SE3::REP_SIZE;
+    fn rotation(&self) -> Matrix3<f64> {
+        self.rotation_so3().rotation_matrix()
+    }
+    fn position(&self) -> Vector3<f64> {
+        self.translation()
+    }
+}
+
+impl RigidPose for SE23 {
+    const REP_SIZE: usize = SE23::REP_SIZE;
+    fn rotation(&self) -> Matrix3<f64> {
+        self.rotation_matrix()
+    }
+    fn position(&self) -> Vector3<f64> {
+        self.translation()
+    }
+}
+
 /// A group whose tangent carries a frame velocity block: `SE23` and `SGal3`.
 ///
 /// Under the right perturbation the velocity moves as `v ← v + R·δν`, which is
@@ -112,6 +148,32 @@ mod tests {
             let back = g.inverse(None).act(&moved, None, None);
             (back - x).norm() < 1e-9
         })
+    }
+
+    fn rigid_layout_holds<G: RigidPose>() -> bool {
+        (0..16).all(|_| {
+            let g = G::random();
+            let p = Vector3::new(0.4, -0.9, 1.7);
+            let mut jacobian = g.zero_jacobian_for();
+            let _ = g.act(&p, Some(&mut jacobian), None);
+            let r = g.rotation();
+            let skew = crate::util::skew(&p);
+            let head = (0..3).all(|row| {
+                (0..3).all(|col| {
+                    (jacobian[(row, col)] - r[(row, col)]).abs() < 1e-12
+                        && (jacobian[(row, 3 + col)] + (r * skew)[(row, col)]).abs() < 1e-12
+                })
+            });
+            let tail = (0..3).all(|row| (6..G::DOF).all(|col| jacobian[(row, col)] == 0.0));
+            let acts = (g.act(&p, None, None) - (r * p + g.position())).norm() < 1e-12;
+            head && tail && acts
+        })
+    }
+
+    #[test]
+    fn rigid_poses_share_the_tangent_layout() {
+        assert!(rigid_layout_holds::<SE3>());
+        assert!(rigid_layout_holds::<SE23>());
     }
 
     #[test]

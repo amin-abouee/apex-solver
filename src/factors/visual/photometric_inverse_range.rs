@@ -68,14 +68,15 @@
 //!
 //! The factor whitens internally; register it with `NoiseModel::null()`.
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use faer::prelude::ReborrowMut;
 use nalgebra::{SMatrix, SVector, Vector3};
 
 use apex_manifolds::LieGroup;
+use apex_manifolds::capability::RigidPose;
 use apex_manifolds::se3::SE3;
-use apex_manifolds::se23::SE23;
 use apex_manifolds::util::skew;
 
 use crate::core::variable::ManifoldVariable;
@@ -85,9 +86,14 @@ use crate::factors::common::validate::expect_block_sizes;
 
 /// Residuals per point: the 8-pixel pattern.
 pub const PATTERN_PIXELS: usize = 8;
-/// Columns of the Jacobian: two states, the extrinsic, `ρ`, two affine pairs
-/// and the scale.
-pub const JACOBIAN_COLUMNS: usize = 9 + 9 + 6 + 1 + 2 + 2 + 1;
+/// Widest Jacobian (for `SE23`): two states, the extrinsic, `ρ`, two affine
+/// pairs and the scale.
+pub const MAX_COLUMNS: usize = 9 + 9 + 6 + 1 + 2 + 2 + 1;
+
+/// Columns of the Jacobian for pose group `G`.
+pub const fn jacobian_columns<G: RigidPose>() -> usize {
+    2 * G::DOF + 12
+}
 
 /// A target image with gradients, shared by every factor that looks at it.
 ///
@@ -193,7 +199,7 @@ impl Default for PhotometricWeights {
 }
 
 /// The photometric residual of one point in one target frame.
-pub struct PhotometricInverseRangeSe23Factor {
+pub struct PhotometricInverseRangeFactor<G: RigidPose> {
     point: PhotometricPoint,
     /// Pinhole `[fx, fy, cx, cy]`.
     k: [f64; 4],
@@ -201,14 +207,15 @@ pub struct PhotometricInverseRangeSe23Factor {
     bearing_z: f64,
     target: Arc<GradientImage>,
     weights: PhotometricWeights,
+    group: PhantomData<fn() -> G>,
 }
 
 /// The variables the factor is evaluated at.
 #[derive(Clone, Copy)]
-struct State<'a> {
+struct State<'a, G> {
     scale: f64,
-    host: &'a SE23,
-    target: &'a SE23,
+    host: &'a G,
+    target: &'a G,
     extrinsic: &'a SE3,
     rho: f64,
     aff_h: [f64; 2],
@@ -220,10 +227,10 @@ struct Evaluation {
     residual: [f64; PATTERN_PIXELS],
     /// Raw (unscaled) robust energy `Σ wₖ² hw r² (2 − hw)`.
     energy: f64,
-    jacobian: Option<SMatrix<f64, PATTERN_PIXELS, JACOBIAN_COLUMNS>>,
+    jacobian: Option<SMatrix<f64, PATTERN_PIXELS, MAX_COLUMNS>>,
 }
 
-impl PhotometricInverseRangeSe23Factor {
+impl<G: RigidPose> PhotometricInverseRangeFactor<G> {
     /// The factor for `point` seen in `target`.
     ///
     /// # Errors
@@ -238,7 +245,7 @@ impl PhotometricInverseRangeSe23Factor {
         let positive = |x: f64| x.is_finite() && x > 0.0;
         if !positive(k[0]) || !positive(k[1]) || !k.iter().all(|v| v.is_finite()) {
             return Err(CoreError::InvalidInput(format!(
-                "PhotometricInverseRangeSe23Factor: invalid intrinsics {k:?}"
+                "PhotometricInverseRangeFactor: invalid intrinsics {k:?}"
             )));
         }
         if !positive(weights.huber)
@@ -247,7 +254,7 @@ impl PhotometricInverseRangeSe23Factor {
             || !positive(weights.exposure_ratio)
         {
             return Err(CoreError::InvalidInput(format!(
-                "PhotometricInverseRangeSe23Factor: invalid weights {weights:?}"
+                "PhotometricInverseRangeFactor: invalid weights {weights:?}"
             )));
         }
         let ray = Vector3::new(
@@ -261,6 +268,7 @@ impl PhotometricInverseRangeSe23Factor {
             k,
             target,
             weights,
+            group: PhantomData,
         })
     }
 
@@ -273,8 +281,8 @@ impl PhotometricInverseRangeSe23Factor {
             return None;
         };
         let (host, target, extrinsic) = (
-            SE23::from_param_slice(host),
-            SE23::from_param_slice(target),
+            G::from_param_slice(host),
+            G::from_param_slice(target),
             SE3::from_param_slice(extrinsic),
         );
         self.evaluate(
@@ -292,7 +300,7 @@ impl PhotometricInverseRangeSe23Factor {
         .map(|e| e.energy)
     }
 
-    fn evaluate(&self, state: &State<'_>, with_jacobian: bool) -> Option<Evaluation> {
+    fn evaluate(&self, state: &State<'_, G>, with_jacobian: bool) -> Option<Evaluation> {
         let State {
             scale,
             host,
@@ -310,10 +318,10 @@ impl PhotometricInverseRangeSe23Factor {
         let inv_scale = 1.0 / scale;
         let (t_e, r_h, p_h) = (
             extrinsic.translation() * inv_scale,
-            host.rotation_matrix(),
-            host.translation(),
+            host.rotation(),
+            host.position(),
         );
-        let (r_t, p_t) = (target.rotation_matrix(), target.translation());
+        let (r_t, p_t) = (target.rotation(), target.position());
         let m = r_e.transpose() * r_t.transpose();
         let r_rel = m * r_h * r_e;
         let z0 = self.bearing_z / rho;
@@ -322,8 +330,7 @@ impl PhotometricInverseRangeSe23Factor {
 
         let mut residual = [0.0; PATTERN_PIXELS];
         let mut energy = 0.0;
-        let mut jacobian =
-            with_jacobian.then(SMatrix::<f64, PATTERN_PIXELS, JACOBIAN_COLUMNS>::zeros);
+        let mut jacobian = with_jacobian.then(SMatrix::<f64, PATTERN_PIXELS, MAX_COLUMNS>::zeros);
 
         for k in 0..PATTERN_PIXELS {
             let q = [
@@ -361,39 +368,43 @@ impl PhotometricInverseRangeSe23Factor {
                 );
                 let g_m = (g.transpose() * m).transpose();
                 let g_re = (g.transpose() * r_e.transpose()).transpose();
-                let mut row = SVector::<f64, JACOBIAN_COLUMNS>::zeros();
+                let dof = G::DOF;
+                let (target_at, ext_at) = (dof, 2 * dof);
+                let (rho_at, affine_at) = (ext_at + 6, ext_at + 7);
+                let scale_at = affine_at + 4;
+                let mut row = SVector::<f64, MAX_COLUMNS>::zeros();
                 // host: ρ, θ (ν stays zero)
                 let host_rho = (g_m.transpose() * r_h).transpose();
                 let host_theta = -(g_m.transpose() * r_h * skew(&u)).transpose();
                 row.fixed_rows_mut::<3>(0).copy_from(&host_rho);
                 row.fixed_rows_mut::<3>(3).copy_from(&host_theta);
                 // target
-                row.fixed_rows_mut::<3>(9).copy_from(&(-g_re));
-                row.fixed_rows_mut::<3>(12)
+                row.fixed_rows_mut::<3>(target_at).copy_from(&(-g_re));
+                row.fixed_rows_mut::<3>(target_at + 3)
                     .copy_from(&(g_re.transpose() * skew(&v)).transpose());
                 // extrinsic
                 let gt_rel = g.transpose() * r_rel;
-                row.fixed_rows_mut::<3>(18)
+                row.fixed_rows_mut::<3>(ext_at)
                     .copy_from(&((gt_rel - g.transpose()) * inv_scale).transpose());
-                row.fixed_rows_mut::<3>(21).copy_from(
+                row.fixed_rows_mut::<3>(ext_at + 3).copy_from(
                     &(g.transpose() * skew(&p_target) - gt_rel * skew(&p_host)).transpose(),
                 );
                 // inverse range
-                row[24] = -(gt_rel * p_host)[0] / rho;
+                row[rho_at] = -(gt_rel * p_host)[0] / rho;
                 // scale: the extrinsic translation is t_SC / s.
                 let d_t = (g.transpose() * (m * r_h - r_e.transpose())) * (-t_e * inv_scale);
-                row[29] = d_t[0];
-                for c in 0..25 {
+                row[scale_at] = d_t[0];
+                for c in 0..rho_at + 1 {
                     row[c] *= s;
                 }
-                row[29] *= s;
+                row[scale_at] *= s;
                 // affine: a_h, b_h, a_t, b_t
                 let fixed = alpha * host_term;
-                row[25] = s * fixed;
-                row[26] = s * alpha;
-                row[27] = -s * fixed;
-                row[28] = -s;
-                for c in 0..JACOBIAN_COLUMNS {
+                row[affine_at] = s * fixed;
+                row[affine_at + 1] = s * alpha;
+                row[affine_at + 2] = -s * fixed;
+                row[affine_at + 3] = -s;
+                for c in 0..jacobian_columns::<G>() {
                     jac[(k, c)] = row[c];
                 }
             }
@@ -406,7 +417,7 @@ impl PhotometricInverseRangeSe23Factor {
     }
 }
 
-impl Factor for PhotometricInverseRangeSe23Factor {
+impl<G: RigidPose + Send + Sync + 'static> Factor for PhotometricInverseRangeFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
@@ -417,8 +428,8 @@ impl Factor for PhotometricInverseRangeSe23Factor {
             return;
         };
         let (host, target, extrinsic) = (
-            SE23::from_param_slice(host),
-            SE23::from_param_slice(target),
+            G::from_param_slice(host),
+            G::from_param_slice(target),
             SE3::from_param_slice(extrinsic),
         );
         let evaluation = self.evaluate(
@@ -438,7 +449,7 @@ impl Factor for PhotometricInverseRangeSe23Factor {
                 residual[..PATTERN_PIXELS].copy_from_slice(&e.residual);
                 if let (Some(mut jac), Some(values)) = (jacobian, e.jacobian) {
                     for row in 0..PATTERN_PIXELS {
-                        for col in 0..JACOBIAN_COLUMNS {
+                        for col in 0..jacobian_columns::<G>() {
                             *jac.rb_mut().get_mut(row, col) = values[(row, col)];
                         }
                     }
@@ -458,7 +469,7 @@ impl Factor for PhotometricInverseRangeSe23Factor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (PATTERN_PIXELS, JACOBIAN_COLUMNS)
+        (PATTERN_PIXELS, jacobian_columns::<G>())
     }
 
     fn whitens_internally(&self) -> bool {
@@ -468,8 +479,8 @@ impl Factor for PhotometricInverseRangeSe23Factor {
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
         expect_block_sizes(
             variables,
-            &[SE23::REP_SIZE, SE23::REP_SIZE, SE3::REP_SIZE, 1, 2, 2, 1],
-            "PhotometricInverseRangeSe23Factor expects [SE23 host, SE23 target, SE3 T_SC, Rn(1) rho, Rn(2) aff_host, Rn(2) aff_target, Rn(1) scale]",
+            &[G::REP_SIZE, G::REP_SIZE, SE3::REP_SIZE, 1, 2, 2, 1],
+            "PhotometricInverseRangeFactor expects [host pose, target pose, SE3 T_SC, Rn(1) rho, Rn(2) aff_host, Rn(2) aff_target, Rn(1) scale]",
         )
     }
 }
@@ -545,7 +556,7 @@ mod tests {
     use super::*;
     use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
-    use apex_manifolds::se23::SE23Tangent;
+    use apex_manifolds::se23::{SE23, SE23Tangent};
     use nalgebra::{DMatrix, UnitQuaternion};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -691,8 +702,8 @@ mod tests {
     fn factor_for(
         s: &Scene,
         point: &PhotometricPoint,
-    ) -> Result<PhotometricInverseRangeSe23Factor, Box<dyn std::error::Error>> {
-        Ok(PhotometricInverseRangeSe23Factor::new(
+    ) -> Result<PhotometricInverseRangeFactor<SE23>, Box<dyn std::error::Error>> {
+        Ok(PhotometricInverseRangeFactor::<SE23>::new(
             point.clone(),
             K,
             Arc::clone(&s.image),
@@ -703,8 +714,8 @@ mod tests {
     fn factor(
         s: &Scene,
         weights: PhotometricWeights,
-    ) -> Result<PhotometricInverseRangeSe23Factor, Box<dyn std::error::Error>> {
-        Ok(PhotometricInverseRangeSe23Factor::new(
+    ) -> Result<PhotometricInverseRangeFactor<SE23>, Box<dyn std::error::Error>> {
+        Ok(PhotometricInverseRangeFactor::<SE23>::new(
             s.point.clone(),
             K,
             Arc::clone(&s.image),
@@ -747,20 +758,17 @@ mod tests {
         ]
     }
 
-    fn run(f: &PhotometricInverseRangeSe23Factor, v: &Vars) -> (Vec<f64>, DMatrix<f64>) {
+    fn run(f: &PhotometricInverseRangeFactor<SE23>, v: &Vars) -> (Vec<f64>, DMatrix<f64>) {
         let p = params(v);
         let refs: Vec<&[f64]> = p.iter().map(Vec::as_slice).collect();
         let mut residual = vec![0.0; 8];
-        let mut buf = vec![0.0; 8 * JACOBIAN_COLUMNS];
-        let jac = faer::mat::MatMut::from_column_major_slice_mut(&mut buf, 8, JACOBIAN_COLUMNS);
+        let mut buf = vec![0.0; 8 * MAX_COLUMNS];
+        let jac = faer::mat::MatMut::from_column_major_slice_mut(&mut buf, 8, MAX_COLUMNS);
         f.linearize(&refs, &mut residual, Some(jac));
-        (
-            residual,
-            DMatrix::from_column_slice(8, JACOBIAN_COLUMNS, &buf),
-        )
+        (residual, DMatrix::from_column_slice(8, MAX_COLUMNS, &buf))
     }
 
-    fn residual_only(f: &PhotometricInverseRangeSe23Factor, v: &Vars) -> Vec<f64> {
+    fn residual_only(f: &PhotometricInverseRangeFactor<SE23>, v: &Vars) -> Vec<f64> {
         let p = params(v);
         let refs: Vec<&[f64]> = p.iter().map(Vec::as_slice).collect();
         let mut residual = vec![0.0; 8];
@@ -974,14 +982,14 @@ mod tests {
     #[test]
     fn bad_inputs_are_refused() -> TestResult {
         let s = scene()?;
-        let bad_k = PhotometricInverseRangeSe23Factor::new(
+        let bad_k = PhotometricInverseRangeFactor::<SE23>::new(
             s.point.clone(),
             [0.0, 300.0, 255.0, 255.0],
             Arc::clone(&s.image),
             PhotometricWeights::default(),
         );
         assert!(bad_k.is_err());
-        let bad_weight = PhotometricInverseRangeSe23Factor::new(
+        let bad_weight = PhotometricInverseRangeFactor::<SE23>::new(
             s.point.clone(),
             K,
             Arc::clone(&s.image),
@@ -1074,7 +1082,7 @@ mod tests {
                 problem.mark_for_elimination(key);
             }
             rho_keys.push(key);
-            let f = PhotometricInverseRangeSe23Factor::new(
+            let f = PhotometricInverseRangeFactor::<SE23>::new(
                 point.clone(),
                 K,
                 Arc::clone(&s.image),

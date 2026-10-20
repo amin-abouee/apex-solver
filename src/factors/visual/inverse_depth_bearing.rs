@@ -1,7 +1,7 @@
 //! Anchored inverse-**range** reprojection on the unit sphere, between two
 //! `SE_2(3)` navigation states.
 //!
-//! The sibling [`super::InverseDepthSe23Factor`] measures on the normalized
+//! The sibling [`super::InverseDepthPlaneFactor`] measures on the normalized
 //! plane, `(P_x/P_z, P_y/P_z)`. That is the VINS-Mono form and it is correct
 //! for a pinhole. It fails on a wide field of view in two ways, and the
 //! spectacular one is not the expensive one:
@@ -57,11 +57,13 @@
 //! **radians⁻¹**, so an isotropic `sigma_px / focal` is the same number the
 //! planar factor used, now meaning what it says.
 
+use std::marker::PhantomData;
+
 use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
 
 use apex_manifolds::LieGroup;
+use apex_manifolds::capability::RigidPose;
 use apex_manifolds::se3::SE3;
-use apex_manifolds::se23::SE23;
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
@@ -69,7 +71,7 @@ use crate::factors::Factor;
 use crate::factors::common::math::tangent_basis;
 use crate::factors::common::validate::expect_block_sizes;
 
-use super::inverse_depth_se23::{Chain, JACOBIAN_COLUMNS, point_jacobians, write_jacobian};
+use super::inverse_depth_plane::{Chain, MAX_COLUMNS, columns, point_jacobians, write_jacobian};
 
 /// Residual assigned to a landmark whose inverse range is not positive, in
 /// tangent units **before** whitening.
@@ -94,8 +96,8 @@ const MIN_POINT_NORM: f64 = 1.0e-16;
 /// measured in the tangent plane of the unit sphere.
 ///
 /// See the module documentation for the geometry and for why this exists
-/// alongside [`super::InverseDepthSe23Factor`].
-pub struct InverseDepthBearingSe23Factor {
+/// alongside [`super::InverseDepthPlaneFactor`].
+pub struct InverseDepthBearingFactor<G: RigidPose> {
     /// Unit bearing of the feature in the host camera.
     host_bearing: Vector3<f64>,
     /// Unit bearing measured in the observer camera.
@@ -104,9 +106,10 @@ pub struct InverseDepthBearingSe23Factor {
     tangent_basis: SMatrix<f64, 3, 2>,
     /// Square-root information, in radians⁻¹.
     sqrt_information: SMatrix<f64, 2, 2>,
+    group: PhantomData<fn() -> G>,
 }
 
-impl InverseDepthBearingSe23Factor {
+impl<G: RigidPose> InverseDepthBearingFactor<G> {
     /// Build the factor from two bearings and a `2×2` square-root information.
     ///
     /// # Arguments
@@ -127,12 +130,12 @@ impl InverseDepthBearingSe23Factor {
     ) -> CoreResult<Self> {
         let host = unit(&host_bearing).ok_or_else(|| {
             CoreError::InvalidInput(format!(
-                "InverseDepthBearingSe23Factor: host bearing {host_bearing:?} has no direction"
+                "InverseDepthBearingFactor: host bearing {host_bearing:?} has no direction"
             ))
         })?;
         let measured = unit(&measured_bearing).ok_or_else(|| {
             CoreError::InvalidInput(format!(
-                "InverseDepthBearingSe23Factor: measured bearing {measured_bearing:?} has no direction"
+                "InverseDepthBearingFactor: measured bearing {measured_bearing:?} has no direction"
             ))
         })?;
 
@@ -141,6 +144,7 @@ impl InverseDepthBearingSe23Factor {
             measured_bearing: measured,
             tangent_basis: tangent_basis(&measured),
             sqrt_information,
+            group: PhantomData,
         })
     }
 
@@ -156,7 +160,7 @@ impl InverseDepthBearingSe23Factor {
     ) -> CoreResult<Self> {
         if !sigma.is_finite() || sigma <= 0.0 {
             return Err(CoreError::InvalidInput(format!(
-                "InverseDepthBearingSe23Factor: sigma must be finite and positive, got {sigma}"
+                "InverseDepthBearingFactor: sigma must be finite and positive, got {sigma}"
             )));
         }
         let sqrt_information = SMatrix::<f64, 2, 2>::identity() * (1.0 / sigma);
@@ -170,7 +174,7 @@ fn unit(v: &Vector3<f64>) -> Option<Vector3<f64>> {
     (norm.is_finite() && norm > MIN_POINT_NORM).then(|| v / norm)
 }
 
-impl Factor for InverseDepthBearingSe23Factor {
+impl<G: RigidPose + Send + Sync + 'static> Factor for InverseDepthBearingFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
@@ -181,8 +185,8 @@ impl Factor for InverseDepthBearingSe23Factor {
             return;
         };
 
-        let host = SE23::from_param_slice(host_params);
-        let observer = SE23::from_param_slice(observer_params);
+        let host = G::from_param_slice(host_params);
+        let observer = G::from_param_slice(observer_params);
         let extrinsic = SE3::from_param_slice(extrinsic_params);
         let rho = rho_params[0];
 
@@ -195,20 +199,24 @@ impl Factor for InverseDepthBearingSe23Factor {
             residual[0] = penalty[0];
             residual[1] = penalty[1];
             if let Some(mut jac) = jacobian {
-                write_jacobian(&SMatrix::<f64, 2, JACOBIAN_COLUMNS>::zeros(), &mut jac);
+                write_jacobian(
+                    &SMatrix::<f64, 2, MAX_COLUMNS>::zeros(),
+                    columns::<G>(),
+                    &mut jac,
+                );
             }
             return;
         }
 
         let r_bc = extrinsic.rotation_so3().rotation_matrix();
         let p_bc = extrinsic.translation();
-        let r_k = host.rotation_matrix();
-        let r_i = observer.rotation_matrix();
+        let r_k = host.rotation();
+        let r_i = observer.rotation();
 
         let f = self.host_bearing / rho;
         let p_bk = r_bc * f + p_bc;
-        let p_w = r_k * p_bk + host.translation();
-        let p_bi = r_i.transpose() * (p_w - observer.translation());
+        let p_w = r_k * p_bk + host.position();
+        let p_bi = r_i.transpose() * (p_w - observer.position());
         let point = r_bc.transpose() * (p_bi - p_bc);
 
         let norm = point.norm();
@@ -219,7 +227,11 @@ impl Factor for InverseDepthBearingSe23Factor {
             residual[0] = 0.0;
             residual[1] = 0.0;
             if let Some(mut jac) = jacobian {
-                write_jacobian(&SMatrix::<f64, 2, JACOBIAN_COLUMNS>::zeros(), &mut jac);
+                write_jacobian(
+                    &SMatrix::<f64, 2, MAX_COLUMNS>::zeros(),
+                    columns::<G>(),
+                    &mut jac,
+                );
             }
             return;
         }
@@ -250,7 +262,11 @@ impl Factor for InverseDepthBearingSe23Factor {
             host_bearing: self.host_bearing,
             rho,
         };
-        write_jacobian(&(prefix * point_jacobians(&chain)), &mut jac);
+        write_jacobian(
+            &(prefix * point_jacobians(&chain, G::DOF)),
+            columns::<G>(),
+            &mut jac,
+        );
     }
 
     fn residual_dim(&self) -> usize {
@@ -258,7 +274,7 @@ impl Factor for InverseDepthBearingSe23Factor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (2, JACOBIAN_COLUMNS)
+        (2, columns::<G>())
     }
 
     fn whitens_internally(&self) -> bool {
@@ -268,8 +284,8 @@ impl Factor for InverseDepthBearingSe23Factor {
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
         expect_block_sizes(
             variables,
-            &[SE23::REP_SIZE, SE23::REP_SIZE, SE3::REP_SIZE, 1],
-            "InverseDepthBearingSe23Factor expects [SE23 host, SE23 observer, SE3 T_bc, Rn(1) rho]",
+            &[G::REP_SIZE, G::REP_SIZE, SE3::REP_SIZE, 1],
+            "InverseDepthBearingFactor expects [host pose, observer pose, SE3 T_bc, Rn(1) rho]",
         )
     }
 }
@@ -277,10 +293,10 @@ impl Factor for InverseDepthBearingSe23Factor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factors::visual::InverseDepthSe23Factor;
+    use crate::factors::visual::InverseDepthPlaneFactor;
     use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
-    use apex_manifolds::se23::SE23Tangent;
+    use apex_manifolds::se23::{SE23, SE23Tangent};
     use nalgebra::{DMatrix, UnitQuaternion, Vector2};
 
     /// Host state, observer state, `T_bc` and `rho`, as parameter vectors.
@@ -361,17 +377,17 @@ mod tests {
         s: &Setup,
         host_bearing: &Vector3<f64>,
         offset: f64,
-    ) -> InverseDepthBearingSe23Factor {
+    ) -> InverseDepthBearingFactor<SE23> {
         let predicted = observer_point(s, host_bearing).normalize();
         let nudge = tangent_basis(&predicted).column(0) * offset;
         let measured = (predicted + nudge).normalize();
-        match InverseDepthBearingSe23Factor::new_isotropic(*host_bearing, measured, 0.005) {
+        match InverseDepthBearingFactor::<SE23>::new_isotropic(*host_bearing, measured, 0.005) {
             Ok(factor) => factor,
             Err(message) => panic!("{message}"),
         }
     }
 
-    fn residual_of(factor: &InverseDepthBearingSe23Factor, s: &Setup) -> Vec<f64> {
+    fn residual_of(factor: &InverseDepthBearingFactor<SE23>, s: &Setup) -> Vec<f64> {
         let mut residual = vec![0.0f64; 2];
         factor.linearize(
             &[&s.host, &s.observer, &s.extrinsic, &s.rho],
@@ -381,7 +397,7 @@ mod tests {
         residual
     }
 
-    fn jacobian_of(factor: &InverseDepthBearingSe23Factor, s: &Setup) -> DMatrix<f64> {
+    fn jacobian_of(factor: &InverseDepthBearingFactor<SE23>, s: &Setup) -> DMatrix<f64> {
         let (rows, cols) = factor.jacobian_shape();
         let mut residual = vec![0.0f64; rows];
         let mut buf = vec![0.0f64; rows * cols];
@@ -440,7 +456,7 @@ mod tests {
     /// recorded as a number rather than asserted in prose.
     ///
     /// The failure is quieter than a cheirality penalty and worse for it.
-    /// `InverseDepthSe23Factor::new` rescales its anchor to `z = 1`; for a
+    /// `InverseDepthPlaneFactor::<SE23>::new` rescales its anchor to `z = 1`; for a
     /// bearing with `z < 0` that division **mirrors the ray through the
     /// origin**, so the factor models a landmark on the opposite side of the
     /// host camera and never says so. Fed the measurement its own geometry
@@ -452,7 +468,7 @@ mod tests {
         assert!(point.z < 0.0, "fixture must be past the equator");
 
         let truth = Vector2::new(point.x / point.z, point.y / point.z);
-        let planar = InverseDepthSe23Factor::new(past_the_equator(), truth);
+        let planar = InverseDepthPlaneFactor::<SE23>::new(past_the_equator(), truth);
         let mut residual = vec![0.0f64; 2];
         planar.linearize(
             &[&s.host, &s.observer, &s.extrinsic, &s.rho],
@@ -638,14 +654,14 @@ mod tests {
     #[test]
     fn a_bearing_without_a_direction_is_rejected() {
         let Err(message) =
-            InverseDepthBearingSe23Factor::new_isotropic(Vector3::zeros(), Vector3::z(), 0.005)
+            InverseDepthBearingFactor::<SE23>::new_isotropic(Vector3::zeros(), Vector3::z(), 0.005)
         else {
             panic!("expected a zero host bearing to be rejected");
         };
         assert!(message.to_string().contains("host bearing"), "{message}");
 
         let Err(message) =
-            InverseDepthBearingSe23Factor::new_isotropic(Vector3::z(), Vector3::zeros(), 0.005)
+            InverseDepthBearingFactor::<SE23>::new_isotropic(Vector3::z(), Vector3::zeros(), 0.005)
         else {
             panic!("expected a zero measured bearing to be rejected");
         };
@@ -658,7 +674,8 @@ mod tests {
     #[test]
     fn a_non_positive_sigma_is_rejected() {
         assert!(
-            InverseDepthBearingSe23Factor::new_isotropic(Vector3::z(), Vector3::z(), 0.0).is_err()
+            InverseDepthBearingFactor::<SE23>::new_isotropic(Vector3::z(), Vector3::z(), 0.0)
+                .is_err()
         );
     }
 

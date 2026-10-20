@@ -54,7 +54,7 @@ correctly instead of invalidating it.
 |---|---|
 | `PhotometricPatchFactor` | a reference patch against the current image, with the pose as the unknown |
 | `PhotometricTwoViewFactor` | the same, with **both** views rendered through the extrinsic — what makes online extrinsic calibration honest |
-| `PhotometricInverseRangeSe23Factor` | a map point's photometric appearance, with the point's inverse range in the state |
+| `PhotometricInverseRangeFactor` | a map point's photometric appearance, with the point's inverse range in the state |
 | `AffinePriorFactor` | a prior on the per-frame affine brightness parameters $(a, b)$ |
 
 </div>
@@ -74,7 +74,7 @@ references. The two-view form renders **both** views through the same extrinsic
 at evaluation time, so the extrinsic's effect is visible in the residual
 instead of absorbed by the reference.
 
-**`PhotometricInverseRangeSe23Factor`** is the LIVO form: the visual
+**`PhotometricInverseRangeFactor`** is the LIVO form: the visual
 measurement is about a *map* point whose depth is a state variable, and the
 factor's residual is the photometric difference at the point's predicted
 projection. It is the factor the LIVO stack uses, with the LiDAR supplying

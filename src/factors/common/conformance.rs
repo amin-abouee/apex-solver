@@ -456,10 +456,7 @@ mod tests {
             let pose = G::from_param_slice(G::random().as_param_slice());
 
             finite_diff_jacobian_parity(
-                &ProjectionFactor::<_, BundleAdjustment, G>::new(
-                    observations.clone(),
-                    camera.clone(),
-                ),
+                &ProjectionFactor::<_, BundleAdjustment, G>::new(observations.clone(), camera),
                 &[Block::lie(&pose), Block::euclidean(&landmarks)],
                 TOL,
             )
@@ -481,6 +478,72 @@ mod tests {
             projection_conforms::<SE3>()?;
             projection_conforms::<SE23>()?;
             projection_conforms::<Sim3>()
+        }
+    }
+    mod rigid {
+        use super::*;
+        use crate::factors::visual::{
+            InverseDepthBearingFactor, InverseDepthPlaneFactor, InverseRangeProjectionFactor,
+        };
+        use apex_camera_models::PinholeCamera;
+        use apex_manifolds::capability::RigidPose;
+        use nalgebra::{Vector2, Vector3};
+
+        fn near_identity<G: RigidPose>() -> G {
+            let tangent = vec![0.02; G::DOF];
+            G::from_param_slice(G::random().as_param_slice()).right_plus(
+                &<G::TangentVector as Tangent<G>>::from_slice(&tangent),
+                None,
+                None,
+            )
+        }
+
+        fn inverse_depth_conforms<G: RigidPose + Send + Sync + 'static>() -> Result<(), String> {
+            let host = near_identity::<G>();
+            let observer = near_identity::<G>();
+            let extrinsic = SE3::random();
+            let blocks = [
+                Block::lie(&host),
+                Block::lie(&observer),
+                Block::lie(&extrinsic),
+                Block::euclidean(&[0.4]),
+            ];
+            let name = |e: String| format!("{}: {e}", G::NAME);
+            let plane = InverseDepthPlaneFactor::<G>::new(
+                Vector3::new(0.1, -0.05, 1.0),
+                Vector2::new(0.1, 0.0),
+            );
+            finite_diff_jacobian_parity(&plane, &blocks, TOL).map_err(name)?;
+            let bearing = InverseDepthBearingFactor::<G>::new_isotropic(
+                Vector3::new(0.1, -0.05, 1.0),
+                Vector3::new(0.12, 0.02, 1.0),
+                0.01,
+            )
+            .map_err(|e| e.to_string())?;
+            finite_diff_jacobian_parity(&bearing, &blocks, TOL)
+                .map_err(|e| format!("{}: {e}", G::NAME))?;
+            let pixel = InverseRangeProjectionFactor::<G, PinholeCamera>::new(
+                Vector3::new(0.1, -0.05, 1.0),
+                Vector2::new(330.0, 250.0),
+                1.0,
+            )
+            .map_err(|e| e.to_string())?;
+            let moving = [
+                Block::lie(&host),
+                Block::lie(&observer),
+                Block::lie(&extrinsic),
+                Block::lie(&SE3::random()),
+                Block::euclidean(&[0.4]),
+                Block::euclidean(&[500.0, 500.0, 320.0, 240.0]),
+            ];
+            finite_diff_jacobian_parity(&pixel, &moving, TOL)
+                .map_err(|e| format!("{}: {e}", G::NAME))
+        }
+
+        #[test]
+        fn inverse_depth_factors_conform_on_every_rigid_pose() -> Result<(), String> {
+            inverse_depth_conforms::<SE3>()?;
+            inverse_depth_conforms::<SE23>()
         }
     }
 }

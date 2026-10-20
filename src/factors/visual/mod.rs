@@ -7,8 +7,8 @@ pub mod essential_matrix;
 pub mod extrinsic_projection;
 pub mod homogeneous_point;
 pub mod inverse_depth;
-pub mod inverse_depth_bearing_se23;
-pub mod inverse_depth_se23;
+pub mod inverse_depth_bearing;
+pub mod inverse_depth_plane;
 pub mod photometric_inverse_range;
 pub mod photometric_patch;
 pub mod photometric_two_view;
@@ -23,10 +23,10 @@ pub use essential_matrix::{EssentialMatrixConstraint, EssentialMatrixFactor};
 pub use extrinsic_projection::ExtrinsicProjectionFactor;
 pub use homogeneous_point::HomogeneousPointFactor;
 pub use inverse_depth::InverseDepthFactor;
-pub use inverse_depth_bearing_se23::InverseDepthBearingSe23Factor;
-pub use inverse_depth_se23::InverseDepthSe23Factor;
+pub use inverse_depth_bearing::InverseDepthBearingFactor;
+pub use inverse_depth_plane::InverseDepthPlaneFactor;
 pub use photometric_inverse_range::{
-    AffinePriorFactor, GradientImage, PhotometricInverseRangeSe23Factor, PhotometricPoint,
+    AffinePriorFactor, GradientImage, PhotometricInverseRangeFactor, PhotometricPoint,
     PhotometricWeights,
 };
 pub use photometric_patch::IntensityImage;
@@ -35,7 +35,7 @@ pub use photometric_two_view::{PhotometricTwoViewFactor, PlanePoint, ReferenceVi
 pub use projection::{OptimizationConfig, ProjectionFactor};
 pub use smart_projection::{SmartProjectionFactor, TriangulationStatus};
 pub use stereo::{StereoCalibration, StereoFactor, StereoPoint2};
-pub use stereo_inverse_range::{InverseRangeProjectionSe23Factor, StereoInverseRangeFactor};
+pub use stereo_inverse_range::{InverseRangeProjectionFactor, StereoInverseRangeFactor};
 pub use time_offset_projection::TimeOffsetProjectionFactor;
 
 #[cfg(test)]

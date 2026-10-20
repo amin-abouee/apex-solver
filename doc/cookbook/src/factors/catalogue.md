@@ -24,9 +24,9 @@ plus the companion types they need and the four decorators.
 | `HomogeneousPointFactor` | pose, point | a homogeneous 3-D point, projection and depth folded |
 | `DepthFactor<ONESIDED>` | pose, point | the point's depth along the ray |
 | `InverseDepthFactor<CAM>` | pose, point | the point's inverse depth |
-| `InverseDepthSe23Factor` | state, point | a point in an `SE23` frame, with a bearing |
-| `InverseDepthBearingSe23Factor` | state, point | the same, on the bearing's tangent plane |
-| `InverseRangeProjectionSe23Factor<CAM>` | state | a point seen by one camera of a rig |
+| `InverseDepthPlaneFactor` | state, point | a point in an `SE23` frame, with a bearing |
+| `InverseDepthBearingFactor` | state, point | the same, on the bearing's tangent plane |
+| `InverseRangeProjectionFactor<G, CAM>` | state | a point seen by one camera of a rig |
 | `StereoInverseRangeFactor<CAM>` | state, point | a point seen by both cameras of a rig |
 | `EssentialMatrixFactor` | two poses | the epipolar constraint |
 | `ExtrinsicProjectionFactor<CAM>` | extrinsic, point | the extrinsic, calibrated by the projections it appears in |
@@ -42,7 +42,7 @@ Companions: `EssentialMatrixConstraint`, `StereoCalibration`, `RegularDepthFacto
 |---|---|---|
 | `PhotometricPatchFactor<G, CAM>` | pose | a reference patch against the current image |
 | `PhotometricTwoViewFactor<G, CAM>` | pose, extrinsic | both views rendered through the extrinsic |
-| `PhotometricInverseRangeSe23Factor` | state, point | a map point's photometric appearance |
+| `PhotometricInverseRangeFactor` | state, point | a map point's photometric appearance |
 | `AffinePriorFactor` | brightness params | a prior on the affine brightness model |
 
 Companions: `IntensityImage`, `GradientImage`, `PhotometricPoint`,
@@ -152,7 +152,7 @@ Companion: `AggregatePart`.
 <span class="apx-title">Warning — a catalogue is an index, not a decision</span>
 
 Every type here is a tool, and none of them is right by default. The choice
-between `InverseDepthFactor` and `InverseDepthBearingSe23Factor` is a choice
+between `InverseDepthFactor` and `InverseDepthBearingFactor` is a choice
 about the camera model and the state formulation; the choice between
 `LidarMapPlanesFactor` and `LidarPlaneMomentFactor` is a choice about
 whether the individual point weights matter. Reading the catalogue is how
