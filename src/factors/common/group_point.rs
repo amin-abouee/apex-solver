@@ -5,6 +5,7 @@
 //! the group's `act` and `inverse`.
 
 use nalgebra::{Matrix3, SMatrix, Vector3};
+use smallvec::SmallVec;
 
 use apex_manifolds::capability::ActsOnPoints3;
 
@@ -16,7 +17,7 @@ pub struct AnchorChain {
     /// The point in the anchor frame, `p_A = X_a⁻¹ ⊙ w`.
     pub point: Vector3<f64>,
     /// `∂p_A/∂X_a`, `3 × dof(G)`, one `[x, y, z]` column per tangent axis.
-    pub d_anchor: Vec<[f64; 3]>,
+    pub d_anchor: SmallVec<[[f64; 3]; MAX_ACT_DOF]>,
     /// `∂p_A/∂w`.
     pub d_world: Matrix3<f64>,
 }

@@ -12,7 +12,14 @@ use faer::prelude::ReborrowMut;
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
+use std::sync::Mutex;
+
+use smallvec::SmallVec;
+
 use crate::factors::{Factor, NormalBlocks};
+
+/// Most inner blocks the assembled parameter list holds without the heap.
+const INLINE_BLOCKS: usize = 8;
 
 /// `inner` with some parameter blocks fixed to given values.
 pub struct HeldBlocks<F: Factor> {
@@ -21,6 +28,8 @@ pub struct HeldBlocks<F: Factor> {
     blocks: Vec<Option<Vec<f64>>>,
     /// Per inner block, its tangent dimension (Jacobian column count).
     dofs: Vec<usize>,
+    /// The inner Jacobian, kept between calls so each one reuses its storage.
+    scratch: Mutex<Mat<f64>>,
 }
 
 impl<F: Factor> HeldBlocks<F> {
@@ -52,10 +61,12 @@ impl<F: Factor> HeldBlocks<F> {
                 "HeldBlocks: every block is held; nothing to estimate".to_string(),
             ));
         }
+        let (rows, cols) = inner.jacobian_shape();
         Ok(Self {
             inner,
             blocks: held,
             dofs,
+            scratch: Mutex::new(Mat::zeros(rows, cols)),
         })
     }
 
@@ -82,7 +93,7 @@ impl<F: Factor> Factor for HeldBlocks<F> {
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
         let mut free = params.iter();
-        let full: Vec<&[f64]> = self
+        let full: SmallVec<[&[f64]; INLINE_BLOCKS]> = self
             .blocks
             .iter()
             .filter_map(|block| match block {
@@ -95,7 +106,15 @@ impl<F: Factor> Factor for HeldBlocks<F> {
             return;
         };
         let (rows, cols) = self.inner.jacobian_shape();
-        let mut inner_jacobian = Mat::<f64>::zeros(rows, cols);
+        let mut guard = self
+            .scratch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.nrows() != rows || guard.ncols() != cols {
+            *guard = Mat::zeros(rows, cols);
+        }
+        let inner_jacobian = &mut *guard;
+        inner_jacobian.fill(0.0);
         self.inner
             .linearize(&full, residual, Some(inner_jacobian.as_mut()));
         let (mut source, mut target) = (0, 0);
@@ -120,7 +139,7 @@ impl<F: Factor> Factor for HeldBlocks<F> {
         blocks: Option<&mut NormalBlocks<'_>>,
     ) -> Option<f64> {
         let mut free = params.iter();
-        let full: Vec<&[f64]> = self
+        let full: SmallVec<[&[f64]; INLINE_BLOCKS]> = self
             .blocks
             .iter()
             .filter_map(|block| match block {
@@ -132,7 +151,7 @@ impl<F: Factor> Factor for HeldBlocks<F> {
             return self.inner.accumulate_normal(&full, None);
         };
         let mut next = 0;
-        let map: Vec<Option<usize>> = self
+        let map: SmallVec<[Option<usize>; INLINE_BLOCKS]> = self
             .blocks
             .iter()
             .map(|block| {

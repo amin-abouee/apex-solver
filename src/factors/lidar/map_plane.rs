@@ -27,6 +27,7 @@
 
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, Vector3};
+use smallvec::SmallVec;
 use std::marker::PhantomData;
 
 use apex_manifolds::LieGroup;
@@ -36,6 +37,7 @@ use apex_manifolds::se3::SE3;
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
 use crate::factors::Factor;
+use crate::factors::common::group_point::MAX_ACT_DOF;
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_manifolds;
 
@@ -49,14 +51,14 @@ pub struct LidarPointChain {
     /// The point in the world, `w = X ⊙ s`.
     pub world: Vector3<f64>,
     /// `∂w/∂X`, `3 × dof(G)`, row-major by point coordinate.
-    pub d_state: Vec<[f64; 3]>,
+    pub d_state: SmallVec<[[f64; 3]; MAX_ACT_DOF]>,
     /// `∂w/∂T_SL`, columns `[δρₑ, δθₑ]` of the `SE3` tangent.
     pub d_extrinsic: SMatrix<f64, 3, 6>,
 }
 
 impl LidarPointChain {
     /// `rowᵀ·∂w/∂X` — one row of a scalar residual's state Jacobian.
-    pub fn project_state(&self, row: &Vector3<f64>) -> Vec<f64> {
+    pub fn project_state(&self, row: &Vector3<f64>) -> SmallVec<[f64; MAX_ACT_DOF]> {
         self.d_state
             .iter()
             .map(|column| row.x * column[0] + row.y * column[1] + row.z * column[2])
