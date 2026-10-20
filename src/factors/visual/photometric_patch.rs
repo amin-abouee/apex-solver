@@ -31,13 +31,14 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use apex_camera_models::CameraModel;
+use apex_manifolds::LieGroup;
+use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
-use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::CoreError;
 use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
-use crate::factors::common::group_point::{acts_on_points, into_anchor};
+use crate::factors::common::group_point::into_anchor;
 use crate::factors::common::validate::expect_manifolds;
 use crate::factors::{Factor, NormalBlocks};
 
@@ -135,7 +136,7 @@ impl IntensityImage {
 /// (camera → body). Residual dimension = number of patch pixels.
 ///
 /// Whitens internally: register with `NoiseModel::null()`.
-pub struct PhotometricPatchFactor<G: LieGroup, CAM: CameraModel> {
+pub struct PhotometricPatchFactor<G: ActsOnPoints3, CAM: CameraModel> {
     camera: CAM,
     image: Arc<IntensityImage>,
     point_w: Vector3<f64>,
@@ -147,7 +148,7 @@ pub struct PhotometricPatchFactor<G: LieGroup, CAM: CameraModel> {
     group: PhantomData<fn() -> G>,
 }
 
-impl<G: LieGroup, CAM: CameraModel> PhotometricPatchFactor<G, CAM> {
+impl<G: ActsOnPoints3, CAM: CameraModel> PhotometricPatchFactor<G, CAM> {
     /// A map point's reference patch against `image`.
     ///
     /// `offsets[i]` is the pixel offset of patch sample `i` from the projected
@@ -167,12 +168,6 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricPatchFactor<G, CAM> {
         sigma: f64,
     ) -> CoreResult<Self> {
         let offsets = offsets.into();
-        if !acts_on_points::<G>() {
-            return Err(CoreError::InvalidInput(format!(
-                "PhotometricPatchFactor: {} does not act on 3-D points",
-                G::NAME
-            )));
-        }
         if offsets.len() < 2 || offsets.len() != reference.len() {
             return Err(CoreError::InvalidInput(format!(
                 "PhotometricPatchFactor: {} offsets and {} reference values (need ≥ 2, equal)",
@@ -228,7 +223,7 @@ struct Patch {
     d_pixel: Vec<Vector2<f64>>,
 }
 
-impl<G: LieGroup, CAM: CameraModel> PhotometricPatchFactor<G, CAM> {
+impl<G: ActsOnPoints3, CAM: CameraModel> PhotometricPatchFactor<G, CAM> {
     /// The patch at `params`; `None` when the point does not project or a
     /// sample leaves the image.
     fn patch(&self, params: &[&[f64]], with_derivative: bool) -> Option<Patch> {
@@ -289,7 +284,7 @@ fn zero_out(residual: &mut [f64], jacobian: Option<faer::mat::MatMut<'_, f64>>) 
 
 impl<G, CAM> Factor for PhotometricPatchFactor<G, CAM>
 where
-    G: LieGroup + Send + Sync + 'static,
+    G: ActsOnPoints3 + Send + Sync + 'static,
     CAM: CameraModel,
 {
     fn linearize(
@@ -339,7 +334,7 @@ where
         }
         if let Some(blocks) = blocks {
             let d = DMatrix::from_fn(2, patch.d_pixel.len(), |r, c| patch.d_pixel[c][r]);
-            let dof = G::TangentVector::DIM;
+            let dof = G::DOF;
             let parts = [d.columns(0, dof), d.columns(dof, d.ncols() - dof)];
             for (a, da) in parts.iter().enumerate() {
                 blocks.add_gradient(a, &(da.transpose() * pull));
@@ -356,7 +351,7 @@ where
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (self.offsets.len(), G::TangentVector::DIM + 6)
+        (self.offsets.len(), G::DOF + 6)
     }
 
     fn whitens_internally(&self) -> bool {
@@ -376,7 +371,7 @@ where
 mod tests {
     use super::*;
     use apex_camera_models::pinhole::PinholeCamera;
-    use apex_manifolds::se2::SE2;
+    use apex_manifolds::Tangent;
     use apex_manifolds::se23::SE23;
     use apex_manifolds::sim3::Sim3;
     use faer::Mat;
@@ -406,14 +401,14 @@ mod tests {
     }
 
     /// A world point seen at camera coordinates `(0.3, −0.2, 4.0)` from `state`.
-    fn world_point<G: LieGroup>(state: &G) -> Vector3<f64> {
+    fn world_point<G: ActsOnPoints3>(state: &G) -> Vector3<f64> {
         let body = extrinsic().act(&Vector3::new(0.3, -0.2, 4.0), None, None);
         state.act(&body, None, None)
     }
 
     /// The reference patch: the image itself at the true projection, plus a
     /// brightness offset the residual must ignore.
-    fn factor<G: LieGroup>(
+    fn factor<G: ActsOnPoints3>(
         state: &G,
         offset: f64,
     ) -> Result<PhotometricPatchFactor<G, PinholeCamera>, CoreError> {
@@ -436,7 +431,7 @@ mod tests {
         PhotometricPatchFactor::new(camera(), image, point_w, offsets, &reference, 2.0)
     }
 
-    fn evaluate<G: LieGroup + Send + Sync + 'static>(
+    fn evaluate<G: ActsOnPoints3 + Send + Sync + 'static>(
         factor: &PhotometricPatchFactor<G, PinholeCamera>,
         state: &G,
         extrinsic: &SE3,
@@ -450,13 +445,13 @@ mod tests {
         (residual, jacobian)
     }
 
-    fn central_difference<G: LieGroup>(
+    fn central_difference<G: ActsOnPoints3>(
         at: &G,
         axis: usize,
         evaluate: impl Fn(&G) -> Vec<f64>,
     ) -> Vec<f64> {
         const EPS: f64 = 1e-6;
-        let mut tangent = vec![0.0; G::TangentVector::DIM];
+        let mut tangent = vec![0.0; G::DOF];
         tangent[axis] = EPS;
         let plus = evaluate(&at.right_plus(&G::TangentVector::from_slice(&tangent), None, None));
         tangent[axis] = -EPS;
@@ -469,8 +464,8 @@ mod tests {
 
     /// Zero at truth despite a brightness offset; Jacobians equal central
     /// differences, off truth, in group `G`'s own chart.
-    fn check_group<G: LieGroup + Send + Sync + 'static>(state: G) -> Result<(), CoreError> {
-        let dof = G::TangentVector::DIM;
+    fn check_group<G: ActsOnPoints3 + Send + Sync + 'static>(state: G) -> Result<(), CoreError> {
+        let dof = G::DOF;
         let factor = factor(&state, 7.0)?;
         let (residual, _) = evaluate(&factor, &state, &extrinsic());
         assert!(
@@ -659,15 +654,6 @@ mod tests {
         assert!(new(offsets.clone(), &[1.0, 2.0, 3.0, f64::NAN], 1.0).is_err());
         assert!(new(offsets.clone(), &[1.0, 2.0, 3.0, 4.0], 0.0).is_err());
         assert!(new(vec![Vector2::zeros()], &[1.0], 1.0).is_err());
-        let planar = PhotometricPatchFactor::<SE2, PinholeCamera>::new(
-            camera(),
-            image,
-            Vector3::z(),
-            offsets,
-            &[1.0, 2.0, 3.0, 4.0],
-            1.0,
-        );
-        assert!(planar.is_err());
         Ok(())
     }
 

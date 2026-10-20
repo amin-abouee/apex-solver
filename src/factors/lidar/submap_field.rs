@@ -25,8 +25,9 @@ use nalgebra::Vector3;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use apex_manifolds::LieGroup;
+use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
-use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
@@ -35,7 +36,7 @@ use crate::factors::common::validate::expect_manifolds;
 
 use super::distance_field::DistanceField;
 use super::map_plane::lidar_point_chain;
-use crate::factors::common::group_point::{acts_on_points, into_anchor};
+use crate::factors::common::group_point::into_anchor;
 
 /// Gradients below this norm carry no direction: the point is ignored.
 const MIN_GRADIENT: f64 = 1e-9;
@@ -50,13 +51,7 @@ pub fn occupancy_sigma(gradient: &Vector3<f64>, log_odds_min: f64, sigma_d: f64)
     (variance.is_finite() && variance > 0.0).then(|| variance.sqrt())
 }
 
-fn check_inputs<G: LieGroup>(name: &str, point: &Vector3<f64>, sigma: f64) -> CoreResult<()> {
-    if !acts_on_points::<G>() {
-        return Err(CoreError::InvalidInput(format!(
-            "{name}: {} does not act on 3-D points",
-            G::NAME
-        )));
-    }
+fn check_inputs(name: &str, point: &Vector3<f64>, sigma: f64) -> CoreResult<()> {
     if !point.iter().all(|value| value.is_finite()) {
         return Err(CoreError::InvalidInput(format!(
             "{name}: point {point:?} is not finite"
@@ -102,7 +97,7 @@ fn project(row: &Vector3<f64>, columns: &[[f64; 3]]) -> impl Iterator<Item = f64
 /// a scan inside its own submap constrains nothing.
 ///
 /// Whitens internally: register with `NoiseModel::null()`.
-pub struct LidarSubmapFieldFactor<G: LieGroup, F: DistanceField> {
+pub struct LidarSubmapFieldFactor<G: ActsOnPoints3, F: DistanceField> {
     field: Arc<F>,
     /// The scan point in the LiDAR frame, already deskewed to `X_k`'s time.
     point_l: Vector3<f64>,
@@ -111,7 +106,7 @@ pub struct LidarSubmapFieldFactor<G: LieGroup, F: DistanceField> {
     group: PhantomData<fn() -> G>,
 }
 
-impl<G: LieGroup, F: DistanceField> LidarSubmapFieldFactor<G, F> {
+impl<G: ActsOnPoints3, F: DistanceField> LidarSubmapFieldFactor<G, F> {
     /// A scan point against `field` with a fixed residual scale.
     ///
     /// # Errors
@@ -119,7 +114,7 @@ impl<G: LieGroup, F: DistanceField> LidarSubmapFieldFactor<G, F> {
     /// A group without a 3-D point action, a non-finite point, or a `sigma`
     /// that is not finite and positive — all [`CoreError::InvalidInput`].
     pub fn new(field: Arc<F>, point_l: Vector3<f64>, sigma: f64) -> CoreResult<Self> {
-        check_inputs::<G>("LidarSubmapFieldFactor", &point_l, sigma)?;
+        check_inputs("LidarSubmapFieldFactor", &point_l, sigma)?;
         Ok(Self {
             field,
             point_l,
@@ -166,7 +161,7 @@ impl<G: LieGroup, F: DistanceField> LidarSubmapFieldFactor<G, F> {
 
 impl<G, F> Factor for LidarSubmapFieldFactor<G, F>
 where
-    G: LieGroup + Send + Sync + 'static,
+    G: ActsOnPoints3 + Send + Sync + 'static,
     F: DistanceField + 'static,
 {
     fn linearize(
@@ -205,7 +200,7 @@ where
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (1, 2 * G::TangentVector::DIM + 6)
+        (1, 2 * G::DOF + 6)
     }
 
     fn whitens_internally(&self) -> bool {
@@ -227,21 +222,21 @@ where
 /// anchor's body frame (e.g. an occupied voxel centre or a kept scan point).
 ///
 /// Whitens internally: register with `NoiseModel::null()`.
-pub struct SubmapAlignmentFactor<G: LieGroup, F: DistanceField> {
+pub struct SubmapAlignmentFactor<G: ActsOnPoints3, F: DistanceField> {
     field: Arc<F>,
     point_b: Vector3<f64>,
     sigma: f64,
     group: PhantomData<fn() -> G>,
 }
 
-impl<G: LieGroup, F: DistanceField> SubmapAlignmentFactor<G, F> {
+impl<G: ActsOnPoints3, F: DistanceField> SubmapAlignmentFactor<G, F> {
     /// A point of submap B against `field` (submap A) with a fixed scale.
     ///
     /// # Errors
     ///
     /// As [`LidarSubmapFieldFactor::new`].
     pub fn new(field: Arc<F>, point_b: Vector3<f64>, sigma: f64) -> CoreResult<Self> {
-        check_inputs::<G>("SubmapAlignmentFactor", &point_b, sigma)?;
+        check_inputs("SubmapAlignmentFactor", &point_b, sigma)?;
         Ok(Self {
             field,
             point_b,
@@ -286,7 +281,7 @@ impl<G: LieGroup, F: DistanceField> SubmapAlignmentFactor<G, F> {
 
 impl<G, F> Factor for SubmapAlignmentFactor<G, F>
 where
-    G: LieGroup + Send + Sync + 'static,
+    G: ActsOnPoints3 + Send + Sync + 'static,
     F: DistanceField + 'static,
 {
     fn linearize(
@@ -297,7 +292,7 @@ where
     ) {
         let anchor_a = G::from_param_slice(params[0]);
         let anchor_b = G::from_param_slice(params[1]);
-        let mut d_b = G::zero_jacobian();
+        let mut d_b = anchor_b.zero_jacobian_for();
         let world = anchor_b.act(&self.point_b, Some(&mut d_b), None);
         let chain = into_anchor(&anchor_a, &world);
         let Some((value, gradient)) = query(self.field.as_ref(), &chain.point) else {
@@ -327,7 +322,7 @@ where
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (1, 2 * G::TangentVector::DIM)
+        (1, 2 * G::DOF)
     }
 
     fn whitens_internally(&self) -> bool {
@@ -346,7 +341,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_manifolds::se2::SE2;
+    use apex_manifolds::Tangent;
     use apex_manifolds::se23::SE23;
     use apex_manifolds::sim3::Sim3;
     use apex_manifolds::so3::SO3;
@@ -385,9 +380,13 @@ mod tests {
         Vector3::new(1.5, -0.8, 0.6)
     }
 
-    fn central_difference<G: LieGroup>(at: &G, axis: usize, evaluate: impl Fn(&G) -> f64) -> f64 {
+    fn central_difference<G: ActsOnPoints3>(
+        at: &G,
+        axis: usize,
+        evaluate: impl Fn(&G) -> f64,
+    ) -> f64 {
         const EPS: f64 = 1e-6;
-        let mut tangent = vec![0.0; G::TangentVector::DIM];
+        let mut tangent = vec![0.0; G::DOF];
         tangent[axis] = EPS;
         let plus = at.right_plus(&G::TangentVector::from_slice(&tangent), None, None);
         tangent[axis] = -EPS;
@@ -413,11 +412,11 @@ mod tests {
 
     /// Frame-to-submap and submap-to-submap Jacobians against central
     /// differences, every block, in group `G`'s own chart.
-    fn check_group<G: LieGroup + Send + Sync + 'static>(
+    fn check_group<G: ActsOnPoints3 + Send + Sync + 'static>(
         anchor: G,
         state: G,
     ) -> Result<(), CoreError> {
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         let triple = |a: &G, k: &G, e: &SE3| {
             vec![
                 a.as_param_slice().to_vec(),
@@ -594,9 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_and_inputs_are_checked() -> Result<(), CoreError> {
-        assert!(LidarSubmapFieldFactor::<SE2, _>::new(field(), point(), 0.1).is_err());
-        assert!(SubmapAlignmentFactor::<SE2, _>::new(field(), point(), 0.1).is_err());
+    fn inputs_are_checked() -> Result<(), CoreError> {
         assert!(LidarSubmapFieldFactor::<SE3, _>::new(field(), point(), 0.0).is_err());
         let nan = Vector3::new(f64::NAN, 0.0, 0.0);
         assert!(SubmapAlignmentFactor::<SE3, _>::new(field(), nan, 0.1).is_err());

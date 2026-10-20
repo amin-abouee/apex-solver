@@ -43,7 +43,7 @@ thread_local! {
 pub(crate) fn affine_action<G: LieGroup>(state: &G) -> Action {
     let dof = state.tangent_dim().min(MAX_DOF);
     let at = |s: &Vector3<f64>| {
-        let mut jacobian = G::zero_jacobian();
+        let mut jacobian = state.zero_jacobian_for();
         let world = state.act(s, Some(&mut jacobian), None);
         let columns =
             SMatrix::<f64, 3, MAX_DOF>::from_fn(

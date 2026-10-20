@@ -191,8 +191,8 @@ where
         let se3_k0_k1_measured = &self.relative_pose;
 
         // Step 1: se3_origin_k1.between(se3_origin_k0) = k1⁻¹ * k0
-        let mut j_k1_k0_wrt_k1 = T::zero_jacobian();
-        let mut j_k1_k0_wrt_k0 = T::zero_jacobian();
+        let mut j_k1_k0_wrt_k1 = se3_origin_k1.zero_jacobian_for();
+        let mut j_k1_k0_wrt_k0 = se3_origin_k0.zero_jacobian_for();
         let se3_k1_k0 = se3_origin_k1.between(
             &se3_origin_k0,
             Some(&mut j_k1_k0_wrt_k1),
@@ -200,11 +200,11 @@ where
         );
 
         // Step 2: se3_k1_k0 * se3_k0_k1_measured
-        let mut j_diff_wrt_k1_k0 = T::zero_jacobian();
+        let mut j_diff_wrt_k1_k0 = se3_k1_k0.zero_jacobian_for();
         let se3_diff = se3_k1_k0.compose(se3_k0_k1_measured, Some(&mut j_diff_wrt_k1_k0), None);
 
         // Step 3: se3_diff.log()
-        let mut j_log_wrt_diff = T::zero_jacobian();
+        let mut j_log_wrt_diff = se3_diff.zero_jacobian_for();
         let tangent = se3_diff.log(Some(&mut j_log_wrt_diff));
         let tangent_slice = tangent.as_slice();
         let dof = tangent_slice.len();

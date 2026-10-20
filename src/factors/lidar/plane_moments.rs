@@ -45,11 +45,10 @@ use std::rc::Rc;
 
 use nalgebra::{Matrix3, SMatrix, SymmetricEigen, Vector3};
 
-use apex_manifolds::{LieGroup, Tangent};
+use apex_manifolds::capability::ActsOnPoints3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
-use crate::factors::common::group_point::acts_on_points;
 use crate::factors::common::validate::expect_manifolds;
 use crate::factors::{Factor, NormalBlocks};
 
@@ -190,14 +189,14 @@ impl Centred {
 ///
 /// Whitens internally: register with `NoiseModel::null()`.
 #[derive(Clone)]
-pub struct LidarPlaneMomentFactor<G: LieGroup> {
+pub struct LidarPlaneMomentFactor<G: ActsOnPoints3> {
     frames: Vec<Centred>,
     fixed: Option<Centred>,
     sigma: f64,
     group: PhantomData<fn() -> G>,
 }
 
-impl<G: LieGroup> LidarPlaneMomentFactor<G> {
+impl<G: ActsOnPoints3> LidarPlaneMomentFactor<G> {
     /// A plane seen by `frames.len()` frames, anchored by `fixed`, with
     /// point-to-plane standard deviation `sigma`.
     ///
@@ -208,9 +207,9 @@ impl<G: LieGroup> LidarPlaneMomentFactor<G> {
     /// is not finite and positive.
     pub fn new(frames: Vec<PointMoments>, fixed: PointMoments, sigma: f64) -> CoreResult<Self> {
         let name = "LidarPlaneMomentFactor";
-        if !acts_on_points::<G>() || G::TangentVector::DIM > MAX_DOF {
+        if G::DOF > MAX_DOF {
             return Err(CoreError::InvalidInput(format!(
-                "{name}: {} does not act on 3-D points",
+                "{name}: {} has too many degrees of freedom",
                 G::NAME
             )));
         }
@@ -278,7 +277,7 @@ fn smallest_axis(scatter: &Matrix3<f64>) -> Option<Vector3<f64>> {
 /// A fitted plane `(n, d)` with `nᵀp + d = 0`.
 type Fitted = (Vector3<f64>, f64);
 
-impl<G: LieGroup + Send + Sync + 'static> LidarPlaneMomentFactor<G> {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> LidarPlaneMomentFactor<G> {
     /// The states' actions and the best-fit plane `(n, d)` of every point:
     /// each frame's mean carried to the world, its scatter rotated. `None`
     /// when the plane has no unique normal.
@@ -333,14 +332,14 @@ impl<G: LieGroup + Send + Sync + 'static> LidarPlaneMomentFactor<G> {
     }
 }
 
-impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         let mut jac = jacobian;
         if let Some(jac) = jac.as_mut() {
             for row in 0..jac.nrows() {
@@ -408,7 +407,7 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
         };
         let weight = 1.0 / (self.sigma * self.sigma);
         let mut cost = 0.0;
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         for (block, (action, frame)) in actions.iter().zip(&self.frames).enumerate() {
             let (a, b, columns) = &**action;
             let a_n = a.transpose() * normal;
@@ -439,10 +438,7 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (
-            self.residual_dim(),
-            self.frames.len() * G::TangentVector::DIM,
-        )
+        (self.residual_dim(), self.frames.len() * G::DOF)
     }
 
     fn whitens_internally(&self) -> bool {
@@ -461,6 +457,8 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apex_manifolds::LieGroup;
+    use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3;
     use apex_manifolds::se23::SE23;
     use apex_manifolds::sim3::Sim3;
@@ -538,7 +536,7 @@ mod tests {
 
     /// Body-frame points of a tilted plane `n·w = 2`, as seen from `state`,
     /// with millimetres of off-plane noise.
-    fn plane_points<G: LieGroup>(state: &G, seed: usize) -> Vec<Vector3<f64>> {
+    fn plane_points<G: ActsOnPoints3>(state: &G, seed: usize) -> Vec<Vector3<f64>> {
         let normal = Vector3::new(0.2, -0.3, 0.93).normalize();
         let a = normal.cross(&Vector3::x()).normalize();
         let b = normal.cross(&a);
@@ -560,7 +558,7 @@ mod tests {
 
     /// The moment residuals carry the per-point cost exactly, and `Jᵀr`
     /// matches the finite-difference gradient of the cost.
-    fn check_gradient<G: LieGroup + Send + Sync + 'static>(
+    fn check_gradient<G: ActsOnPoints3 + Send + Sync + 'static>(
         states: Vec<G>,
     ) -> Result<(), CoreError> {
         let frames: Vec<Vec<Vector3<f64>>> = states
@@ -583,7 +581,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let delta: Vec<f64> = (0..G::TangentVector::DIM)
+                let delta: Vec<f64> = (0..G::DOF)
                     .map(|k| 0.01 * ((i * 3 + k) % 5) as f64 - 0.02)
                     .collect();
                 s.right_plus(&G::TangentVector::from_slice(&delta), None, None)
@@ -619,7 +617,7 @@ mod tests {
             cost(&residual)
         );
 
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         let h = 1e-6;
         for block in 0..perturbed.len() {
             for k in 0..dof {

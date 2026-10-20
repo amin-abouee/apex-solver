@@ -17,11 +17,10 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{SMatrix, Vector3};
 use rayon::prelude::*;
 
-use apex_manifolds::{LieGroup, Tangent};
+use apex_manifolds::capability::ActsOnPoints3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
-use crate::factors::common::group_point::acts_on_points;
 use crate::factors::common::validate::expect_manifolds;
 use crate::factors::{Factor, NormalBlocks};
 
@@ -46,12 +45,12 @@ pub struct PlaneMatch {
 ///
 /// Blocks `[X ∈ G]`. Whitens internally: register with `NoiseModel::null()`.
 #[derive(Clone, Debug)]
-pub struct LidarMapPlanesFactor<G: LieGroup> {
+pub struct LidarMapPlanesFactor<G: ActsOnPoints3> {
     matches: Arc<[PlaneMatch]>,
     group: PhantomData<fn() -> G>,
 }
 
-impl<G: LieGroup> LidarMapPlanesFactor<G> {
+impl<G: ActsOnPoints3> LidarMapPlanesFactor<G> {
     /// A factor over `matches` — a `Vec`, or an `Arc` shared with the
     /// caller without a copy.
     ///
@@ -62,9 +61,9 @@ impl<G: LieGroup> LidarMapPlanesFactor<G> {
     pub fn new(matches: impl Into<Arc<[PlaneMatch]>>) -> CoreResult<Self> {
         let matches = matches.into();
         let name = "LidarMapPlanesFactor";
-        if !acts_on_points::<G>() || G::TangentVector::DIM > MAX_DOF {
+        if G::DOF > MAX_DOF {
             return Err(CoreError::InvalidInput(format!(
-                "{name}: {} does not act on 3-D points",
+                "{name}: {} has too many degrees of freedom",
                 G::NAME
             )));
         }
@@ -115,7 +114,7 @@ fn residual_and_row(action: &Action, m: &PlaneMatch) -> (f64, SMatrix<f64, 1, MA
     (residual, row)
 }
 
-impl<G: LieGroup + Send + Sync + 'static> Factor for LidarMapPlanesFactor<G> {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for LidarMapPlanesFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
@@ -123,7 +122,7 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarMapPlanesFactor<G> {
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
         let action = cached_action::<G>(params[0]);
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         let mut jac = jacobian;
         for (row, m) in self.matches.iter().enumerate() {
             let (r, jacobian_row) = residual_and_row(&action, m);
@@ -177,7 +176,7 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarMapPlanesFactor<G> {
             cost += c;
         }
         if let Some(blocks) = blocks {
-            let dof = G::TangentVector::DIM;
+            let dof = G::DOF;
             blocks.add_hessian(0, 0, &hessian.view((0, 0), (dof, dof)));
             blocks.add_gradient(0, &gradient.rows(0, dof));
         }
@@ -189,7 +188,7 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarMapPlanesFactor<G> {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (self.matches.len(), G::TangentVector::DIM)
+        (self.matches.len(), G::DOF)
     }
 
     fn whitens_internally(&self) -> bool {
@@ -211,6 +210,7 @@ mod tests {
     use apex_manifolds::se3::SE3;
     use apex_manifolds::se23::SE23;
     use apex_manifolds::sim3::Sim3;
+    use apex_manifolds::{LieGroup, Tangent};
     use faer::Mat;
     use nalgebra::{DMatrix, DVector, UnitQuaternion};
 
@@ -269,7 +269,7 @@ mod tests {
 
     /// Residuals match the point-by-point formula, and the Jacobian finite
     /// differences, on every group.
-    fn check<G: LieGroup + Send + Sync + 'static>(state: G) -> Result<(), CoreError> {
+    fn check<G: ActsOnPoints3 + Send + Sync + 'static>(state: G) -> Result<(), CoreError> {
         let ms = matches()?;
         let factor = LidarMapPlanesFactor::<G>::new(ms.clone())?;
         let (rows, cols) = factor.jacobian_shape();

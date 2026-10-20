@@ -6,17 +6,7 @@
 
 use nalgebra::{Matrix3, Vector3};
 
-use apex_manifolds::{LieGroup, Tangent};
-
-/// Whether group `G` moves 3-D points: a fixed-size tangent and an `act` that
-/// is a group action on 3-D points, so `X⁻¹ ⊙ (X ⊙ x) = x`.
-///
-/// Excluded: `SE2`/`SO2` act in the plane, `Rn` has a runtime dimension, and
-/// `SGal3::act` adds `t·v` — not a group action, so its inverse does not undo
-/// it.
-pub fn acts_on_points<G: LieGroup>() -> bool {
-    !G::TangentVector::is_dynamic() && !matches!(G::NAME, "SE2" | "SO2" | "SGal3")
-}
+use apex_manifolds::LieGroup;
 
 /// A world point carried into an anchor's frame, with its derivatives.
 #[derive(Clone, Debug)]
@@ -31,9 +21,9 @@ pub struct AnchorChain {
 
 /// Carry world point `world` into the frame of `anchor`.
 pub fn into_anchor<G: LieGroup>(anchor: &G, world: &Vector3<f64>) -> AnchorChain {
-    let mut d_inverse = G::zero_jacobian();
+    let mut d_inverse = anchor.zero_jacobian_for();
     let inverse = anchor.inverse(Some(&mut d_inverse));
-    let mut d_act = G::zero_jacobian();
+    let mut d_act = anchor.zero_jacobian_for();
     let mut d_world = Matrix3::zeros();
     let point = inverse.act(world, Some(&mut d_act), Some(&mut d_world));
     let dof = anchor.tangent_dim();
@@ -58,13 +48,10 @@ pub fn into_anchor<G: LieGroup>(anchor: &G, world: &Vector3<f64>) -> AnchorChain
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_manifolds::rn::Rn;
-    use apex_manifolds::se2::SE2;
     use apex_manifolds::se3::SE3;
     use apex_manifolds::se23::SE23;
     use apex_manifolds::sgal3::SGal3;
     use apex_manifolds::sim3::Sim3;
-    use apex_manifolds::so2::SO2;
     use apex_manifolds::so3::SO3;
     use nalgebra::UnitQuaternion;
 
@@ -116,12 +103,5 @@ mod tests {
             0.3,
         );
         assert!(!inverse_undoes_act(&sgal3));
-        assert!(!acts_on_points::<SGal3>());
-    }
-
-    #[test]
-    fn only_three_dimensional_fixed_size_groups_move_points() {
-        assert!(acts_on_points::<SE3>() && acts_on_points::<Sim3>());
-        assert!(!acts_on_points::<SE2>() && !acts_on_points::<SO2>() && !acts_on_points::<Rn>());
     }
 }

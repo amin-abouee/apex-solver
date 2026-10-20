@@ -22,21 +22,20 @@
 //!
 //! So `SE₂(3)` gets exact zero velocity columns and `Sim3` a scale column (the
 //! LiDAR then constrains scale), none of it written by hand here. Groups
-//! without a 3-D point action — see
-//! [`acts_on_points`](crate::factors::common::group_point::acts_on_points) —
-//! are rejected at construction.
+//! without a 3-D point action do not implement
+//! [`ActsOnPoints3`] and do not compile.
 
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, Vector3};
 use std::marker::PhantomData;
 
+use apex_manifolds::LieGroup;
+use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
-use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
 use crate::factors::Factor;
-use crate::factors::common::group_point::acts_on_points;
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_manifolds;
 
@@ -66,7 +65,7 @@ impl LidarPointChain {
 }
 
 /// Carry LiDAR point `point_l` through `T_SL` and the pose `X` to the world.
-pub fn lidar_point_chain<G: LieGroup>(
+pub fn lidar_point_chain<G: ActsOnPoints3>(
     state: &G,
     extrinsic: &SE3,
     point_l: &Vector3<f64>,
@@ -74,7 +73,7 @@ pub fn lidar_point_chain<G: LieGroup>(
     let r_sl: Matrix3<f64> = extrinsic.rotation_so3().rotation_matrix();
     let body = r_sl * point_l + extrinsic.translation();
 
-    let mut jacobian_state = G::zero_jacobian();
+    let mut jacobian_state = state.zero_jacobian_for();
     let mut d_world_d_body = Matrix3::zeros();
     let world = state.act(&body, Some(&mut jacobian_state), Some(&mut d_world_d_body));
     let d_state = (0..state.tangent_dim())
@@ -156,7 +155,7 @@ pub fn point_to_plane_sigma(
 ///
 /// Whitens internally: register with `NoiseModel::null()`.
 #[derive(Clone, Debug)]
-pub struct LidarMapPlaneFactor<G: LieGroup> {
+pub struct LidarMapPlaneFactor<G: ActsOnPoints3> {
     /// The scan point in the LiDAR frame, already deskewed to the pose's time.
     point_l: Vector3<f64>,
     /// The map plane `nᵀ·x + d = 0`, unit normal, in the world.
@@ -167,7 +166,7 @@ pub struct LidarMapPlaneFactor<G: LieGroup> {
     group: PhantomData<fn() -> G>,
 }
 
-impl<G: LieGroup> LidarMapPlaneFactor<G> {
+impl<G: ActsOnPoints3> LidarMapPlaneFactor<G> {
     /// A point against a plane with a fixed residual standard deviation.
     ///
     /// # Errors
@@ -175,12 +174,6 @@ impl<G: LieGroup> LidarMapPlaneFactor<G> {
     /// A group that does not act on 3-D points, a non-finite point, or a
     /// `sigma` that is not finite and positive.
     pub fn new(point_l: Vector3<f64>, plane: Plane, sigma: f64) -> CoreResult<Self> {
-        if !acts_on_points::<G>() {
-            return Err(CoreError::InvalidInput(format!(
-                "LidarMapPlaneFactor: {} does not act on 3-D points",
-                G::NAME
-            )));
-        }
         if !point_l.iter().all(|value| value.is_finite()) {
             return Err(CoreError::InvalidInput(format!(
                 "LidarMapPlaneFactor: point {point_l:?} is not finite"
@@ -239,7 +232,7 @@ impl<G: LieGroup> LidarMapPlaneFactor<G> {
     }
 }
 
-impl<G: LieGroup + Send + Sync + 'static> Factor for LidarMapPlaneFactor<G> {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for LidarMapPlaneFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
@@ -273,7 +266,7 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarMapPlaneFactor<G> {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (1, G::TangentVector::DIM + 6)
+        (1, G::DOF + 6)
     }
 
     fn whitens_internally(&self) -> bool {
@@ -292,8 +285,7 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarMapPlaneFactor<G> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_manifolds::rn::Rn;
-    use apex_manifolds::se2::SE2;
+    use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
     use apex_manifolds::se23::SE23;
     use apex_manifolds::sim3::Sim3;
@@ -321,12 +313,12 @@ mod tests {
     }
 
     /// A plane `offset` metres from the true world point of `point()`.
-    fn plane_near<G: LieGroup>(state: &G, offset: f64) -> Result<Plane, CoreError> {
+    fn plane_near<G: ActsOnPoints3>(state: &G, offset: f64) -> Result<Plane, CoreError> {
         let world = lidar_point_chain(state, &extrinsic(), &point()).world;
         Plane::new(normal(), offset - normal().dot(&world))
     }
 
-    fn evaluate<G: LieGroup + Send + Sync + 'static>(
+    fn evaluate<G: ActsOnPoints3 + Send + Sync + 'static>(
         factor: &LidarMapPlaneFactor<G>,
         state: &G,
         extrinsic: &SE3,
@@ -343,9 +335,9 @@ mod tests {
     /// Zero on the plane, the signed distance over σ off it, and analytic
     /// Jacobians equal to central differences in the group's own chart — for
     /// any group `G`.
-    fn check_group<G: LieGroup + Send + Sync + 'static>(state: G) -> Result<(), CoreError> {
+    fn check_group<G: ActsOnPoints3 + Send + Sync + 'static>(state: G) -> Result<(), CoreError> {
         const EPS: f64 = 1e-6;
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
 
         let on = LidarMapPlaneFactor::<G>::new(point(), plane_near(&state, 0.0)?, 0.02)?;
         let (residual, _) = evaluate(&on, &state, &extrinsic());
@@ -502,15 +494,6 @@ mod tests {
             &extrinsic(),
         )?;
         assert!(factor.sigma() > 0.0);
-        Ok(())
-    }
-
-    #[test]
-    fn groups_that_do_not_act_on_3d_points_are_rejected() -> Result<(), CoreError> {
-        let plane = Plane::new(Vector3::z(), 0.0)?;
-        assert!(LidarMapPlaneFactor::<SE2>::new(point(), plane.clone(), 0.02).is_err());
-        assert!(LidarMapPlaneFactor::<Rn>::new(point(), plane, 0.02).is_err());
-        assert!(acts_on_points::<SE3>() && acts_on_points::<Sim3>() && !acts_on_points::<SE2>());
         Ok(())
     }
 

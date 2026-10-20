@@ -16,14 +16,14 @@ use faer::prelude::Reborrow;
 use faer::prelude::ReborrowMut;
 use nalgebra::DMatrix;
 
-use apex_manifolds::{LieGroup, Tangent};
+use apex_manifolds::capability::ConstDoF;
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
 use crate::factors::{Factor, NormalBlocks};
 
 /// `inner` with block `block` (of group `G`) evaluated at `X·Δ`.
-pub struct RightOffset<F: Factor, G: LieGroup> {
+pub struct RightOffset<F: Factor, G: ConstDoF> {
     inner: F,
     block: usize,
     offset: G,
@@ -33,7 +33,7 @@ pub struct RightOffset<F: Factor, G: LieGroup> {
     column: usize,
 }
 
-impl<F: Factor, G: LieGroup> RightOffset<F, G> {
+impl<F: Factor, G: ConstDoF> RightOffset<F, G> {
     /// Wrap `inner`, offsetting block `block` by `offset`. `column` is the
     /// block's first column in the inner Jacobian.
     ///
@@ -42,7 +42,7 @@ impl<F: Factor, G: LieGroup> RightOffset<F, G> {
     /// A block column that does not fit the inner Jacobian, as
     /// [`CoreError::DimensionMismatch`].
     pub fn new(inner: F, block: usize, column: usize, offset: G) -> CoreResult<Self> {
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         if column + dof > inner.jacobian_shape().1 {
             return Err(CoreError::DimensionMismatch(format!(
                 "RightOffset: block columns {column}..{} exceed the factor's {}",
@@ -69,7 +69,7 @@ impl<F: Factor, G: LieGroup> RightOffset<F, G> {
     }
 }
 
-impl<F: Factor, G: LieGroup + Send + Sync + 'static> Factor for RightOffset<F, G> {
+impl<F: Factor, G: ConstDoF + Send + Sync + 'static> Factor for RightOffset<F, G> {
     fn linearize(
         &self,
         params: &[&[f64]],
@@ -86,7 +86,7 @@ impl<F: Factor, G: LieGroup + Send + Sync + 'static> Factor for RightOffset<F, G
         // The inner factor writes straight into `jac`; the block's columns are
         // then right-multiplied by `Ad(Δ⁻¹)` in place, a row at a time.
         self.inner.linearize(&shifted, residual, Some(jac.rb_mut()));
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         let mut row_values = vec![0.0; dof];
         for row in 0..jac.nrows() {
             for (k, value) in row_values.iter_mut().enumerate() {
@@ -112,7 +112,7 @@ impl<F: Factor, G: LieGroup + Send + Sync + 'static> Factor for RightOffset<F, G
         let Some(blocks) = blocks else {
             return self.inner.accumulate_normal(&shifted, None);
         };
-        let dof = G::TangentVector::DIM;
+        let dof = G::DOF;
         let adjoint = DMatrix::from_row_slice(dof, dof, &self.adjoint);
         self.inner
             .accumulate_normal(&shifted, Some(&mut blocks.transformed(self.block, adjoint)))
@@ -140,6 +140,7 @@ mod tests {
     use super::*;
     use crate::factors::lidar::{LidarMapPlanesFactor, Plane, PlaneMatch};
     use apex_manifolds::se23::SE23;
+    use apex_manifolds::{LieGroup, Tangent};
     use faer::Mat;
     use nalgebra::{UnitQuaternion, Vector3};
 
