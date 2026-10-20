@@ -9,8 +9,9 @@
 //! whatever decides the platform is at rest, exactly as a data-association
 //! front end supplies correspondences to a matching factor.
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se23::SE23;
+use std::marker::PhantomData;
+
+use apex_manifolds::capability::HasVelocity;
 use faer::prelude::ReborrowMut;
 use nalgebra::Vector3;
 
@@ -24,43 +25,51 @@ use crate::factors::common::validate::expect_block_sizes;
 /// r = v_world        (3D)
 /// ```
 ///
-/// # Parameter layout (1 block, 9 DOF)
+/// # Parameter layout (1 block)
 ///
 /// ```text
-/// params[0]: SE23 navigation state — 10D, 9 DOF
+/// params[0]: navigation state with a velocity block (`SE23`, `SGal3`)
 /// ```
 ///
 /// Under the group's right perturbation `v ← v + R·δν`, so the Jacobian is
-/// `[0 | 0 | R]` over the `[ρ, θ, ν]` tangent.
-#[derive(Debug, Clone, Default)]
-pub struct ZeroVelocityFactor;
+/// `R` in the velocity columns and zero elsewhere.
+#[derive(Debug, Clone)]
+pub struct ZeroVelocityFactor<G: HasVelocity> {
+    group: PhantomData<fn() -> G>,
+}
 
-impl ZeroVelocityFactor {
-    /// Create the constraint. The measurement is implicit — velocity is zero.
-    pub fn new() -> Self {
-        Self
+impl<G: HasVelocity> Default for ZeroVelocityFactor<G> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-impl Factor for ZeroVelocityFactor {
+impl<G: HasVelocity> ZeroVelocityFactor<G> {
+    /// Create the constraint. The measurement is implicit — velocity is zero.
+    pub fn new() -> Self {
+        Self { group: PhantomData }
+    }
+}
+
+impl<G: HasVelocity + Send + Sync + 'static> Factor for ZeroVelocityFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        let state = SE23::from_param_slice(params[0]);
-        let velocity = state.velocity();
+        let state = G::from_param_slice(params[0]);
+        let velocity = state.world_velocity();
         residual[..3].copy_from_slice(velocity.as_slice());
 
         let Some(mut jac) = jacobian else { return };
-        let rotation = state.rotation_matrix();
+        let rotation = state.body_to_world();
         for row in 0..3 {
-            for col in 0..9 {
+            for col in 0..G::DOF {
                 *jac.rb_mut().get_mut(row, col) = 0.0;
             }
             for col in 0..3 {
-                *jac.rb_mut().get_mut(row, 6 + col) = rotation[(row, col)];
+                *jac.rb_mut().get_mut(row, G::VELOCITY_AT + col) = rotation[(row, col)];
             }
         }
     }
@@ -70,15 +79,14 @@ impl Factor for ZeroVelocityFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (3, 9)
+        (3, G::DOF)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        expect_block_sizes(
-            variables,
-            &[SE23::REP_SIZE],
-            "ZeroVelocityFactor expects [SE23 state]",
-        )
+        match variables {
+            [state] if state.manifold_type_name() == G::NAME => Ok(()),
+            _ => Err(format!("ZeroVelocityFactor expects [{} state]", G::NAME)),
+        }
     }
 }
 

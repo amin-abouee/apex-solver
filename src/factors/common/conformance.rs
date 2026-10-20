@@ -392,4 +392,51 @@ mod tests {
             conforms::<Sim3>()
         }
     }
+
+    mod motion {
+        use super::*;
+        use crate::factors::motion::{NonholonomicFactor, PlanarMotionFactor, ZeroVelocityFactor};
+        use apex_manifolds::capability::{ActsOnPoints3, HasVelocity};
+
+        fn velocity_conforms<G: HasVelocity + Send + Sync + 'static>() -> Result<(), String> {
+            let name = |e: String| format!("{}: {e}", G::NAME);
+            finite_diff_jacobian_parity(
+                &ZeroVelocityFactor::<G>::new(),
+                &[Block::lie(&G::random())],
+                TOL,
+            )
+            .map_err(name)?;
+            finite_diff_jacobian_parity(
+                &NonholonomicFactor::<G>::new(),
+                &[Block::lie(&G::random())],
+                TOL,
+            )
+            .map_err(name)
+        }
+
+        fn planar_conforms<G: ActsOnPoints3 + Send + Sync + 'static>() -> Result<(), String> {
+            finite_diff_jacobian_parity(
+                &PlanarMotionFactor::<G>::new(0.3),
+                &[Block::lie(&G::random())],
+                TOL,
+            )
+            .map_err(|e| format!("{}: {e}", G::NAME))
+        }
+
+        /// `SGal3` was out of reach of the `SE23`-only code; the capability
+        /// bound admits it.
+        #[test]
+        fn velocity_constraints_conform_on_se23_and_sgal3() -> Result<(), String> {
+            velocity_conforms::<SE23>()?;
+            velocity_conforms::<SGal3>()
+        }
+
+        #[test]
+        fn planar_motion_conforms_on_every_admitted_group() -> Result<(), String> {
+            planar_conforms::<SO3>()?;
+            planar_conforms::<SE3>()?;
+            planar_conforms::<SE23>()?;
+            planar_conforms::<Sim3>()
+        }
+    }
 }

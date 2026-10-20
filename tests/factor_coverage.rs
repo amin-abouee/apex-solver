@@ -2070,13 +2070,13 @@ fn motion_constraints_pin_a_stopped_ground_vehicle() {
 
     problem.add_residual_block_with_noise(
         &[state_key],
-        Box::new(ZeroVelocityFactor::new()),
+        Box::new(ZeroVelocityFactor::<SE23>::new()),
         None,
         NoiseModel::from_sigmas(&[0.01; 3]).unwrap_or_else(|e| panic!("{e}")),
     );
     problem.add_residual_block_with_noise(
         &[state_key],
-        Box::new(NonholonomicFactor::new()),
+        Box::new(NonholonomicFactor::<SE23>::new()),
         None,
         NoiseModel::from_sigmas(&[0.05; 2]).unwrap_or_else(|e| panic!("{e}")),
     );
@@ -2088,7 +2088,7 @@ fn motion_constraints_pin_a_stopped_ground_vehicle() {
     );
     problem.add_residual_block_with_noise(
         &[pose_key],
-        Box::new(PlanarMotionFactor::new(0.1)),
+        Box::new(PlanarMotionFactor::<SE3>::new(0.1)),
         None,
         NoiseModel::from_sigmas(&[0.01; 3]).unwrap_or_else(|e| panic!("{e}")),
     );

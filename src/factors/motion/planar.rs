@@ -1,14 +1,14 @@
 //! Planar-motion constraint for ground vehicles.
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use std::marker::PhantomData;
+
+use apex_manifolds::capability::ActsOnPoints3;
 use faer::prelude::ReborrowMut;
-use nalgebra::Vector3;
+use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use crate::factors::common::math::skew;
-use crate::factors::common::validate::expect_block_sizes;
+use crate::factors::common::group_point::act_point;
 
 /// A vehicle confined to a horizontal plane: fixed height, no roll, no pitch.
 ///
@@ -27,21 +27,25 @@ use crate::factors::common::validate::expect_block_sizes;
 /// Three constraints per pose. On an indoor or road vehicle they remove the
 /// three least-observable degrees of freedom in a 6-DOF estimate.
 ///
-/// # Parameter layout (1 block, 6 DOF)
+/// # Parameter layout (1 block)
 ///
 /// ```text
-/// params[0]: SE3 pose — 7D, 6 DOF
+/// params[0]: a state that moves 3-D points (`SE3`, `SE23`, `Sim3`, `SO3`)
 /// ```
 #[derive(Debug, Clone)]
-pub struct PlanarMotionFactor {
+pub struct PlanarMotionFactor<G: ActsOnPoints3> {
     /// World height of the plane the vehicle travels on [m].
     height: f64,
+    group: PhantomData<fn() -> G>,
 }
 
-impl PlanarMotionFactor {
+impl<G: ActsOnPoints3> PlanarMotionFactor<G> {
     /// Constrain the pose to the plane `z = height`.
     pub fn new(height: f64) -> Self {
-        Self { height }
+        Self {
+            height,
+            group: PhantomData,
+        }
     }
 
     /// Constrain the pose to the plane `z = 0`.
@@ -50,39 +54,47 @@ impl PlanarMotionFactor {
     }
 }
 
-impl Factor for PlanarMotionFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for PlanarMotionFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        let pose = SE3::from_param_slice(params[0]);
-        let rotation = pose.rotation_so3().rotation_matrix();
+        let state = G::from_param_slice(params[0]);
+        let origin = act_point(&state, &Vector3::zeros());
+        residual[0] = origin.world.z - self.height;
 
-        residual[0] = pose.translation().z - self.height;
-        residual[1] = rotation[(2, 0)]; // e_zᵀ R e_x
-        residual[2] = rotation[(2, 1)]; // e_zᵀ R e_y
-
-        let Some(mut jac) = jacobian else { return };
-        for row in 0..3 {
-            for col in 0..6 {
-                *jac.rb_mut().get_mut(row, col) = 0.0;
+        let mut jac = jacobian;
+        if let Some(jac) = jac.as_mut() {
+            for row in 0..3 {
+                for col in 0..G::DOF {
+                    *jac.rb_mut().get_mut(row, col) = 0.0;
+                }
+            }
+            // Height: the z row of the origin's chain.
+            for col in 0..G::DOF {
+                *jac.rb_mut().get_mut(0, col) = origin.d_state[(2, col)];
             }
         }
 
-        // Height: t ← t + R·δρ, so ∂(t.z)/∂δρ is the third row of R.
-        for col in 0..3 {
-            *jac.rb_mut().get_mut(0, col) = rotation[(2, col)];
-        }
-
-        // Tilt: R ← R·Exp(δθ) ≈ R(I + [δθ]ₓ), so
-        //     ∂(e_zᵀ R e_a)/∂δθ = −e_zᵀ R [e_a]ₓ.
-        let z_row = rotation.row(2).transpose(); // (Rᵀe_z) as a column
+        // World-z component of each rotated body axis, normalized so a scale
+        // (`Sim3`) does not leak in: the rotation part of the action is the
+        // difference of the action on the axis and on the origin.
         for (row, axis) in [Vector3::x(), Vector3::y()].iter().enumerate() {
-            let d = -(z_row.transpose() * skew(axis));
-            for col in 0..3 {
-                *jac.rb_mut().get_mut(row + 1, 3 + col) = d[(0, col)];
+            let at_axis = act_point(&state, axis);
+            let rotated = at_axis.world - origin.world;
+            let norm = rotated.norm();
+            let unit = rotated / norm;
+            residual[1 + row] = unit.z;
+
+            if let Some(jac) = jac.as_mut() {
+                // ∂n = (I − nnᵀ)/‖v‖ · ∂v, ∂v the axis chain minus the origin's.
+                let projector = (Matrix3::identity() - unit * unit.transpose()) / norm;
+                let d_n = projector * (at_axis.d_state - origin.d_state);
+                for col in 0..G::DOF {
+                    *jac.rb_mut().get_mut(row + 1, col) = d_n[(2, col)];
+                }
             }
         }
     }
@@ -92,14 +104,13 @@ impl Factor for PlanarMotionFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (3, 6)
+        (3, G::DOF)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        expect_block_sizes(
-            variables,
-            &[SE3::REP_SIZE],
-            "PlanarMotionFactor expects [SE3 pose]",
-        )
+        match variables {
+            [state] if state.manifold_type_name() == G::NAME => Ok(()),
+            _ => Err(format!("PlanarMotionFactor expects [{} state]", G::NAME)),
+        }
     }
 }

@@ -107,7 +107,7 @@ fn moving_state() -> DVector<f64> {
 
 #[test]
 fn zero_velocity_residual_is_the_world_velocity() {
-    let factor = ZeroVelocityFactor::new();
+    let factor = ZeroVelocityFactor::<SE23>::new();
     let state = moving_state();
     let r = residual_of(&factor, &[state.as_slice()]);
     // Velocity is stored in the world frame, so the residual is it verbatim.
@@ -124,14 +124,14 @@ fn zero_velocity_vanishes_when_stationary() {
         UnitQuaternion::from_euler_angles(0.3, 0.1, -0.2),
     );
     let state = DVector::from_column_slice(s.as_param_slice());
-    let r = residual_of(&ZeroVelocityFactor::new(), &[state.as_slice()]);
+    let r = residual_of(&ZeroVelocityFactor::<SE23>::new(), &[state.as_slice()]);
     assert!(r.iter().all(|v| v.abs() < 1e-14), "{r:?}");
 }
 
 #[test]
 fn zero_velocity_jacobian_matches_finite_differences() {
     check_jacobian(
-        &ZeroVelocityFactor::new(),
+        &ZeroVelocityFactor::<SE23>::new(),
         &[moving_state()],
         &[Chart::Se23],
         "ZeroVelocityFactor",
@@ -176,7 +176,7 @@ fn nonholonomic_accepts_forward_motion_and_rejects_sideways() {
 
     let driving = SE23::new(Vector3::new(1.0, 2.0, 0.0), forward_world, rotation);
     let r = residual_of(
-        &NonholonomicFactor::new(),
+        &NonholonomicFactor::<SE23>::new(),
         &[DVector::from_column_slice(driving.as_param_slice()).as_slice()],
     );
     assert!(
@@ -187,7 +187,7 @@ fn nonholonomic_accepts_forward_motion_and_rejects_sideways() {
     let sideways_world = rotation * Vector3::new(0.0, 1.5, 0.0);
     let sliding = SE23::new(Vector3::new(1.0, 2.0, 0.0), sideways_world, rotation);
     let r = residual_of(
-        &NonholonomicFactor::new(),
+        &NonholonomicFactor::<SE23>::new(),
         &[DVector::from_column_slice(sliding.as_param_slice()).as_slice()],
     );
     assert!(
@@ -199,7 +199,7 @@ fn nonholonomic_accepts_forward_motion_and_rejects_sideways() {
 #[test]
 fn nonholonomic_jacobian_matches_finite_differences() {
     check_jacobian(
-        &NonholonomicFactor::new(),
+        &NonholonomicFactor::<SE23>::new(),
         &[moving_state()],
         &[Chart::Se23],
         "NonholonomicFactor",
@@ -215,7 +215,7 @@ fn planar_motion_vanishes_for_a_level_pose_at_height() {
         UnitQuaternion::from_euler_angles(0.0, 0.0, 1.1), // yaw only
     );
     let params = DVector::from_column_slice(pose.as_param_slice());
-    let r = residual_of(&PlanarMotionFactor::new(1.5), &[params.as_slice()]);
+    let r = residual_of(&PlanarMotionFactor::<SE3>::new(1.5), &[params.as_slice()]);
     assert!(
         r.iter().all(|v| v.abs() < 1e-12),
         "a level pose at the plane height must be free: {r:?}"
@@ -231,7 +231,7 @@ fn planar_motion_penalizes_height_and_tilt() {
         UnitQuaternion::from_euler_angles(roll, 0.0, 0.0),
     );
     let params = DVector::from_column_slice(pose.as_param_slice());
-    let r = residual_of(&PlanarMotionFactor::ground(), &[params.as_slice()]);
+    let r = residual_of(&PlanarMotionFactor::<SE3>::ground(), &[params.as_slice()]);
     assert!((r[0] - 0.3).abs() < 1e-12, "height row: {r:?}");
     // Rolling about x leaves the body x-axis level, and tips the y-axis so its
     // world-z component is R[2,1] = sin(roll).
@@ -249,7 +249,7 @@ fn planar_motion_jacobian_matches_finite_differences() {
         UnitQuaternion::from_euler_angles(0.12, -0.18, 0.9),
     );
     check_jacobian(
-        &PlanarMotionFactor::new(0.25),
+        &PlanarMotionFactor::<SE3>::new(0.25),
         &[DVector::from_column_slice(pose.as_param_slice())],
         &[Chart::Se3],
         "PlanarMotionFactor",
@@ -264,7 +264,7 @@ fn factors_validate_their_layouts() {
     let pose = Variable::new(SE3::identity());
     let bias = Variable::new(Rn::new(DVector::zeros(6)));
 
-    let zupt = ZeroVelocityFactor::new();
+    let zupt = ZeroVelocityFactor::<SE23>::new();
     assert!(
         zupt.validate_variables(&[&state as &dyn ManifoldVariable])
             .is_ok()
@@ -284,7 +284,7 @@ fn factors_validate_their_layouts() {
             .is_err()
     );
 
-    let planar = PlanarMotionFactor::ground();
+    let planar = PlanarMotionFactor::<SE3>::ground();
     assert!(
         planar
             .validate_variables(&[&pose as &dyn ManifoldVariable])
@@ -297,7 +297,7 @@ fn factors_validate_their_layouts() {
             .is_err()
     );
 
-    let nonholonomic = NonholonomicFactor::new();
+    let nonholonomic = NonholonomicFactor::<SE23>::new();
     assert!(
         nonholonomic
             .validate_variables(&[&state as &dyn ManifoldVariable])

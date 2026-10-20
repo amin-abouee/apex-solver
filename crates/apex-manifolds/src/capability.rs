@@ -4,6 +4,8 @@
 //! checking the group's name at run time, so a group that cannot do the job
 //! fails to compile rather than failing at registration.
 
+use nalgebra::{Matrix3, Vector3};
+
 use crate::LieGroup;
 use crate::se2::SE2;
 use crate::se3::SE3;
@@ -25,6 +27,43 @@ impl ActsOnPoints3 for SO3 {}
 impl ActsOnPoints3 for SE3 {}
 impl ActsOnPoints3 for SE23 {}
 impl ActsOnPoints3 for Sim3 {}
+
+/// A group whose tangent carries a frame velocity block: `SE23` and `SGal3`.
+///
+/// Under the right perturbation the velocity moves as `v ← v + R·δν`, which is
+/// what the zero-velocity and nonholonomic constraints differentiate.
+pub trait HasVelocity: ConstDoF {
+    /// First tangent index of the velocity block `ν`.
+    const VELOCITY_AT: usize;
+    /// First tangent index of the rotation block `θ`.
+    const ROTATION_AT: usize;
+    /// World-frame velocity.
+    fn world_velocity(&self) -> Vector3<f64>;
+    /// Body-to-world rotation.
+    fn body_to_world(&self) -> Matrix3<f64>;
+}
+
+impl HasVelocity for SE23 {
+    const VELOCITY_AT: usize = 6;
+    const ROTATION_AT: usize = 3;
+    fn world_velocity(&self) -> Vector3<f64> {
+        self.velocity()
+    }
+    fn body_to_world(&self) -> Matrix3<f64> {
+        self.rotation_matrix()
+    }
+}
+
+impl HasVelocity for SGal3 {
+    const VELOCITY_AT: usize = 3;
+    const ROTATION_AT: usize = 6;
+    fn world_velocity(&self) -> Vector3<f64> {
+        self.velocity()
+    }
+    fn body_to_world(&self) -> Matrix3<f64> {
+        self.rotation_matrix()
+    }
+}
 
 /// A group with a tangent dimension known at compile time (everything but
 /// `Rn`).
