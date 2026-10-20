@@ -247,4 +247,64 @@ mod tests {
             Err(_) => Ok(()),
         }
     }
+
+    mod lidar {
+        use super::*;
+        use crate::factors::lidar::{
+            GicpFactor, IcpFactor, LidarEdgeFactor, Plane, PointToPlaneFactor, PoseToPointFactor,
+            PrecomputedPlane,
+        };
+        use apex_manifolds::capability::ActsOnPoints3;
+        use nalgebra::{Matrix3, Vector3};
+
+        const POINT: [f64; 3] = [0.4, -0.7, 2.0];
+
+        fn pair<G: ActsOnPoints3 + 'static>() -> [Block; 2] {
+            [Block::lie(&G::random()), Block::euclidean(&POINT)]
+        }
+
+        fn two<G: ActsOnPoints3 + 'static>() -> [Block; 2] {
+            [Block::lie(&G::random()), Block::lie(&G::random())]
+        }
+
+        fn conforms<G: ActsOnPoints3 + Send + Sync + 'static>() -> Result<(), String> {
+            let name = |e: String| format!("{}: {e}", G::NAME);
+            let plane = Plane::new(Vector3::new(0.2, 0.3, 0.9), -0.5).map_err(|e| e.to_string())?;
+            let cov = Matrix3::identity() * 0.05;
+            finite_diff_jacobian_parity(
+                &PoseToPointFactor::<G>::new(Vector3::new(1.0, 2.0, 3.0)),
+                &pair::<G>(),
+                TOL,
+            )
+            .map_err(name)?;
+            finite_diff_jacobian_parity(&PointToPlaneFactor::<G>::new(plane), &pair::<G>(), TOL)
+                .map_err(name)?;
+            let gicp =
+                GicpFactor::<G>::new(Vector3::new(1.0, 2.0, 3.0), cov, cov, Matrix3::identity())
+                    .map_err(|e| e.to_string())?;
+            finite_diff_jacobian_parity(&gicp, &pair::<G>(), TOL).map_err(name)?;
+            let icp = IcpFactor::<G, _>::new(
+                PrecomputedPlane::new(Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.1, 0.2, 1.0)),
+                Vector3::new(0.3, 0.1, -0.4),
+                0.05,
+            );
+            finite_diff_jacobian_parity(&icp, &two::<G>(), TOL).map_err(name)?;
+            let edge = LidarEdgeFactor::<G>::new_isotropic(
+                Vector3::new(0.3, 0.1, -0.4),
+                Vector3::new(0.0, 0.5, 0.0),
+                Vector3::new(1.0, 0.2, 0.1),
+                0.05,
+            );
+            finite_diff_jacobian_parity(&edge, &two::<G>(), TOL).map_err(name)
+        }
+
+        #[test]
+        fn the_lidar_correspondence_factors_conform_on_every_admitted_group() -> Result<(), String>
+        {
+            conforms::<SO3>()?;
+            conforms::<SE3>()?;
+            conforms::<SE23>()?;
+            conforms::<Sim3>()
+        }
+    }
 }

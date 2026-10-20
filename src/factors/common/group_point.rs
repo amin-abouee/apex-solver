@@ -4,7 +4,9 @@
 //! `X⁻¹ ⊙ p`; both, with their Jacobians in the group's own chart, come from
 //! the group's `act` and `inverse`.
 
-use nalgebra::{Matrix3, Vector3};
+use nalgebra::{Matrix3, SMatrix, Vector3};
+
+use apex_manifolds::capability::ActsOnPoints3;
 
 use apex_manifolds::LieGroup;
 
@@ -42,6 +44,87 @@ pub fn into_anchor<G: LieGroup>(anchor: &G, world: &Vector3<f64>) -> AnchorChain
         point,
         d_anchor,
         d_world,
+    }
+}
+
+/// Largest tangent dimension of a group that moves 3-D points (`SE23`).
+pub const MAX_ACT_DOF: usize = 9;
+
+/// A body point carried to the world, with its derivatives.
+#[derive(Clone, Debug)]
+pub struct PointAct {
+    /// `X ⊙ p`.
+    pub world: Vector3<f64>,
+    /// `∂(X ⊙ p)/∂X`, one column per tangent axis (the rest zero).
+    pub d_state: SMatrix<f64, 3, MAX_ACT_DOF>,
+    /// `∂(X ⊙ p)/∂p`.
+    pub d_point: Matrix3<f64>,
+}
+
+/// Carry body point `point` to the world by `state`.
+pub fn act_point<G: ActsOnPoints3>(state: &G, point: &Vector3<f64>) -> PointAct {
+    const { assert!(G::DOF <= MAX_ACT_DOF) };
+    let mut jacobian = state.zero_jacobian_for();
+    let mut d_point = Matrix3::zeros();
+    let world = state.act(point, Some(&mut jacobian), Some(&mut d_point));
+    PointAct {
+        world,
+        d_state: SMatrix::from_fn(|row, col| {
+            if col < G::DOF {
+                jacobian[(row, col)]
+            } else {
+                0.0
+            }
+        }),
+        d_point,
+    }
+}
+
+/// A point of frame B seen from frame A, `p_A = X_a⁻¹ ⊙ (X_b ⊙ p_B)`.
+#[derive(Clone, Debug)]
+pub struct RelativePoint {
+    /// `p_A`.
+    pub point: Vector3<f64>,
+    /// `∂p_A/∂X_a`.
+    pub d_a: SMatrix<f64, 3, MAX_ACT_DOF>,
+    /// `∂p_A/∂X_b`.
+    pub d_b: SMatrix<f64, 3, MAX_ACT_DOF>,
+}
+
+/// Carry `point_b` from frame B into frame A.
+pub fn relative_point<G: ActsOnPoints3>(a: &G, b: &G, point_b: &Vector3<f64>) -> RelativePoint {
+    let act_b = act_point(b, point_b);
+    let chain = into_anchor(a, &act_b.world);
+    RelativePoint {
+        point: chain.point,
+        d_a: SMatrix::from_fn(|row, col| chain.d_anchor.get(col).map_or(0.0, |axis| axis[row])),
+        d_b: chain.d_world * act_b.d_state,
+    }
+}
+
+/// Registration check for a `[state, 3-D point]` factor.
+pub(crate) fn expect_state_and_point<G: ActsOnPoints3>(
+    variables: &[&dyn crate::core::variable::ManifoldVariable],
+    name: &str,
+) -> Result<(), String> {
+    match variables {
+        [state, point]
+            if state.manifold_type_name() == G::NAME && point.as_param_slice().len() == 3 =>
+        {
+            Ok(())
+        }
+        _ => Err(format!("{name} expects [{} state, 3D point]", G::NAME)),
+    }
+}
+
+/// Registration check for a `[state, state]` factor.
+pub(crate) fn expect_two_states<G: ActsOnPoints3>(
+    variables: &[&dyn crate::core::variable::ManifoldVariable],
+    name: &str,
+) -> Result<(), String> {
+    match variables {
+        [a, b] if a.manifold_type_name() == G::NAME && b.manifold_type_name() == G::NAME => Ok(()),
+        _ => Err(format!("{name} expects [{0} state, {0} state]", G::NAME)),
     }
 }
 

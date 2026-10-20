@@ -499,7 +499,7 @@ fn lidar_scan_matching_recovers_transform() {
         if i < 9 {
             problem.add_residual_block(
                 &[pose_key, p_key],
-                Box::new(PointToPlaneFactor::new(plane.clone())),
+                Box::new(PointToPlaneFactor::<SE3>::new(plane.clone())),
                 None,
             );
         }
@@ -509,7 +509,7 @@ fn lidar_scan_matching_recovers_transform() {
             problem.add_residual_block(
                 &[pose_key, p_key],
                 Box::new(
-                    GicpFactor::new(
+                    GicpFactor::<SE3>::new(
                         scan_target[i],
                         plane_cov,
                         plane_cov,
@@ -537,7 +537,7 @@ fn lidar_scan_matching_recovers_transform() {
         );
         problem.add_residual_block(
             &[pose_key, p_key],
-            Box::new(PoseToPointFactor::new(scan_target[i])),
+            Box::new(PoseToPointFactor::<SE3>::new(scan_target[i])),
             None,
         );
     }

@@ -181,7 +181,7 @@ fn make_factor(corr: &Correspondence, point_b: Vector3<f64>) -> Box<dyn Factor +
             plane_point,
             plane_normal,
             ..
-        } => Box::new(lidar_plane_factor_isotropic(
+        } => Box::new(lidar_plane_factor_isotropic::<SE3>(
             point_b,
             *plane_point,
             *plane_normal,
@@ -191,7 +191,7 @@ fn make_factor(corr: &Correspondence, point_b: Vector3<f64>) -> Box<dyn Factor +
             edge_point,
             edge_direction,
             ..
-        } => Box::new(LidarEdgeFactor::new_isotropic(
+        } => Box::new(LidarEdgeFactor::<SE3>::new_isotropic(
             point_b,
             *edge_point,
             *edge_direction,

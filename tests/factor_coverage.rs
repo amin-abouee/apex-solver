@@ -1293,7 +1293,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
             // Through the generic distance-field entry point.
             problem.add_residual_block(
                 &[key_a, key_b],
-                Box::new(IcpFactor::new(
+                Box::new(IcpFactor::<SE3, _>::new(
                     PrecomputedPlane::new(*point_on_plane, *normal),
                     p_b,
                     0.02,
@@ -1304,7 +1304,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
             // Through the LOAM plane helper (the same factor, aliased).
             problem.add_residual_block(
                 &[key_a, key_b],
-                Box::new(lidar_plane_factor_isotropic(
+                Box::new(lidar_plane_factor_isotropic::<SE3>(
                     p_b,
                     *point_on_plane,
                     *normal,
@@ -1326,7 +1326,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
             .act(&t_wa.act(&on_line, None, None), None, None);
         problem.add_residual_block(
             &[key_a, key_b],
-            Box::new(LidarEdgeFactor::new_isotropic(
+            Box::new(LidarEdgeFactor::<SE3>::new_isotropic(
                 p_b, edge_point, edge_dir, 0.02,
             )),
             None,
