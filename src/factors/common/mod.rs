@@ -13,6 +13,8 @@
 //! group's.
 
 pub mod cheirality;
+#[cfg(test)]
+pub(crate) mod conformance;
 pub mod group_point;
 pub mod math;
 pub(crate) mod validate;
