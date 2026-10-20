@@ -71,11 +71,12 @@
 use std::sync::Arc;
 
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
+use nalgebra::{SMatrix, SVector, Vector3};
 
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::se23::SE23;
+use apex_manifolds::util::skew;
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
@@ -220,10 +221,6 @@ struct Evaluation {
     /// Raw (unscaled) robust energy `Σ wₖ² hw r² (2 − hw)`.
     energy: f64,
     jacobian: Option<SMatrix<f64, PATTERN_PIXELS, JACOBIAN_COLUMNS>>,
-}
-
-fn skew(v: &Vector3<f64>) -> Matrix3<f64> {
-    Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
 }
 
 impl PhotometricInverseRangeSe23Factor {

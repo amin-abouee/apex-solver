@@ -495,11 +495,7 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     fn get_model_name(&self) -> &'static str;
 }
 
-/// Skew-symmetric cross-product matrix `[v]×` such that `[v]× w = v × w`.
-#[inline]
-pub(crate) fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
-    Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
-}
+pub(crate) use apex_manifolds::util::skew as skew_symmetric;
 
 #[cfg(test)]
 mod tests {

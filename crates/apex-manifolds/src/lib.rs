@@ -66,6 +66,7 @@ pub mod sgal3;
 pub mod sim3;
 pub mod so2;
 pub mod so3;
+pub mod util;
 
 /// Errors that can occur during manifold operations.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
