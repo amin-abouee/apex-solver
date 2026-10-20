@@ -439,4 +439,48 @@ mod tests {
             planar_conforms::<Sim3>()
         }
     }
+    mod camera {
+        use super::*;
+        use crate::factors::visual::projection::ProjectionFactor;
+        use crate::factors::{BundleAdjustment, OnlyPose};
+        use apex_camera_models::PinholeCamera;
+        use apex_manifolds::capability::ActsOnPoints3;
+        use nalgebra::{Matrix2xX, Vector2};
+
+        fn projection_conforms<G: ActsOnPoints3 + Send + Sync + 'static>() -> Result<(), String> {
+            let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
+            let observations =
+                Matrix2xX::from_columns(&[Vector2::new(300.0, 250.0), Vector2::new(350.0, 200.0)]);
+            let landmarks = [0.2, -0.1, 4.0, -0.3, 0.2, 5.0];
+            let name = |e: String| format!("{}: {e}", G::NAME);
+            let pose = G::from_param_slice(G::random().as_param_slice());
+
+            finite_diff_jacobian_parity(
+                &ProjectionFactor::<_, BundleAdjustment, G>::new(
+                    observations.clone(),
+                    camera.clone(),
+                ),
+                &[Block::lie(&pose), Block::euclidean(&landmarks)],
+                TOL,
+            )
+            .map_err(name)?;
+
+            let landmark_matrix = nalgebra::Matrix3xX::from_column_slice(&landmarks);
+            finite_diff_jacobian_parity(
+                &ProjectionFactor::<_, OnlyPose, G>::new(observations, camera)
+                    .with_fixed_landmarks(landmark_matrix),
+                &[Block::lie(&pose)],
+                TOL,
+            )
+            .map_err(|e| format!("{}: {e}", G::NAME))
+        }
+
+        #[test]
+        fn projection_conforms_on_every_admitted_group() -> Result<(), String> {
+            projection_conforms::<SO3>()?;
+            projection_conforms::<SE3>()?;
+            projection_conforms::<SE23>()?;
+            projection_conforms::<Sim3>()
+        }
+    }
 }

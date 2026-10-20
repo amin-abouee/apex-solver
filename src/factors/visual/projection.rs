@@ -10,8 +10,11 @@ use tracing::warn;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::{Factor, OptimizeParams};
 use apex_camera_models::{CameraModel, CameraModelError};
-use apex_manifolds::LieGroup;
+use apex_manifolds::Tangent;
+use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
+
+use crate::factors::common::group_point::{PointAct, act_point};
 
 use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 
@@ -65,10 +68,11 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// ```
 //
 // NOTE: `Clone` is manual because of the atomic fallback counter below.
-pub struct ProjectionFactor<CAM, OP>
+pub struct ProjectionFactor<CAM, OP, G = SE3>
 where
     CAM: CameraModel,
     OP: OptimizationConfig,
+    G: ActsOnPoints3,
 {
     /// 2D observations in image coordinates (2×N for N observations)
     pub observations: Matrix2xX<f64>,
@@ -77,7 +81,7 @@ where
     pub camera: CAM,
 
     /// Fixed pose (required when POSE = false)
-    pub fixed_pose: Option<SE3>,
+    pub fixed_pose: Option<G>,
 
     /// Fixed landmarks (required when LANDMARK = false), 3×N matrix
     pub fixed_landmarks: Option<Matrix3xX<f64>>,
@@ -91,13 +95,14 @@ where
     intrinsics_fallbacks: AtomicUsize,
 
     /// Phantom data for optimization type
-    _phantom: PhantomData<OP>,
+    _phantom: PhantomData<fn() -> OP>,
 }
 
-impl<CAM, OP> Clone for ProjectionFactor<CAM, OP>
+impl<CAM, OP, G> Clone for ProjectionFactor<CAM, OP, G>
 where
     CAM: CameraModel + Clone,
     OP: OptimizationConfig,
+    G: ActsOnPoints3,
 {
     fn clone(&self) -> Self {
         Self {
@@ -114,10 +119,11 @@ where
     }
 }
 
-impl<CAM, OP> ProjectionFactor<CAM, OP>
+impl<CAM, OP, G> ProjectionFactor<CAM, OP, G>
 where
     CAM: CameraModel,
     OP: OptimizationConfig,
+    G: ActsOnPoints3,
 {
     /// Create a new projection factor.
     ///
@@ -171,7 +177,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
-    pub fn with_fixed_pose(mut self, pose: SE3) -> Self {
+    pub fn with_fixed_pose(mut self, pose: G) -> Self {
         self.fixed_pose = Some(pose);
         self
     }
@@ -228,7 +234,7 @@ where
     /// on the hot path.
     fn evaluate_internal(
         &self,
-        pose: &SE3,
+        pose: &G,
         landmarks: &[f64],
         camera: &CAM,
         residual: &mut [f64],
@@ -246,7 +252,8 @@ where
             // World-to-camera convention: pose is T_wc where p_cam = R * p_world + t
             // This matches BAL dataset format and ReprojectionFactor
             // pose.act() computes exactly: R * p_world + t = p_cam
-            let p_cam = pose.act(&p_world, None, None);
+            let moved = act_point(pose, &p_world);
+            let p_cam = moved.world;
 
             // Project point (includes all validity checks)
             let uv = match camera.project(&p_cam) {
@@ -262,9 +269,7 @@ where
                         i,
                         min_z - z,
                         &Vector3::new(0.0, 0.0, -1.0),
-                        &p_world,
-                        pose,
-                        camera,
+                        &moved,
                         residual,
                         jacobian.as_mut(),
                     );
@@ -315,14 +320,15 @@ where
 
                 // Jacobian w.r.t. pose (world-to-camera convention)
                 if OP::POSE {
-                    let (d_uv_d_pcam, d_pcam_d_pose) = camera.jacobian_pose(&p_world, pose);
-                    let d_uv_d_pose = d_uv_d_pcam * d_pcam_d_pose;
+                    let d_uv_d_pcam = camera.jacobian_point(&p_cam);
                     for r in 0..2 {
-                        for c in 0..6 {
-                            *jac.rb_mut().get_mut(i * 2 + r, col_offset + c) = d_uv_d_pose[(r, c)];
+                        for c in 0..G::DOF {
+                            *jac.rb_mut().get_mut(i * 2 + r, col_offset + c) = (0..3)
+                                .map(|k| d_uv_d_pcam[(r, k)] * moved.d_state[(k, c)])
+                                .sum::<f64>();
                         }
                     }
-                    col_offset += 6;
+                    col_offset += G::DOF;
                 }
 
                 // Jacobian w.r.t. landmarks (world-to-camera convention)
@@ -332,8 +338,7 @@ where
                     // p_cam = R * p_world + t
                     // ∂p_cam/∂p_world = R
                     // ∂uv/∂p_world = ∂uv/∂p_cam * R
-                    let rotation = pose.rotation_so3().rotation_matrix();
-                    let d_uv_d_landmark = d_uv_d_pcam * rotation;
+                    let d_uv_d_landmark = d_uv_d_pcam * moved.d_point;
 
                     for r in 0..2 {
                         for c in 0..3 {
@@ -423,15 +428,12 @@ where
     /// damping the resulting singular normal block is harmless; under plain
     /// Gauss–Newton a solve made only of barrier blocks would be
     /// rank-deficient by construction.
-    #[allow(clippy::too_many_arguments)]
     fn write_projection_barrier(
         &self,
         i: usize,
         deficit: f64,
         d_deficit_d_pcam: &Vector3<f64>,
-        p_world: &Vector3<f64>,
-        pose: &SE3,
-        camera: &CAM,
+        moved: &PointAct,
         residual: &mut [f64],
         jacobian: Option<&mut faer::mat::MatMut<'_, f64>>,
     ) {
@@ -460,23 +462,21 @@ where
             // valid here as it is on a valid projection. The first tuple
             // element (∂uv/∂p_cam) is intentionally unused: it is not
             // defined in a meaningful way for an invalid projection.
-            let (_, d_pcam_d_pose) = camera.jacobian_pose(p_world, pose);
-            for c in 0..6 {
+            for c in 0..G::DOF {
                 let d = (0..3)
-                    .map(|r| d_penalty_d_pcam[r] * d_pcam_d_pose[(r, c)])
+                    .map(|r| d_penalty_d_pcam[r] * moved.d_state[(r, c)])
                     .sum::<f64>();
                 *jac.rb_mut().get_mut(i * 2, col_offset + c) = d;
                 *jac.rb_mut().get_mut(i * 2 + 1, col_offset + c) = d;
             }
-            col_offset += 6;
+            col_offset += G::DOF;
         }
 
         if OP::LANDMARK {
             // p_cam = R p_world + t, so ∂p_cam/∂p_world = R.
-            let rotation = pose.rotation_so3().rotation_matrix();
             for c in 0..3 {
                 let d = (0..3)
-                    .map(|r| d_penalty_d_pcam[r] * rotation[(r, c)])
+                    .map(|r| d_penalty_d_pcam[r] * moved.d_point[(r, c)])
                     .sum::<f64>();
                 *jac.rb_mut().get_mut(i * 2, col_offset + i * 3 + c) = d;
                 *jac.rb_mut().get_mut(i * 2 + 1, col_offset + i * 3 + c) = d;
@@ -487,8 +487,9 @@ where
 }
 
 // Factor trait implementation with generic dispatch
-impl<CAM, OP> Factor for ProjectionFactor<CAM, OP>
+impl<CAM, OP, G> Factor for ProjectionFactor<CAM, OP, G>
 where
+    G: ActsOnPoints3 + Send + Sync + 'static,
     CAM: CameraModel,
     for<'a> CAM: TryFrom<&'a [f64]>,
     OP: OptimizationConfig,
@@ -501,12 +502,14 @@ where
     ) {
         let mut param_idx = 0;
 
-        let pose: SE3 = if OP::POSE {
-            let p = SE3::from_param_slice(params[param_idx]);
+        let pose: G = if OP::POSE {
+            let p = G::from_param_slice(params[param_idx]);
             param_idx += 1;
             p
         } else {
-            self.fixed_pose.clone().unwrap_or_else(SE3::identity)
+            self.fixed_pose
+                .clone()
+                .unwrap_or_else(|| <G::TangentVector as Tangent<G>>::zero().exp(None))
         };
 
         // Both landmark sources are already column-major triples, so this
@@ -561,7 +564,7 @@ where
         let n = self.observations.ncols();
         let mut cols = 0;
         if OP::POSE {
-            cols += 6;
+            cols += G::DOF;
         }
         if OP::LANDMARK {
             cols += n * 3;
@@ -579,11 +582,11 @@ where
             let pose = variables.get(idx).ok_or_else(|| {
                 "ProjectionFactor expects a pose variable as its first parameter".to_string()
             })?;
-            if pose.as_param_slice().len() != SE3::REP_SIZE {
+            if pose.manifold_type_name() != G::NAME {
                 return Err(format!(
-                    "pose variable holds {} parameters, ProjectionFactor requires {} (SE3)",
-                    pose.as_param_slice().len(),
-                    SE3::REP_SIZE
+                    "pose variable is {}, ProjectionFactor requires {}",
+                    pose.manifold_type_name(),
+                    G::NAME
                 ));
             }
             idx += 1;
@@ -626,6 +629,7 @@ mod tests {
         PoseAndIntrinsics, SelfCalibration,
     };
     use apex_camera_models::{DoubleSphereCamera, PinholeCamera};
+    use apex_manifolds::LieGroup;
     use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
     use nalgebra::{DMatrix, DVector, Vector2, Vector3};
