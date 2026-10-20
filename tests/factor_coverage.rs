@@ -37,7 +37,7 @@ use apex_solver::factors::lidar::{
     PointMoments, PrecomputedPlane, SubmapAlignmentFactor, lidar_plane_factor_isotropic,
 };
 use apex_solver::factors::navigation::{GpsAsyncFactor, GpsFactor};
-use apex_solver::factors::ranging::bearing::{BearingFactor, BearingFactorSe23};
+use apex_solver::factors::ranging::bearing::BearingFactor;
 use apex_solver::factors::ranging::range::PosePoseRangeFactor;
 use apex_solver::factors::visual::{
     DepthFactor, EssentialMatrixConstraint, EssentialMatrixFactor, HomogeneousPointFactor,
@@ -755,7 +755,7 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
             poses[k].rotation_so3().rotation_matrix().transpose() * (delta / delta.norm());
         problem.add_residual_block(
             &[*key, lm_key],
-            Box::new(BearingFactor::new_isotropic(bearing, 0.01)),
+            Box::new(BearingFactor::<SE3>::new_isotropic(bearing, 0.01)),
             None,
         );
     }
@@ -821,7 +821,7 @@ fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
         let bearing = states[k].rotation_matrix().transpose() * (delta / delta.norm());
         problem.add_residual_block(
             &[*key, lm_key],
-            Box::new(BearingFactorSe23::new_isotropic(bearing, 0.01)),
+            Box::new(BearingFactor::<SE23>::new_isotropic(bearing, 0.01)),
             None,
         );
     }

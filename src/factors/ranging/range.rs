@@ -528,7 +528,7 @@ mod tests {
         let delta = point - pose.translation();
         let truth = pose.rotation_so3().rotation_matrix().transpose() * (delta / delta.norm());
 
-        let bearing_only = BearingFactor::new_isotropic(truth, 1.0);
+        let bearing_only = BearingFactor::<SE3>::new_isotropic(truth, 1.0);
         let mut r_bearing = vec![0.0; 2];
         bearing_only.linearize(&[&pose_v, &point_v], &mut r_bearing, None);
         for (i, r) in r_bearing.iter().enumerate() {

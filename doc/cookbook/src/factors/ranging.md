@@ -16,8 +16,7 @@ two bearing factors, and the convention they share.
 | `PosePoseRangeFactor` | two poses | the distance between two frames' origins |
 | `PosePointRangeFactor` | a pose, a point | the distance from a pose's origin to a known point |
 | `BearingRangeFactor` | a pose, a point | a distance **and** a direction, together |
-| `BearingFactor` | a pose | the direction from a pose's origin to a known point |
-| `BearingFactorSe23` | an `SE23` state | the same, for the `SE23` formulation |
+| `BearingFactor<G>` | a state of any group that moves points | the direction from the state's origin to a known point |
 
 </div>
 
@@ -51,15 +50,16 @@ example, weighting them as one residual) would lose the distinction between
 "the range is wrong" and "the direction is wrong", which matters when one of
 the two is corrupted.
 
-## 4. `BearingFactor` versus `BearingFactorSe23`
+## 4. One factor, any state
 
-The same measurement in two state formulations: a plain `SE3` pose, and an
-`SE23` state that carries the velocity along with the pose. The `SE23` form
+`BearingFactor<G>` takes its state group as a type parameter: a plain `SE3`
+pose, or an `SE23` state that carries the velocity along with the pose. The
+`SE23` instantiation
 is what a visual-inertial or LiDAR-inertial graph uses, because the interval
 between two states already carries the velocity, and a bearing measured in the
 middle of that interval belongs to a state that has one.
 
-The residual in the `SE23` case is written on the sphere — the perpendicular
+The residual is written on the sphere — the perpendicular
 component of the difference between the measured and predicted directions —
 which is the same projector $I - \mathbf{b}\mathbf{b}^\top$ the visual bearing
 factors use. The crate keeps one convention for the two, which is why the

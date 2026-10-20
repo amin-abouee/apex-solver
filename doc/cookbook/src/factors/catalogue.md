@@ -86,8 +86,7 @@ Companions: `Plane`, `PrecomputedPlane`, `LidarPointChain`, `PlaneMatch`,
 | `PosePoseRangeFactor` | two poses | the distance between two origins |
 | `PosePointRangeFactor` | pose, point | the distance from an origin to a point |
 | `BearingRangeFactor` | pose, point | a distance and a direction together |
-| `BearingFactor` | pose | the direction from an origin to a point |
-| `BearingFactorSe23` | state | the same, in the `SE23` formulation |
+| `BearingFactor<G>` | any state that moves points | the direction from an origin to a point |
 
 ## 7. Motion models — [chapter](./motion.md)
 
