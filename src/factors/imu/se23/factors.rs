@@ -24,12 +24,12 @@
 
 use apex_manifolds::se23::{Matrix9, SE23, SE23Tangent};
 use apex_manifolds::{LieGroup, Tangent};
-use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::validate::expect_block_sizes;
+use crate::factors::imu::common::{split_bias, write_jacobian};
 use crate::factors::imu::preintegration::ImuPreintegration;
 use crate::factors::imu::types::SpeedAndBiasExt;
 
@@ -128,26 +128,6 @@ fn evaluate(
         d_state_i: d_r_d_predicted * d_predicted_d_gc * d_gc_d_state_i,
         d_state_j: d_r_d_predicted,
         d_bias: d_r_d_delta * d_delta_d_correction * d_correction_d_bias,
-    }
-}
-
-/// Read a 6D bias block as `(b_g, b_a)`.
-fn split_bias(block: &[f64]) -> (Vector3<f64>, Vector3<f64>) {
-    (
-        Vector3::new(block[0], block[1], block[2]),
-        Vector3::new(block[3], block[4], block[5]),
-    )
-}
-
-/// Copy a weighted Jacobian into the caller's column-major buffer.
-fn write_jacobian<const R: usize, const C: usize>(
-    weighted: &SMatrix<f64, R, C>,
-    jac: &mut faer::mat::MatMut<'_, f64>,
-) {
-    for row in 0..R {
-        for col in 0..C {
-            *jac.rb_mut().get_mut(row, col) = weighted[(row, col)];
-        }
     }
 }
 
