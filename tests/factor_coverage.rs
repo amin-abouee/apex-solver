@@ -764,7 +764,7 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
     let baseline = (poses[0].translation() - poses[3].translation()).norm();
     problem.add_residual_block_with_noise(
         &[pose_keys[0], pose_keys[3]],
-        Box::new(PosePoseRangeFactor::new(baseline)),
+        Box::new(PosePoseRangeFactor::<SE3>::new(baseline)),
         None,
         NoiseModel::from_sigmas(&[0.01]).unwrap_or_else(|e| panic!("{e}")),
     );

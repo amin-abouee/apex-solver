@@ -1026,7 +1026,9 @@ fn bearing_range_and_gps_velocity_graph() {
     anchor_se3(&mut problem, pose_key, &pose_true);
     problem.add_residual_block(
         &[pose_key, lm_key],
-        Box::new(BearingRangeFactor::new(bearing, delta.norm()).unwrap_or_else(|e| panic!("{e}"))),
+        Box::new(
+            BearingRangeFactor::<SE3>::new(bearing, delta.norm()).unwrap_or_else(|e| panic!("{e}")),
+        ),
         None,
     );
     problem.add_residual_block_with_noise(
@@ -1047,5 +1049,5 @@ fn bearing_range_and_gps_velocity_graph() {
         + (lm_hat[2] - landmark.z).powi(2))
     .sqrt();
     assert!(err < 1e-3, "landmark not recovered: {err:.5}");
-    let _ = PosePointRangeFactor::new(1.0); // smoke: type is public
+    let _ = PosePointRangeFactor::<SE3>::new(1.0); // smoke: type is public
 }

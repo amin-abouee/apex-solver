@@ -1,51 +1,56 @@
 //! Range and bearing-range factors (GTSAM `RangeFactor` / `BearingRangeFactor`
 //! analogues) — used for UWB, radar, and landmark-based positioning.
+//!
+//! Generic over every group that moves 3-D points ([`ActsOnPoints3`]): the
+//! frame origin is the group's action on the zero point, so range rows pick up
+//! exactly the translation columns of the group's own `act` Jacobian.
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use std::marker::PhantomData;
+
+use apex_manifolds::capability::ActsOnPoints3;
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix3, SMatrix, Vector3};
+use nalgebra::{Matrix3, Vector3};
 
 use crate::core::CoreError;
 use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::common::group_point::{
+    act_point, expect_state_and_point, expect_two_states, into_anchor,
+};
 
-/// 1D range constraint between the origins (translations) of two poses.
+/// 1D range constraint between the origins (translations) of two states.
 ///
-/// Residual: `‖p_i − p_j‖ − d_measured`. Jacobians act on the translation
-/// tangent components only (rotation does not move the origins).
+/// Residual: `‖p_i − p_j‖ − d_measured`. Jacobians act on the origin's
+/// derivative in each state's tangent (rotation does not move the origin).
 #[derive(Clone)]
-pub struct PosePoseRangeFactor {
+pub struct PosePoseRangeFactor<G: ActsOnPoints3> {
     /// Measured distance between the two frame origins [m].
     pub measured_range: f64,
+    group: PhantomData<fn() -> G>,
 }
 
-impl PosePoseRangeFactor {
+impl<G: ActsOnPoints3> PosePoseRangeFactor<G> {
     /// Create the factor from the measured range.
     pub fn new(measured_range: f64) -> Self {
-        Self { measured_range }
+        Self {
+            measured_range,
+            group: PhantomData,
+        }
     }
 }
 
-impl Factor for PosePoseRangeFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for PosePoseRangeFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(
-            params.len(),
-            2,
-            "PosePoseRangeFactor expects two SE3 blocks"
-        );
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 7, "params[1] must be SE3 (7D)");
-
-        let ti = SE3::from_param_slice(params[0]);
-        let tj = SE3::from_param_slice(params[1]);
-        let delta = ti.translation() - tj.translation();
+        let origin = Vector3::zeros();
+        let ti = act_point(&G::from_param_slice(params[0]), &origin);
+        let tj = act_point(&G::from_param_slice(params[1]), &origin);
+        let delta = ti.world - tj.world;
         let dist = delta.norm();
 
         if dist < 1e-12 {
@@ -56,18 +61,16 @@ impl Factor for PosePoseRangeFactor {
 
         let Some(mut jac) = jacobian else { return };
 
-        // ∂dist/∂p_i = (p_i−p_j)ᵀ/d;  p_i' = p_i + R_i·δρ_i → ∂p_i/∂δρ_i = R_i.
+        // ∂dist/∂p_i = (p_i−p_j)ᵀ/d, carried through each state's origin chain.
         if dist < 1e-12 {
-            for c in 0..12 {
+            for c in 0..2 * G::DOF {
                 *jac.rb_mut().get_mut(0, c) = 0.0;
             }
             return;
         }
-        let ri = ti.rotation_so3().rotation_matrix();
-        let rj = tj.rotation_so3().rotation_matrix();
-        for col in 0..3 {
-            *jac.rb_mut().get_mut(0, col) = delta.dot(&ri.column(col)) / dist;
-            *jac.rb_mut().get_mut(0, 6 + col) = -delta.dot(&rj.column(col)) / dist;
+        for col in 0..G::DOF {
+            *jac.rb_mut().get_mut(0, col) = delta.dot(&ti.d_state.column(col)) / dist;
+            *jac.rb_mut().get_mut(0, G::DOF + col) = -delta.dot(&tj.d_state.column(col)) / dist;
         }
     }
 
@@ -76,52 +79,42 @@ impl Factor for PosePoseRangeFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (1, 12)
+        (1, 2 * G::DOF)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2
-            || variables[0].as_param_slice().len() != SE3::REP_SIZE
-            || variables[1].as_param_slice().len() != SE3::REP_SIZE
-        {
-            return Err("PosePoseRangeFactor expects two SE3 pose variables".into());
-        }
-        Ok(())
+        expect_two_states::<G>(variables, "PosePoseRangeFactor")
     }
 }
 
-/// 1D range constraint between a pose origin and a 3D point.
+/// 1D range constraint between a state origin and a 3D point.
 #[derive(Clone)]
-pub struct PosePointRangeFactor {
-    /// Measured distance between the pose origin and the point [m].
+pub struct PosePointRangeFactor<G: ActsOnPoints3> {
+    /// Measured distance between the state origin and the point [m].
     pub measured_range: f64,
+    group: PhantomData<fn() -> G>,
 }
 
-impl PosePointRangeFactor {
+impl<G: ActsOnPoints3> PosePointRangeFactor<G> {
     /// Create the factor from the measured range.
     pub fn new(measured_range: f64) -> Self {
-        Self { measured_range }
+        Self {
+            measured_range,
+            group: PhantomData,
+        }
     }
 }
 
-impl Factor for PosePointRangeFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for PosePointRangeFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(
-            params.len(),
-            2,
-            "PosePointRangeFactor expects [pose, point]"
-        );
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 3, "params[1] must be a 3D point");
-
-        let pose = SE3::from_param_slice(params[0]);
+        let origin = act_point(&G::from_param_slice(params[0]), &Vector3::zeros());
         let point = Vector3::new(params[1][0], params[1][1], params[1][2]);
-        let delta = pose.translation() - point;
+        let delta = origin.world - point;
         let dist = delta.norm();
 
         if dist < 1e-12 {
@@ -132,15 +125,16 @@ impl Factor for PosePointRangeFactor {
 
         let Some(mut jac) = jacobian else { return };
         if dist < 1e-12 {
-            for c in 0..9 {
+            for c in 0..G::DOF + 3 {
                 *jac.rb_mut().get_mut(0, c) = 0.0;
             }
             return;
         }
-        let rotation = pose.rotation_so3().rotation_matrix();
+        for col in 0..G::DOF {
+            *jac.rb_mut().get_mut(0, col) = delta.dot(&origin.d_state.column(col)) / dist;
+        }
         for col in 0..3 {
-            *jac.rb_mut().get_mut(0, col) = delta.dot(&rotation.column(col)) / dist;
-            *jac.rb_mut().get_mut(0, 6 + col) = -delta[col] / dist;
+            *jac.rb_mut().get_mut(0, G::DOF + col) = -delta[col] / dist;
         }
     }
 
@@ -149,39 +143,34 @@ impl Factor for PosePointRangeFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (1, 9)
+        (1, G::DOF + 3)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2
-            || variables[0].as_param_slice().len() != SE3::REP_SIZE
-            || variables[1].as_param_slice().len() != 3
-        {
-            return Err("PosePointRangeFactor expects [SE3 pose, 3D point]".into());
-        }
-        Ok(())
+        expect_state_and_point::<G>(variables, "PosePointRangeFactor")
     }
 }
 
-/// Bearing + range constraint between a pose and a 3D landmark.
+/// Bearing + range constraint between a state and a 3D landmark.
 ///
 /// Residual (4D = 3 bearing rows + 1 range row): the unit bearing from the
-/// pose to the point, expressed in the body frame, compared against the
+/// state to the point, expressed in the body frame, compared against the
 /// measured unit direction, plus the scalar range error:
 ///
 /// ```text
-/// b_pred = R·(p_world − t)/‖p_world − t‖     (world-to-body pose convention)
-/// r      = [ b_pred − b_measured ; ‖p_world − t‖ − d_measured ]
+/// b_pred = u/‖u‖,  u = X⁻¹ ⊙ p_world          (body-frame direction)
+/// r      = [ b_pred − b_measured ; ‖p_world − origin(X)‖ − d_measured ]
 /// ```
 #[derive(Clone)]
-pub struct BearingRangeFactor {
+pub struct BearingRangeFactor<G: ActsOnPoints3> {
     /// Measured unit bearing in the body frame.
     pub measured_bearing: Vector3<f64>,
     /// Measured range [m].
     pub measured_range: f64,
+    group: PhantomData<fn() -> G>,
 }
 
-impl BearingRangeFactor {
+impl<G: ActsOnPoints3> BearingRangeFactor<G> {
     /// Create the factor; the bearing is normalized internally.
     pub fn new(measured_bearing: Vector3<f64>, measured_range: f64) -> CoreResult<Self> {
         let n = measured_bearing.norm();
@@ -193,82 +182,70 @@ impl BearingRangeFactor {
         Ok(Self {
             measured_bearing: measured_bearing / n,
             measured_range,
+            group: PhantomData,
         })
     }
 }
 
-impl Factor for BearingRangeFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for BearingRangeFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "BearingRangeFactor expects [pose, point]");
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 3, "params[1] must be a 3D point");
-
-        let pose = SE3::from_param_slice(params[0]);
+        let state = G::from_param_slice(params[0]);
         let point = Vector3::new(params[1][0], params[1][1], params[1][2]);
 
-        let rotation = pose.rotation_so3().rotation_matrix();
-        let delta_w = point - pose.translation();
+        let origin = act_point(&state, &Vector3::zeros());
+        let delta_w = point - origin.world;
         let dist = delta_w.norm();
 
         if dist < 1e-12 {
             // Landmark exactly at the pose origin: bearing undefined.
             residual.copy_from_slice(self.measured_bearing.as_slice());
             if let Some(mut jac) = jacobian {
-                for c in 0..9 {
-                    *jac.rb_mut().get_mut(0, c) = 0.0;
+                for row in 0..4 {
+                    for c in 0..G::DOF + 3 {
+                        *jac.rb_mut().get_mut(row, c) = 0.0;
+                    }
                 }
             }
             return;
         }
 
-        // Body-frame direction to the landmark. The pose is body-in-world
-        // (`T_wb`), the same convention `PosePointRangeFactor` above uses, so
-        // the world-frame offset is rotated *into* the body by Rᵀ.
-        let p_body = rotation.transpose() * delta_w;
-        let b_pred = p_body / dist;
+        // Body-frame direction to the landmark. The state is body-in-world, so
+        // the landmark is carried *into* the body by the group's inverse.
+        let chain = into_anchor(&state, &point);
+        let p_body = chain.point;
+        let body_norm = p_body.norm();
+        let b_pred = p_body / body_norm;
         residual[0..3].copy_from_slice((b_pred - self.measured_bearing).as_slice());
         residual[3] = dist - self.measured_range;
 
         let Some(mut jac) = jacobian else { return };
 
-        // With u = Rᵀ(p_world − t) and b = u/‖u‖, under the right SE(3)
-        // perturbation (t ← t + R·δρ, R ← R·Exp(δθ)):
-        //     ∂u/∂δρ = −I,  ∂u/∂δθ = [u]ₓ,  ∂u/∂p_world = Rᵀ
-        // and ∂b/∂u = (I − bbᵀ)/d.
-        let u_x = Matrix3::new(
-            0.0, -p_body.z, p_body.y, p_body.z, 0.0, -p_body.x, -p_body.y, p_body.x, 0.0,
-        );
-        let proj = Matrix3::identity() - b_pred * b_pred.transpose();
-        let scale = 1.0 / dist;
-        let d_b_d_rho = -proj * scale; // 3×3
-        let d_b_d_theta = (proj * u_x) * scale; // 3×3
-        let d_b_d_point = (proj * rotation.transpose()) * scale; // 3×3
-
-        let mut j_pose = SMatrix::<f64, 3, 6>::zeros();
-        j_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&d_b_d_rho);
-        j_pose.fixed_view_mut::<3, 3>(0, 3).copy_from(&d_b_d_theta);
-        for row in 0..3 {
-            for col in 0..6 {
-                *jac.rb_mut().get_mut(row, col) = j_pose[(row, col)];
-            }
-            for col in 0..3 {
-                *jac.rb_mut().get_mut(row, 6 + col) = d_b_d_point[(row, col)];
+        // ∂b/∂u = (I − bbᵀ)/‖u‖, then through the group's own chain.
+        let proj = (Matrix3::identity() - b_pred * b_pred.transpose()) / body_norm;
+        let d_b_d_point = proj * chain.d_world;
+        for (col, axis) in chain.d_anchor.iter().enumerate() {
+            let column = proj * Vector3::from_column_slice(axis);
+            for row in 0..3 {
+                *jac.rb_mut().get_mut(row, col) = column[row];
             }
         }
-        // Range row: d = ‖q‖ with q = p_world − t. The body-tangent
-        // translation step moves the origin by R·δρ in the world, so
-        // ∂d/∂δρ = −q̂ᵀR; rotation does not change the origin; point block
-        // is q̂ᵀ.
+        for row in 0..3 {
+            for col in 0..3 {
+                *jac.rb_mut().get_mut(row, G::DOF + col) = d_b_d_point[(row, col)];
+            }
+        }
+        // Range row: d = ‖p − origin(X)‖. Only the origin moves with the state.
         let q_hat = delta_w / dist;
+        for col in 0..G::DOF {
+            *jac.rb_mut().get_mut(3, col) = -q_hat.dot(&origin.d_state.column(col));
+        }
         for col in 0..3 {
-            *jac.rb_mut().get_mut(3, col) = -q_hat.dot(&rotation.column(col));
-            *jac.rb_mut().get_mut(3, 3 + col) = 0.0;
-            *jac.rb_mut().get_mut(3, 6 + col) = q_hat[col];
+            *jac.rb_mut().get_mut(3, G::DOF + col) = q_hat[col];
         }
     }
 
@@ -277,25 +254,20 @@ impl Factor for BearingRangeFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (4, 9)
+        (4, G::DOF + 3)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2
-            || variables[0].as_param_slice().len() != SE3::REP_SIZE
-            || variables[1].as_param_slice().len() != 3
-        {
-            return Err("BearingRangeFactor expects [SE3 pose, 3D point]".into());
-        }
-        Ok(())
+        expect_state_and_point::<G>(variables, "BearingRangeFactor")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_manifolds::Tangent;
+    use apex_manifolds::se3::SE3;
     use apex_manifolds::se3::SE3Tangent;
+    use apex_manifolds::{LieGroup, Tangent};
 
     fn fd_check_1d(
         factor: &dyn Factor,
@@ -381,7 +353,7 @@ mod tests {
             nalgebra::UnitQuaternion::from_euler_angles(-0.04, 0.01, 0.05),
         ));
         let d = (ti.translation() - tj.translation()).norm();
-        let factor = PosePoseRangeFactor::new(d);
+        let factor = PosePoseRangeFactor::<SE3>::new(d);
         let ti_v: Vec<f64> = ti.as_param_slice().to_vec();
         let tj_v: Vec<f64> = tj.as_param_slice().to_vec();
 
@@ -401,7 +373,7 @@ mod tests {
         ));
         let point = Vector3::new(2.0, 1.5, -0.5);
         let d = (pose.translation() - point).norm();
-        let factor = PosePointRangeFactor::new(d);
+        let factor = PosePointRangeFactor::<SE3>::new(d);
         let pose_v: Vec<f64> = pose.as_param_slice().to_vec();
         let point_v = vec![point.x, point.y, point.z];
 
@@ -422,7 +394,7 @@ mod tests {
         let point = Vector3::new(1.5, -0.5, 2.5);
         let delta = point - pose.translation();
         let bearing = pose.rotation_so3().rotation_matrix().transpose() * (delta / delta.norm());
-        let factor = BearingRangeFactor::new(bearing, delta.norm())?;
+        let factor = BearingRangeFactor::<SE3>::new(bearing, delta.norm())?;
         let pose_v: Vec<f64> = pose.as_param_slice().to_vec();
         let point_v = vec![point.x, point.y, point.z];
 
@@ -494,7 +466,7 @@ mod tests {
         let point = Vector3::new(2.0, 0.0, 0.0);
         let expected = Vector3::new(0.0, -1.0, 0.0);
 
-        let factor = BearingRangeFactor::new(expected, 2.0)?;
+        let factor = BearingRangeFactor::<SE3>::new(expected, 2.0)?;
         let pose_v: Vec<f64> = pose.as_param_slice().to_vec();
         let point_v = vec![point.x, point.y, point.z];
         let mut residual = vec![0.0; 4];
@@ -535,7 +507,7 @@ mod tests {
             assert!(r.abs() < 1e-12, "BearingFactor row {i} = {r:.3e}");
         }
 
-        let combined = BearingRangeFactor::new(truth, delta.norm())?;
+        let combined = BearingRangeFactor::<SE3>::new(truth, delta.norm())?;
         let mut r_combined = vec![0.0; 4];
         combined.linearize(&[&pose_v, &point_v], &mut r_combined, None);
         for (i, r) in r_combined.iter().enumerate() {
@@ -546,6 +518,6 @@ mod tests {
 
     #[test]
     fn bearing_rejects_zero_direction() {
-        assert!(BearingRangeFactor::new(Vector3::zeros(), 1.0).is_err());
+        assert!(BearingRangeFactor::<SE3>::new(Vector3::zeros(), 1.0).is_err());
     }
 }

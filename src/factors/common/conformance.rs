@@ -307,4 +307,46 @@ mod tests {
             conforms::<Sim3>()
         }
     }
+
+    mod ranging {
+        use super::*;
+        use crate::factors::ranging::range::{
+            BearingRangeFactor, PosePointRangeFactor, PosePoseRangeFactor,
+        };
+        use apex_manifolds::capability::ActsOnPoints3;
+        use nalgebra::Vector3;
+
+        fn conforms<G: ActsOnPoints3 + Send + Sync + 'static>() -> Result<(), String> {
+            let name = |e: String| format!("{}: {e}", G::NAME);
+            let landmark = [3.0, -2.0, 5.0];
+            finite_diff_jacobian_parity(
+                &PosePoseRangeFactor::<G>::new(2.5),
+                &[Block::lie(&G::random()), Block::lie(&G::random())],
+                TOL,
+            )
+            .map_err(name)?;
+            finite_diff_jacobian_parity(
+                &PosePointRangeFactor::<G>::new(2.5),
+                &[Block::lie(&G::random()), Block::euclidean(&landmark)],
+                TOL,
+            )
+            .map_err(name)?;
+            let both = BearingRangeFactor::<G>::new(Vector3::new(0.2, 0.1, 1.0), 4.0)
+                .map_err(|e| e.to_string())?;
+            finite_diff_jacobian_parity(
+                &both,
+                &[Block::lie(&G::random()), Block::euclidean(&landmark)],
+                TOL,
+            )
+            .map_err(name)
+        }
+
+        #[test]
+        fn the_range_factors_conform_on_every_admitted_group() -> Result<(), String> {
+            conforms::<SO3>()?;
+            conforms::<SE3>()?;
+            conforms::<SE23>()?;
+            conforms::<Sim3>()
+        }
+    }
 }
