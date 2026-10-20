@@ -9,6 +9,7 @@ use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::se23::SE23;
 use apex_solver::factors::Factor;
+use apex_solver::factors::aggregate::{AggregateFactor, AggregatePart};
 use apex_solver::factors::held::HeldBlocks;
 use apex_solver::factors::lidar::{LidarMapPlaneFactor, Plane};
 use apex_solver::factors::offset::RightOffset;
@@ -110,5 +111,36 @@ fn wrappers_evaluate_without_touching_the_heap() -> TestResult {
 
     let leaking: Vec<_> = counts.iter().filter(|(_, blocks)| *blocks != 0).collect();
     assert!(leaking.is_empty(), "heap blocks over 50 calls: {leaking:?}");
+    aggregate_allocations_do_not_grow_with_the_part_count()
+}
+
+fn aggregate_of(parts: usize) -> Result<AggregateFactor, Box<dyn std::error::Error>> {
+    let parts = (0..parts)
+        .map(|_| {
+            Ok(AggregatePart {
+                factor: Box::new(factor()?) as Box<dyn Factor>,
+                blocks: vec![0, 1],
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    Ok(AggregateFactor::new(parts, vec![9, 6])?)
+}
+
+/// A part adds nothing to the heap traffic of an aggregate: the buffers its
+/// accumulation needs are sized once per chunk.
+fn aggregate_allocations_do_not_grow_with_the_part_count() -> TestResult {
+    let s = state().as_param_slice().to_vec();
+    let e = extrinsic().as_param_slice().to_vec();
+    let mut residual = vec![0.0; 16];
+
+    let few = aggregate_of(4)?;
+    let many = aggregate_of(60)?;
+    let blocks_few = blocks_per_call(|| few.linearize(&[&s, &e], &mut residual, None));
+    let blocks_many = blocks_per_call(|| many.linearize(&[&s, &e], &mut residual, None));
+
+    assert_eq!(
+        blocks_few, blocks_many,
+        "4 parts took {blocks_few} heap blocks, 60 parts {blocks_many}"
+    );
     Ok(())
 }

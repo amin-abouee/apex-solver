@@ -25,6 +25,7 @@
 use faer::Mat;
 use faer::prelude::ReborrowMut;
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
+use smallvec::SmallVec;
 use std::sync::Mutex;
 
 use rayon::prelude::*;
@@ -68,6 +69,16 @@ pub struct AggregateFactor {
 struct Trial {
     params: Vec<f64>,
     equations: (DMatrix<f64>, DVector<f64>, f64),
+}
+
+/// Per-chunk buffers the fallback accumulation reuses from part to part, so a
+/// part costs no allocation once the first of its shape has sized them.
+#[derive(Default)]
+struct Scratch {
+    residual: Vec<f64>,
+    jacobian: Option<Mat<f64>>,
+    starts: SmallVec<[(usize, usize, usize); 4]>,
+    active: Vec<(usize, usize, usize)>,
 }
 
 impl AggregateFactor {
@@ -144,6 +155,7 @@ impl AggregateFactor {
         part_params: &[&[f64]],
         hessian: &mut DMatrix<f64>,
         gradient: &mut DVector<f64>,
+        scratch: &mut Scratch,
     ) -> f64 {
         if let Some(cost) = part.factor.accumulate_normal(
             part_params,
@@ -152,21 +164,31 @@ impl AggregateFactor {
             return cost;
         }
         let (rows, cols) = part.factor.jacobian_shape();
-        let mut residual = vec![0.0; rows];
-        let mut jacobian = Mat::<f64>::zeros(rows, cols);
+        let Scratch {
+            residual,
+            jacobian,
+            starts,
+            active,
+        } = scratch;
+        residual.clear();
+        residual.resize(rows, 0.0);
+        let jacobian = match jacobian {
+            Some(matrix) if matrix.nrows() == rows && matrix.ncols() == cols => {
+                matrix.fill(0.0);
+                matrix
+            }
+            slot => slot.insert(Mat::zeros(rows, cols)),
+        };
         part.factor
-            .linearize(part_params, &mut residual, Some(jacobian.as_mut()));
+            .linearize(part_params, residual, Some(jacobian.as_mut()));
         // (part column, aggregate column, width) of each block.
         let mut local = 0;
-        let starts: Vec<(usize, usize, usize)> = part
-            .blocks
-            .iter()
-            .map(|&block| {
-                let start = (local, self.offsets[block], self.dofs[block]);
-                local += self.dofs[block];
-                start
-            })
-            .collect();
+        starts.clear();
+        starts.extend(part.blocks.iter().map(|&block| {
+            let start = (local, self.offsets[block], self.dofs[block]);
+            local += self.dofs[block];
+            start
+        }));
         if let [(la, ga, da)] = starts[..] {
             // One block: every row is in it.
             for (row, &r) in residual.iter().enumerate() {
@@ -183,22 +205,22 @@ impl AggregateFactor {
             }
             return residual.iter().map(|r| r * r).sum();
         }
-        let mut active = Vec::with_capacity(starts.len());
         for (row, &r) in residual.iter().enumerate() {
             active.clear();
             active.extend(
                 starts
                     .iter()
-                    .filter(|(la, _, da)| (*la..la + da).any(|c| jacobian[(row, c)] != 0.0)),
+                    .filter(|(la, _, da)| (*la..la + da).any(|c| jacobian[(row, c)] != 0.0))
+                    .copied(),
             );
-            for &&(la, ga, da) in &active {
+            for &(la, ga, da) in active.iter() {
                 for i in 0..da {
                     let v = jacobian[(row, la + i)];
                     if v == 0.0 {
                         continue;
                     }
                     gradient[ga + i] += v * r;
-                    for &&(lb, gb, db) in &active {
+                    for &(lb, gb, db) in active.iter() {
                         for k in 0..db {
                             hessian[(ga + i, gb + k)] += v * jacobian[(row, lb + k)];
                         }
@@ -222,6 +244,7 @@ impl AggregateFactor {
             .map(|(chunk, offsets)| {
                 let (mut hessian, mut gradient, mut cost) = zero();
                 let mut part_params: Vec<&[f64]> = Vec::new();
+                let mut scratch = Scratch::default();
                 for (part, part_offsets) in chunk.iter().zip(offsets) {
                     part_params.clear();
                     part_params.extend(part.blocks.iter().map(|&b| params[b]));
@@ -231,6 +254,7 @@ impl AggregateFactor {
                         &part_params,
                         &mut hessian,
                         &mut gradient,
+                        &mut scratch,
                     );
                 }
                 (hessian, gradient, cost)
