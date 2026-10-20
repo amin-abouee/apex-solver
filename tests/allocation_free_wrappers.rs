@@ -12,9 +12,10 @@ use apex_solver::factors::Factor;
 use apex_solver::factors::aggregate::{AggregateFactor, AggregatePart};
 use apex_solver::factors::held::HeldBlocks;
 use apex_solver::factors::lidar::{LidarMapPlaneFactor, Plane};
+use apex_solver::factors::marginal::MarginalPriorFactorT;
 use apex_solver::factors::offset::RightOffset;
 use faer::Mat;
-use nalgebra::{UnitQuaternion, Vector3};
+use nalgebra::{DMatrix, DVector, UnitQuaternion, Vector3};
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -111,6 +112,7 @@ fn wrappers_evaluate_without_touching_the_heap() -> TestResult {
 
     let leaking: Vec<_> = counts.iter().filter(|(_, blocks)| *blocks != 0).collect();
     assert!(leaking.is_empty(), "heap blocks over 50 calls: {leaking:?}");
+    marginal_prior_allocates_nothing()?;
     aggregate_allocations_do_not_grow_with_the_part_count()
 }
 
@@ -142,5 +144,19 @@ fn aggregate_allocations_do_not_grow_with_the_part_count() -> TestResult {
         blocks_few, blocks_many,
         "4 parts took {blocks_few} heap blocks, 60 parts {blocks_many}"
     );
+    Ok(())
+}
+
+/// A window prior over three `SE23` states, evaluated once per iteration.
+fn marginal_prior_allocates_nothing() -> TestResult {
+    let anchors = vec![state(), state(), state()];
+    let prior = MarginalPriorFactorT::new(anchors, DMatrix::identity(27, 27), DVector::zeros(27))?;
+    let s = state().as_param_slice().to_vec();
+    let mut residual = vec![0.0; 27];
+    let mut jacobian = Mat::<f64>::zeros(27, 27);
+    let blocks = blocks_per_call(|| {
+        prior.linearize(&[&s, &s, &s], &mut residual, Some(jacobian.as_mut()));
+    });
+    assert_eq!(blocks, 0, "MarginalPriorFactorT touched the heap");
     Ok(())
 }

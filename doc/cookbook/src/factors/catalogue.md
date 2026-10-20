@@ -114,6 +114,7 @@ Companions: `Plane`, `PrecomputedPlane`, `LidarPointChain`, `PlaneMatch`,
 | Type | Blocks | Residual |
 |---|---|---|
 | `MarginalPriorFactor` | one or more | a linear container over a marginalized set |
+| `MarginalPriorFactorT<G>` | one or more, all on `G` | the same container with the chart fixed at compile time |
 
 ## 10. Decorators — [chapter](./decorators.md)
 
