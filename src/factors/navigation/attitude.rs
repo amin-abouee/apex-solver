@@ -7,14 +7,16 @@
 //! degrees of freedom; add a gravity factor and a magnetometer factor for a
 //! full AHRS.
 
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use std::marker::PhantomData;
+
+use apex_manifolds::capability::ActsOnPoints3;
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, CoreResult};
 use crate::factors::Factor;
+use crate::factors::common::group_point::act_point;
 
 /// Attitude constraint from a measured reference direction (gravity via
 /// accelerometer, or magnetic field via magnetometer).
@@ -33,14 +35,15 @@ use crate::factors::Factor;
 /// two of these factors (gravity + magnetometer) to fully constrain yaw —
 /// the AHRS composition.
 #[derive(Clone)]
-pub struct AttitudeFactor {
+pub struct AttitudeFactor<G: ActsOnPoints3> {
     /// Known reference direction in the world frame (normalized internally).
     pub direction_world: Vector3<f64>,
     /// Measured direction in the body frame (normalized internally).
     pub direction_body: Vector3<f64>,
+    group: PhantomData<fn() -> G>,
 }
 
-impl AttitudeFactor {
+impl<G: ActsOnPoints3> AttitudeFactor<G> {
     /// Create the factor; both directions are normalized, and near-zero
     /// directions are rejected.
     pub fn new(direction_world: Vector3<f64>, direction_body: Vector3<f64>) -> CoreResult<Self> {
@@ -54,48 +57,40 @@ impl AttitudeFactor {
         Ok(Self {
             direction_world: direction_world / nw,
             direction_body: direction_body / nb,
+            group: PhantomData,
         })
     }
 }
 
-impl Factor for AttitudeFactor {
+impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for AttitudeFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 1, "AttitudeFactor expects one SE3 pose block");
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
+        let state = G::from_param_slice(params[0]);
 
-        let pose = SE3::from_param_slice(params[0]);
-        let rotation = pose.rotation_so3().rotation_matrix();
-
-        let predicted_body = rotation * self.direction_world;
+        // The rotation part of the action on a direction: the difference of
+        // the action on `d` and on the origin cancels the translation, and the
+        // normalization removes any scale (`Sim3`).
+        let at_direction = act_point(&state, &self.direction_world);
+        let at_origin = act_point(&state, &Vector3::zeros());
+        let rotated = at_direction.world - at_origin.world;
+        let norm = rotated.norm();
+        let predicted_body = rotated / norm;
         let r = predicted_body - self.direction_body;
         residual.copy_from_slice(r.as_slice());
 
         let Some(mut jac) = jacobian else { return };
 
-        // Right-plus retraction R' = R·exp(δθ):
-        // d(R'·d_w)/dδθ = R·(δθ × d_w) = −R·d̂_w·δθ  →  ∂r/∂δθ = −R·skew(d_w).
-        // Translation does not affect the attitude.
-        let skew_w = Matrix3::new(
-            0.0,
-            -self.direction_world.z,
-            self.direction_world.y,
-            self.direction_world.z,
-            0.0,
-            -self.direction_world.x,
-            -self.direction_world.y,
-            self.direction_world.x,
-            0.0,
-        );
-        let d_r_d_theta = -(rotation * skew_w);
+        // ∂n/∂v = (I − nnᵀ)/‖v‖, with v the rotated direction.
+        let projector = (Matrix3::identity() - predicted_body * predicted_body.transpose()) / norm;
+        let d_rotated = at_direction.d_state - at_origin.d_state;
+        let d_r = projector * d_rotated;
         for row in 0..3 {
-            for col in 0..3 {
-                *jac.rb_mut().get_mut(row, col) = 0.0;
-                *jac.rb_mut().get_mut(row, 3 + col) = d_r_d_theta[(row, col)];
+            for col in 0..G::DOF {
+                *jac.rb_mut().get_mut(row, col) = d_r[(row, col)];
             }
         }
     }
@@ -105,21 +100,25 @@ impl Factor for AttitudeFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (3, 6)
+        (3, G::DOF)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 1 || variables[0].as_param_slice().len() != SE3::REP_SIZE {
-            return Err("AttitudeFactor expects a single SE3 pose variable".into());
+        match variables {
+            [state] if state.manifold_type_name() == G::NAME => Ok(()),
+            _ => Err(format!(
+                "AttitudeFactor expects a single {} variable",
+                G::NAME
+            )),
         }
-        Ok(())
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apex_manifolds::LieGroup;
     use apex_manifolds::Tangent;
+    use apex_manifolds::se3::SE3;
     use apex_manifolds::se3::SE3Tangent;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -133,7 +132,7 @@ mod tests {
             attitude,
         ));
         let g_body = attitude.to_rotation_matrix() * g_world;
-        let factor = AttitudeFactor::new(g_world, g_body)?;
+        let factor = AttitudeFactor::<SE3>::new(g_world, g_body)?;
 
         let mut residual = vec![0.0; 3];
         factor.linearize(&[pose.as_param_slice()], &mut residual, None);
@@ -152,7 +151,7 @@ mod tests {
             attitude,
         ));
         let g_body = attitude.to_rotation_matrix() * g_world;
-        let factor = AttitudeFactor::new(g_world, g_body)?;
+        let factor = AttitudeFactor::<SE3>::new(g_world, g_body)?;
         let pose_vec: Vec<f64> = pose.as_param_slice().to_vec();
 
         let mut r0 = vec![0.0; 3];
@@ -185,7 +184,11 @@ mod tests {
 
     #[test]
     fn attitude_rejects_zero_directions() {
-        assert!(AttitudeFactor::new(Vector3::zeros(), Vector3::new(0.0, 0.0, -1.0)).is_err());
-        assert!(AttitudeFactor::new(Vector3::new(0.0, 0.0, -1.0), Vector3::zeros()).is_err());
+        assert!(
+            AttitudeFactor::<SE3>::new(Vector3::zeros(), Vector3::new(0.0, 0.0, -1.0)).is_err()
+        );
+        assert!(
+            AttitudeFactor::<SE3>::new(Vector3::new(0.0, 0.0, -1.0), Vector3::zeros()).is_err()
+        );
     }
 }

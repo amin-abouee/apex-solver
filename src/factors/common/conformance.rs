@@ -349,4 +349,47 @@ mod tests {
             conforms::<Sim3>()
         }
     }
+
+    mod navigation {
+        use super::*;
+        use crate::factors::navigation::{AttitudeFactor, BarometricFactor, GpsFactor};
+        use apex_manifolds::capability::ActsOnPoints3;
+        use nalgebra::Vector3;
+
+        fn conforms<G: ActsOnPoints3 + Send + Sync + 'static>() -> Result<(), String> {
+            let name = |e: String| format!("{}: {e}", G::NAME);
+            finite_diff_jacobian_parity(
+                &BarometricFactor::<G>::new(3.0),
+                &[Block::lie(&G::random()), Block::euclidean(&[0.4])],
+                TOL,
+            )
+            .map_err(name)?;
+            let attitude = AttitudeFactor::<G>::new(
+                Vector3::new(0.0, 0.0, -1.0),
+                Vector3::new(0.1, 0.2, -1.0),
+            )
+            .map_err(|e| e.to_string())?;
+            finite_diff_jacobian_parity(&attitude, &[Block::lie(&G::random())], TOL)
+                .map_err(name)?;
+            let gps = GpsFactor::<G>::new_isotropic(
+                Vector3::new(3.0, 1.0, -2.0),
+                Vector3::new(0.1, 0.0, 0.2),
+                0.5,
+            );
+            finite_diff_jacobian_parity(
+                &gps,
+                &[Block::lie(&G::random()), Block::lie(&G::random())],
+                TOL,
+            )
+            .map_err(name)
+        }
+
+        #[test]
+        fn the_navigation_factors_conform_on_every_admitted_group() -> Result<(), String> {
+            conforms::<SO3>()?;
+            conforms::<SE3>()?;
+            conforms::<SE23>()?;
+            conforms::<Sim3>()
+        }
+    }
 }

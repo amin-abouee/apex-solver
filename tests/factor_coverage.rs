@@ -597,7 +597,7 @@ fn gps_factor_recovers_poses_and_the_frame_transform() {
         let measured = c_gw * antenna_world + t_gw.translation();
         problem.add_residual_block(
             &[*key, frame_key],
-            Box::new(GpsFactor::new_isotropic(measured, lever, 0.05)),
+            Box::new(GpsFactor::<SE3>::new_isotropic(measured, lever, 0.05)),
             None,
         );
     }

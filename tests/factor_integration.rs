@@ -957,7 +957,7 @@ fn barometer_and_attitude_factors_constrain_a_hover() {
 
     problem.add_residual_block(
         &[pose_key, bias_key],
-        Box::new(BarometricFactor::new(50.0)),
+        Box::new(BarometricFactor::<SE3>::new(50.0)),
         None,
     );
     // Gravity reads (0,0,-1) in the body frame when level.
@@ -965,7 +965,7 @@ fn barometer_and_attitude_factors_constrain_a_hover() {
     problem.add_residual_block(
         &[pose_key],
         Box::new(
-            AttitudeFactor::new(Vector3::new(0.0, 0.0, -1.0), g_body)
+            AttitudeFactor::<SE3>::new(Vector3::new(0.0, 0.0, -1.0), g_body)
                 .unwrap_or_else(|e| panic!("{e}")),
         ),
         None,
