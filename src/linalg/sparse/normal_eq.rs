@@ -49,6 +49,9 @@ pub struct NormalEquationsCache {
     value_perm: Vec<usize>,
     /// Sparsity of the product `JᵀJ`.
     product_symbolic: SymbolicSparseColMat<usize>,
+    /// Fingerprint of [`Self::product_symbolic`], computed once: every `H` this
+    /// cache forms has that pattern, so its consumers need not hash it again.
+    product_fingerprint: super::pattern::PatternFingerprint,
     /// Per-column flop counts used by faer to partition the numeric matmul.
     product_info: SparseMatMulInfo,
     /// Position of the diagonal entry within each column of `JᵀJ`
@@ -136,6 +139,17 @@ impl LazyNormalEquations {
         }
     }
 
+    /// Fingerprint of the pattern of every `H` that [`Self::compute`] returns,
+    /// for consumers that key a cache on it.
+    pub fn product_fingerprint(&self) -> LinAlgResult<super::pattern::PatternFingerprint> {
+        match self.0.as_ref() {
+            Some(cache) => Ok(cache.product_fingerprint()),
+            None => Err(LinAlgError::InvalidState(
+                "normal equations cache not initialized".to_string(),
+            )),
+        }
+    }
+
     /// Sparsity of `JᵀJ`, for building compatible factorization symbolics.
     pub fn product_symbolic(&self) -> LinAlgResult<SymbolicSparseColMat<usize>> {
         match self.0.as_ref() {
@@ -183,6 +197,9 @@ impl NormalEquationsCache {
         };
 
         Ok(Self {
+            product_fingerprint: super::pattern::PatternFingerprint::of_symbolic(
+                product_symbolic.rb(),
+            ),
             jt_values: vec![0.0; jt_pattern.compute_nnz()],
             hessian_values: vec![0.0; product_symbolic.compute_nnz()],
             stack_buf: vec![MaybeUninit::uninit(); scratch_req.unaligned_bytes_required()],
@@ -208,6 +225,11 @@ impl NormalEquationsCache {
     /// Sparsity of `JᵀJ`, for building factorizations compatible with `compute`.
     pub fn product_symbolic(&self) -> SymbolicSparseColMat<usize> {
         self.product_symbolic.clone()
+    }
+
+    /// Fingerprint of the pattern of every `H` that [`Self::compute`] returns.
+    pub fn product_fingerprint(&self) -> super::pattern::PatternFingerprint {
+        self.product_fingerprint
     }
 
     /// Form `H = JᵀJ` and `g = Jᵀr` with parallel faer kernels.
@@ -437,6 +459,24 @@ mod tests {
             }
         }
         Ok(SparseColMat::try_new_from_triplets(m, n, &triplets)?)
+    }
+
+    /// Consumers key their caches on the cached fingerprint instead of hashing
+    /// each `H`, so it must be exactly the fingerprint of what `compute` returns.
+    #[test]
+    fn the_product_fingerprint_is_that_of_every_hessian_it_forms() -> TestResult<()> {
+        let jacobian = sample_jacobian(40, 12, 7)?;
+        let mut cache = NormalEquationsCache::try_new(&jacobian)?;
+        let residuals = Mat::from_fn(40, 1, |i, _| i as f64 * 0.1);
+        let first = cache.compute(&residuals, &jacobian)?;
+        let second = cache.compute(&residuals, &jacobian)?;
+        let expected = super::super::pattern::PatternFingerprint::of(&first.hessian);
+        assert_eq!(cache.product_fingerprint(), expected);
+        assert_eq!(
+            super::super::pattern::PatternFingerprint::of(&second.hessian),
+            expected
+        );
+        Ok(())
     }
 
     fn naive_hessian(j: &SparseColMat<usize, f64>) -> TestResult<SparseColMat<usize, f64>> {

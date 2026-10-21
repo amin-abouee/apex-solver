@@ -8,13 +8,14 @@
 //! cache for such a pattern silently produces a wrong step.
 //!
 //! [`PatternFingerprint`] keeps the triple as a fast reject but adds a
-//! deterministic FNV-1a hash over the full column-row structure, so equality
-//! means "same pattern" and not just "same shape". The hash costs one O(nnz)
-//! integer pass per check — negligible next to the floating-point assembly it
-//! guards. (FNV, not `std`'s `DefaultHasher`: the latter is randomly seeded
-//! per instance and cannot be compared across caches.)
+//! deterministic FNV-1a-style hash over the full column-row structure, so
+//! equality means "same pattern" and not just "same shape". The hash costs one
+//! O(nnz) integer pass per check, run in independent lanes so it is limited by
+//! multiply throughput and not by the latency of one dependent chain. (FNV, not
+//! `std`'s `DefaultHasher`: the latter is randomly seeded per instance and
+//! cannot be compared across caches.)
 
-use faer::sparse::SparseColMat;
+use faer::sparse::{SparseColMat, SymbolicSparseColMatRef};
 
 /// Fold one value into an FNV-1a hash.
 ///
@@ -27,6 +28,32 @@ fn fold(mut hash: u64, value: usize) -> u64 {
     const MIX: u64 = 0x9E3779B97F4A7C15;
     hash ^= (value as u64).wrapping_mul(MIX);
     hash.wrapping_mul(PRIME)
+}
+
+/// Independent hash lanes of [`fold_slice`].
+const LANES: usize = 4;
+
+/// Fold a run of structural indices into `seed`.
+///
+/// One FNV chain is a dependent multiply per value, about a cycle count of the
+/// multiply's latency each. Values are dealt round-robin to [`LANES`] chains
+/// that run side by side, then the chains are folded together in order, so the
+/// result still depends on every value and on its position.
+#[inline]
+fn fold_slice(seed: u64, values: &[usize]) -> u64 {
+    let mut lanes = [seed; LANES];
+    let (chunks, remainder) = values.as_chunks::<LANES>();
+    for chunk in chunks {
+        for (lane, &value) in lanes.iter_mut().zip(chunk) {
+            *lane = fold(*lane, value);
+        }
+    }
+    for (lane, &value) in lanes.iter_mut().zip(remainder) {
+        *lane = fold(*lane, value);
+    }
+    lanes
+        .iter()
+        .fold(seed, |hash, &lane| fold(hash, lane as usize))
 }
 
 /// Structural identity of a sparse matrix: dimensions, nonzero count, and a
@@ -49,25 +76,49 @@ pub struct PatternFingerprint {
 impl PatternFingerprint {
     /// Fingerprint the sparsity pattern of `matrix` (values ignored).
     pub fn of(matrix: &SparseColMat<usize, f64>) -> Self {
-        let symbolic = matrix.symbolic();
-        // One xor-multiply per structural integer — the same pass `compute_nnz`
-        // style checks already pay, against O(nnz) floating-point assembly
-        // plus factorization downstream.
+        Self::of_symbolic(matrix.symbolic())
+    }
+
+    /// Fingerprint a sparsity pattern given without values.
+    ///
+    /// Equal to [`Self::of`] for the matrix that owns the pattern, so a cache
+    /// that holds the pattern can fingerprint it once and hand the result to
+    /// whoever would otherwise hash the matrix again.
+    pub fn of_symbolic(symbolic: SymbolicSparseColMatRef<'_, usize>) -> Self {
+        let (nrows, ncols) = (symbolic.nrows(), symbolic.ncols());
         let mut hash: u64 = 0xcbf29ce484222325;
-        hash = fold(hash, matrix.nrows());
-        hash = fold(hash, matrix.ncols());
-        let mut nnz = 0usize;
-        for col in 0..matrix.ncols() {
-            let rows = symbolic.row_idx_of_col_raw(col);
-            hash = fold(hash, rows.len());
-            for &row in rows {
-                hash = fold(hash, row);
-                nnz += 1;
+        hash = fold(hash, nrows);
+        hash = fold(hash, ncols);
+
+        // Compressed storage, the usual case: the column pointers and the row
+        // indices are two flat runs.
+        if symbolic.col_nnz().is_none() {
+            let col_ptr = symbolic.col_ptr();
+            if let (Some(&start), Some(&end)) = (col_ptr.first(), col_ptr.last())
+                && let Some(row_idx) = symbolic.row_idx().get(start..end)
+            {
+                hash = fold_slice(hash, col_ptr);
+                hash = fold_slice(hash, row_idx);
+                return Self {
+                    nrows,
+                    ncols,
+                    nnz: row_idx.len(),
+                    hash,
+                };
             }
         }
+
+        // Columns that do not fill their range: walk them one by one.
+        let mut nnz = 0usize;
+        for col in 0..ncols {
+            let rows = symbolic.row_idx_of_col_raw(col);
+            hash = fold(hash, rows.len());
+            hash = fold_slice(hash, rows);
+            nnz += rows.len();
+        }
         Self {
-            nrows: matrix.nrows(),
-            ncols: matrix.ncols(),
+            nrows,
+            ncols,
             nnz,
             hash,
         }
@@ -114,6 +165,58 @@ mod tests {
         ];
         let c = SparseColMat::try_new_from_triplets(2, 2, &t2)?;
         assert_eq!(PatternFingerprint::of(&a), PatternFingerprint::of(&c));
+        Ok(())
+    }
+
+    /// A pattern wider than the lane count, so every lane and the remainder
+    /// hold entries: moving any single entry to another row must show.
+    #[test]
+    fn a_moved_entry_changes_the_fingerprint_in_every_lane() -> TestResult {
+        let rows = 11usize;
+        let cols = 9usize;
+        let build = |moved: Option<(usize, usize)>| -> Result<_, Box<dyn std::error::Error>> {
+            let mut triplets = Vec::new();
+            for col in 0..cols {
+                for k in 0..3 {
+                    let mut row = (col * 2 + k * 3) % rows;
+                    if moved == Some((col, k)) {
+                        row = (row + 1) % rows;
+                    }
+                    triplets.push(Triplet::new(row, col, 1.0f64));
+                }
+            }
+            Ok(SparseColMat::try_new_from_triplets(rows, cols, &triplets)?)
+        };
+        let base = PatternFingerprint::of(&build(None)?);
+        assert_eq!(base, PatternFingerprint::of(&build(None)?));
+        for col in 0..cols {
+            for k in 0..3 {
+                let moved = build(Some((col, k)))?;
+                assert_ne!(
+                    base,
+                    PatternFingerprint::of(&moved),
+                    "moving entry {k} of column {col} must change the fingerprint"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The symbolic form is what a cache that holds only the pattern calls.
+    #[test]
+    fn the_symbolic_form_agrees_with_the_matrix_form() -> TestResult {
+        let t = vec![
+            Triplet::new(0usize, 0usize, 1.0f64),
+            Triplet::new(3, 0, 2.0),
+            Triplet::new(1, 1, 3.0),
+            Triplet::new(2, 2, 3.0),
+            Triplet::new(3, 3, 3.0),
+        ];
+        let a = SparseColMat::try_new_from_triplets(4, 4, &t)?;
+        assert_eq!(
+            PatternFingerprint::of(&a),
+            PatternFingerprint::of_symbolic(a.symbolic())
+        );
         Ok(())
     }
 

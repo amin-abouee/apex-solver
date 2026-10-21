@@ -20,6 +20,8 @@ use apex_manifolds::{LieGroup, se3::SE3};
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::core::variable::Variable;
+use apex_solver::factors::Factor;
+use apex_solver::linalg::LinearSolverType;
 use apex_solver::linalg::dense::schur::ExplicitDenseSchur;
 use apex_solver::linalg::schur::{PcgParams, solve_pcg};
 use apex_solver::linalg::sparse::normal_eq::NormalEquationsCache;
@@ -30,7 +32,8 @@ use apex_solver::linalg::sparse::{
 };
 use apex_solver::linalg::{Damping, DenseMode, LinearSolver, StructureAware};
 use apex_solver::linearizer::cpu::sparse::assemble_sparse;
-use criterion::{Criterion, criterion_group, criterion_main};
+use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use faer::Mat;
 use faer::prelude::ReborrowMut;
 use faer::sparse::{SparseColMat, Triplet};
@@ -198,6 +201,100 @@ fn window_like_system(frames: usize, landmarks: usize) -> BaSystem {
         .unwrap_or_else(|e| panic!("valid triplets required: {e:?}"));
     let residuals = Mat::from_fn(total_rows, 1, |i, _| ((i * 13) % 17) as f64 * 0.1);
     (jacobian, residuals, variables, index_map, landmark_keys)
+}
+
+/// A synthetic visual-inertial observation: two 9-column states (the last
+/// three, velocity, have zero weight and so never move the residual), a
+/// 6-column extrinsic and a one-column landmark, two residual rows.
+struct WindowObservation {
+    weights: [[f64; 25]; 2],
+    target: [f64; 2],
+}
+
+impl Factor for WindowObservation {
+    fn linearize(
+        &self,
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
+        let mut jacobian = jacobian;
+        for (r, weights) in self.weights.iter().enumerate() {
+            let x = params.iter().flat_map(|block| block.iter().copied());
+            let s: f64 = x.zip(weights).map(|(x, w)| x * w).sum();
+            residual[r] = s.sin() - self.target[r];
+            if let Some(jac) = jacobian.as_mut() {
+                let c = s.cos();
+                for (col, w) in weights.iter().enumerate() {
+                    jac[(r, col)] = c * w;
+                }
+            }
+        }
+    }
+
+    fn residual_dim(&self) -> usize {
+        2
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        (2, 25)
+    }
+}
+
+/// [`window_like_system`] as a solvable `Problem`: the same layout, with a
+/// smooth nonlinear residual so Levenberg-Marquardt needs several iterations.
+fn window_problem(frames: usize, landmarks: usize) -> Problem {
+    let mut problem = Problem::new(apex_solver::JacobianMode::Sparse);
+    let states: Vec<_> = (0..frames)
+        .map(|_| problem.add_variable(ManifoldType::RN, nalgebra::DVector::zeros(9)))
+        .collect();
+    let extrinsic = problem.add_variable(ManifoldType::RN, nalgebra::DVector::zeros(6));
+
+    let mut seed: u64 = 0x9E3779B97F4A7C15;
+    let mut next = move || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((seed >> 33) % 1000) as f64 / 1000.0 - 0.5
+    };
+    // The solve starts at zero and targets a hidden true state, so the
+    // residuals are consistent and the iterations converge.
+    let truth_states: Vec<[f64; 9]> = (0..frames)
+        .map(|_| std::array::from_fn(|k| if k < 6 { next() } else { 0.0 }))
+        .collect();
+    let truth_extrinsic: [f64; 6] = std::array::from_fn(|_| next());
+    for l in 0..landmarks {
+        let landmark = problem.add_variable(ManifoldType::RN, nalgebra::DVector::zeros(1));
+        problem.mark_for_elimination(landmark);
+        let truth_landmark = next();
+        let host = l % frames;
+        let stride = 1 + l % 3;
+        for j in 0..3 {
+            let observer = (host + 1 + j * stride) % frames;
+            let mut weights = [[0.0; 25]; 2];
+            let mut target = [0.0; 2];
+            for (row, t) in weights.iter_mut().zip(&mut target) {
+                for (col, w) in row.iter_mut().enumerate() {
+                    let velocity = (6..9).contains(&col) || (15..18).contains(&col);
+                    if !velocity {
+                        *w = next();
+                    }
+                }
+                let truth = truth_states[host]
+                    .iter()
+                    .chain(&truth_states[observer])
+                    .chain(&truth_extrinsic)
+                    .chain(std::iter::once(&truth_landmark));
+                *t = truth.zip(row.iter()).map(|(x, w)| x * w).sum::<f64>().sin();
+            }
+            problem.add_residual_block(
+                &[states[host], states[observer], extrinsic, landmark],
+                Box::new(WindowObservation { weights, target }),
+                None,
+            );
+        }
+    }
+    problem
 }
 
 type BaSystemDense = (
@@ -436,6 +533,22 @@ fn bench_explicit_sparse_schur_window(c: &mut Criterion) {
             black_box(dx.nrows())
         })
     });
+    group.bench_function("lm_8_iterations_11_states_560_landmarks", |b| {
+        b.iter_batched(
+            || window_problem(11, 560),
+            |mut problem| {
+                let config = LevenbergMarquardtConfig::new()
+                    .with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)
+                    .with_max_iterations(8)
+                    .with_cost_tolerance(0.0)
+                    .with_parameter_tolerance(0.0)
+                    .with_gradient_tolerance(0.0);
+                let result = LevenbergMarquardt::with_config(config).optimize(&mut problem);
+                black_box(result.map(|r| r.final_cost))
+            },
+            BatchSize::LargeInput,
+        )
+    });
     group.finish();
 }
 
@@ -582,7 +695,8 @@ fn bench_assemble(c: &mut Criterion) {
 /// `matches()` check (normal equations, chunk layout, diagonality verdict,
 /// visibility index). It runs once per check against O(nnz) floating-point
 /// assembly plus factorization, so it must stay in the noise — this bench
-/// pins that.
+/// pins that. The window case is the size a keyframe solve checks on every
+/// iteration.
 fn bench_fingerprint(c: &mut Criterion) {
     let mut group = c.benchmark_group("fingerprint");
 
@@ -620,6 +734,15 @@ fn bench_fingerprint(c: &mut Criterion) {
     group.bench_function(format!("chain_5k_{chain_nnz}_nnz"), |b| {
         b.iter(|| black_box(PatternFingerprint::of(black_box(&chain_jacobian))))
     });
+
+    // Visual-inertial window Jacobian: the one checked on every iteration of a
+    // keyframe solve.
+    let (window_jacobian, _, _, _, _) = window_like_system(11, 560);
+    let window_nnz = window_jacobian.compute_nnz();
+    group.bench_function(
+        format!("window_11_states_560_landmarks_{window_nnz}_nnz"),
+        |b| b.iter(|| black_box(PatternFingerprint::of(black_box(&window_jacobian)))),
+    );
     group.finish();
 }
 

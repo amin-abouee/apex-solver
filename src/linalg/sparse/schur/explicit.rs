@@ -464,8 +464,11 @@ impl ExplicitSparseSchur {
     /// Eliminating mutually connected variables silently yields a wrong step,
     /// so this is checked rather than assumed — but the check is structural,
     /// so repeating it every iteration would be pure overhead.
-    fn ensure_block_diagonal(&mut self, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
-        let fingerprint = pattern::PatternFingerprint::of(hessian);
+    fn ensure_block_diagonal(
+        &mut self,
+        hessian: &SparseColMat<usize, f64>,
+        fingerprint: pattern::PatternFingerprint,
+    ) -> LinAlgResult<()> {
         if self.verified_pattern == Some(fingerprint) {
             return Ok(());
         }
@@ -535,8 +538,8 @@ impl ExplicitSparseSchur {
     fn extract_kept_and_coupling(
         &mut self,
         hessian: &SparseColMat<usize, f64>,
+        fingerprint: pattern::PatternFingerprint,
     ) -> LinAlgResult<(SparseColMat<usize, f64>, SparseColMat<usize, f64>)> {
-        let fingerprint = pattern::PatternFingerprint::of(hessian);
         let cache = match self.extraction.take() {
             Some(cache) if cache.fingerprint == fingerprint => cache,
             _ => ExtractionCache::build(self.require_partition()?, hessian)?,
@@ -1230,8 +1233,9 @@ impl LinearSolver<SparseMode> for ExplicitSparseSchur {
 
         // 2. Split the system. `H_ee` must be block-diagonal for the
         //    elimination to be exact; that is checked, not assumed.
-        self.ensure_block_diagonal(&hessian)?;
-        let (h_kk, h_ke) = self.extract_kept_and_coupling(&hessian)?;
+        let fingerprint = self.ne_cache.product_fingerprint()?;
+        self.ensure_block_diagonal(&hessian, fingerprint)?;
+        let (h_kk, h_ke) = self.extract_kept_and_coupling(&hessian, fingerprint)?;
         let (g_k, g_e) = self.extract_gradient_blocks(&neg_gradient)?;
 
         // 3. Gather and invert the H_ee diagonal blocks (any DOF, mixed sizes).
@@ -1277,11 +1281,12 @@ impl LinearSolver<SparseMode> for ExplicitSparseSchur {
         }
 
         // 2. Split the system, verifying the elimination precondition.
-        self.ensure_block_diagonal(&hessian)?;
+        let fingerprint = self.ne_cache.product_fingerprint()?;
+        self.ensure_block_diagonal(&hessian, fingerprint)?;
         let partition = self.require_partition()?;
         let kept_dof = partition.kept_dof();
         let num_eliminated_blocks = partition.eliminated_blocks().len();
-        let (h_kk, h_ke) = self.extract_kept_and_coupling(&hessian)?;
+        let (h_kk, h_ke) = self.extract_kept_and_coupling(&hessian, fingerprint)?;
         let (g_k, g_e) = self.extract_gradient_blocks(&neg_gradient)?;
 
         debug!(
@@ -1819,8 +1824,9 @@ mod tests {
 
         let kk_ref = solver.extract_kept_block(&h_full)?;
         let ke_ref = solver.extract_coupling_block(&h_full)?;
-        let (kk_first, ke_first) = solver.extract_kept_and_coupling(&h_full)?;
-        let (kk_second, ke_second) = solver.extract_kept_and_coupling(&h_full)?;
+        let fingerprint = pattern::PatternFingerprint::of(&h_full);
+        let (kk_first, ke_first) = solver.extract_kept_and_coupling(&h_full, fingerprint)?;
+        let (kk_second, ke_second) = solver.extract_kept_and_coupling(&h_full, fingerprint)?;
 
         for (cached, direct, what) in [
             (&kk_first, &kk_ref, "H_kk first call"),
