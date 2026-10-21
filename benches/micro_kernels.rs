@@ -6,6 +6,8 @@
 //!   with `Iterative` (PCG on the formed `S`) and default (Cholesky-on-`S`)
 //!   variants, `ExplicitDenseSchur`, and the shared `schur::pcg` primitive in
 //!   isolation — all at matched problem size, so the numbers compare directly
+//! - `schur_window` group: `ExplicitSparseSchur` on a visual-inertial window
+//!   whose coupling rows include stored zeros
 //! - [`assemble`]: residual/Jacobian assembly for a synthetic factor graph
 //! - [`fingerprint`]: structural pattern hashing guarding the sparse caches
 //!
@@ -116,6 +118,78 @@ fn ba_like_system(groups: usize) -> BaSystem {
                     triplets.push(Triplet::new(rb + k, cc + k, 1.0));
                     triplets.push(Triplet::new(rb + k, lc + (k % 3), 1.0));
                 }
+            }
+        }
+    }
+
+    let jacobian = SparseColMat::try_new_from_triplets(total_rows, total_cols, &triplets)
+        .unwrap_or_else(|e| panic!("valid triplets required: {e:?}"));
+    let residuals = Mat::from_fn(total_rows, 1, |i, _| ((i * 13) % 17) as f64 * 0.1);
+    (jacobian, residuals, variables, index_map, landmark_keys)
+}
+
+/// Synthetic sliding-window system shaped like a visual-inertial back end:
+/// `frames` retained 9-DOF navigation states and one 6-DOF extrinsic, with
+/// 1-DOF inverse-range landmarks eliminated. Each landmark is seen from a host
+/// frame and three observers, two rows per observation, and every row stores
+/// its state's last three columns (velocity) as explicit zeros — a
+/// reprojection residual does not depend on velocity, but the factor over
+/// `SE_2(3)` still emits the full 9-column block.
+fn window_like_system(frames: usize, landmarks: usize) -> BaSystem {
+    const STATE_DOF: usize = 9;
+    const POSE_DOF: usize = 6;
+    const EXTRINSIC_DOF: usize = 6;
+    let extrinsic_col = frames * STATE_DOF;
+    let landmark_base = extrinsic_col + EXTRINSIC_DOF;
+    let total_cols = landmark_base + landmarks;
+    let total_rows = landmarks * 6;
+
+    let mut variables: VarMap = SlotMap::with_key();
+    let mut index_map: SecondaryMap<apex_solver::core::VarKey, usize> = SecondaryMap::new();
+    let mut landmark_keys = std::collections::HashSet::new();
+    for f in 0..frames {
+        let key = variables.insert(Box::new(Variable::new(Rn::new(nalgebra::DVector::zeros(
+            STATE_DOF,
+        )))));
+        index_map.insert(key, f * STATE_DOF);
+    }
+    let key = variables.insert(Box::new(Variable::new(Rn::new(nalgebra::DVector::zeros(
+        EXTRINSIC_DOF,
+    )))));
+    index_map.insert(key, extrinsic_col);
+    for l in 0..landmarks {
+        let key = variables.insert(Box::new(Variable::new(Rn::new(nalgebra::DVector::zeros(
+            1,
+        )))));
+        index_map.insert(key, landmark_base + l);
+        landmark_keys.insert(key);
+    }
+
+    let mut state: u64 = 0x9E3779B97F4A7C15;
+    let mut value = move || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (((state >> 33) % 1000) as f64 + 1.0) / 250.0 - 2.0
+    };
+    let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
+    for l in 0..landmarks {
+        let host = l % frames;
+        let stride = 1 + l % 3;
+        for j in 0..3 {
+            let observer = (host + 1 + j * stride) % frames;
+            for r in 0..2 {
+                let row = l * 6 + j * 2 + r;
+                for frame in [host, observer] {
+                    for k in 0..STATE_DOF {
+                        let v = if k < POSE_DOF { value() } else { 0.0 };
+                        triplets.push(Triplet::new(row, frame * STATE_DOF + k, v));
+                    }
+                }
+                for k in 0..EXTRINSIC_DOF {
+                    triplets.push(Triplet::new(row, extrinsic_col + k, value()));
+                }
+                triplets.push(Triplet::new(row, landmark_base + l, value()));
             }
         }
     }
@@ -336,6 +410,35 @@ fn bench_explicit_sparse_schur(c: &mut Criterion) {
     group.finish();
 }
 
+/// `ExplicitSparseSchur` on a visual-inertial window: 11 states of nine
+/// columns whose velocity columns are stored zeros, and 560 one-column
+/// landmarks. The BA fixtures above have no stored zeros, so this is the one
+/// that sees coupling rows that contribute nothing.
+fn bench_explicit_sparse_schur_window(c: &mut Criterion) {
+    let mut group = c.benchmark_group("schur_window");
+    let (jacobian, residuals, variables, index_map, landmark_keys) = window_like_system(11, 560);
+    let damping = Damping::new(1e-3, 1e-6, 1e32).unwrap_or_else(|e| panic!("valid bounds: {e:?}"));
+
+    let mut solver = ExplicitSparseSchur::new();
+    solver
+        .initialize_structure(&variables, &index_map, &landmark_keys)
+        .unwrap_or_else(|e| panic!("structure init: {e:?}"));
+
+    group.bench_function("explicit_sparse_schur_11_states_560_landmarks", |b| {
+        b.iter(|| {
+            let dx = solver
+                .solve_augmented_equation(
+                    black_box(&residuals),
+                    black_box(&jacobian),
+                    black_box(&damping),
+                )
+                .unwrap_or_else(|e| panic!("solve failed: {e:?}"));
+            black_box(dx.nrows())
+        })
+    });
+    group.finish();
+}
+
 /// `ExplicitDenseSchur` on a small BA-like problem — dense mode's target is
 /// < ~500 DOF, so this uses far fewer groups than the sparse PCG benches.
 fn bench_explicit_dense_schur(c: &mut Criterion) {
@@ -528,6 +631,7 @@ criterion_group!(
     bench_pcg_iterative_schur,
     bench_pcg_explicit_schur,
     bench_explicit_sparse_schur,
+    bench_explicit_sparse_schur_window,
     bench_explicit_dense_schur,
     bench_pcg_primitive,
     bench_assemble,

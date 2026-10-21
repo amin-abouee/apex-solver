@@ -949,6 +949,15 @@ impl ExplicitSparseSchur {
                         cursors[local] += 1;
                     }
                 }
+                // A retained variable whose stored coupling to this block is
+                // all zeros adds exactly nothing to `S`. Factors do store such
+                // columns — a reprojection residual over `SE_2(3)` emits the
+                // velocity block as zeros — and the rank update below is
+                // quadratic in the rows kept, so dropping them is a large saving.
+                if h_ke_rows[strip..].iter().all(|&v| v == 0.0) {
+                    h_ke_rows.truncate(strip);
+                    continue;
+                }
                 kept_rows.push(min_row);
             }
 
@@ -1803,17 +1812,10 @@ mod tests {
         Ok(())
     }
 
-    /// The reduced camera matrix against naive dense algebra.
-    ///
-    /// Pins the `dof == 3` unrolled path, the general loop, the flat
-    /// column-major `EliminatedBlocks` indexing and the exact-symmetrization
-    /// step against one independent `S = H_kk − H_ke·H_ee⁻¹·H_keᵀ` computed
-    /// with dense nalgebra — so a future edit breaking any single
-    /// representation fails here even if every other path still agrees.
-    #[test]
-    fn schur_complement_matches_naive_dense() -> TestResult {
-        let (variables, variable_index_map, jacobian, _residuals, landmark_keys) =
-            create_schur_test_setup()?;
+    /// The solver's reduced matrix for `setup` against one independent
+    /// `S = H_kk − H_ke·H_ee⁻¹·H_keᵀ` computed with dense nalgebra.
+    fn assert_schur_matches_naive_dense(setup: TestSetup) -> TestResult {
+        let (variables, variable_index_map, jacobian, _residuals, landmark_keys) = setup;
         let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
@@ -1892,6 +1894,101 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// The reduced camera matrix against naive dense algebra.
+    ///
+    /// Pins the `dof == 3` unrolled path, the general loop, the flat
+    /// column-major `EliminatedBlocks` indexing and the exact-symmetrization
+    /// step against one independent `S = H_kk − H_ke·H_ee⁻¹·H_keᵀ` computed
+    /// with dense nalgebra — so a future edit breaking any single
+    /// representation fails here even if every other path still agrees.
+    #[test]
+    fn schur_complement_matches_naive_dense() -> TestResult {
+        assert_schur_matches_naive_dense(create_schur_test_setup()?)
+    }
+
+    /// A window-shaped setup whose Jacobian stores columns that are zero.
+    ///
+    /// Three 9-DOF states whose last three columns (velocity) are stored as
+    /// zeros in every row, a 6-DOF extrinsic, then two 1-DOF and two 3-DOF
+    /// eliminated blocks. A state column couples to one column of a 3-DOF
+    /// block (`k % 3`), so those strips are partly zero and must still be kept.
+    /// The third state is not seen from every block, so some strips are absent.
+    fn create_zero_coupling_setup() -> Result<TestSetup, Box<dyn std::error::Error>> {
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+        let mut landmark_keys = std::collections::HashSet::new();
+
+        let mut next_col = 0usize;
+        let mut add_block = |dof: usize, eliminated: bool| -> usize {
+            let key = variables.insert(Box::new(Variable::new(rn::Rn::new(DVector::zeros(dof)))));
+            variable_index_map.insert(key, next_col);
+            if eliminated {
+                landmark_keys.insert(key);
+            }
+            let col = next_col;
+            next_col += dof;
+            col
+        };
+        let states = [
+            add_block(9, false),
+            add_block(9, false),
+            add_block(9, false),
+        ];
+        let extrinsic = add_block(6, false);
+        let landmarks = [
+            (add_block(1, true), 1usize),
+            (add_block(1, true), 1),
+            (add_block(3, true), 3),
+            (add_block(3, true), 3),
+        ];
+        let n_cols = next_col;
+
+        let value = |row: usize, col: usize| 0.5 + ((row * 31 + col * 17) % 13) as f64 * 0.25;
+        let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
+        let mut row = 0usize;
+        for (index, &(landmark, landmark_dof)) in landmarks.iter().enumerate() {
+            let host = states[index % 3];
+            let observer = states[(index + 1) % 3];
+            for r in 0..6 {
+                for state in [host, observer] {
+                    for k in 0..9 {
+                        let coupled = k < 6 && (landmark_dof == 1 || r % 3 == k % 3);
+                        let v = if coupled { value(row, state + k) } else { 0.0 };
+                        triplets.push(Triplet::new(row, state + k, v));
+                    }
+                }
+                for k in 0..6 {
+                    triplets.push(Triplet::new(row, extrinsic + k, value(row, extrinsic + k)));
+                }
+                let col = landmark + r % landmark_dof;
+                triplets.push(Triplet::new(row, col, value(row, col)));
+                row += 1;
+            }
+        }
+
+        let jacobian = SparseColMat::try_new_from_triplets(row, n_cols, &triplets)?;
+        assert_eq!(
+            jacobian.compute_nnz(),
+            triplets.len(),
+            "the stored zeros must survive assembly, or the test proves nothing"
+        );
+        let residuals = Mat::from_fn(row, 1, |i, _| (i % 5) as f64 * 0.1);
+        Ok((
+            variables,
+            variable_index_map,
+            jacobian,
+            residuals,
+            landmark_keys,
+        ))
+    }
+
+    /// Dropping coupling rows that are all zeros must not move `S`: the reduced
+    /// matrix of a Jacobian with stored velocity zeros is the dense reference's.
+    #[test]
+    fn stored_zero_couplings_leave_the_schur_complement_unchanged() -> TestResult {
+        assert_schur_matches_naive_dense(create_zero_coupling_setup()?)
     }
 
     #[test]
