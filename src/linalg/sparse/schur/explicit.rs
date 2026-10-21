@@ -520,6 +520,7 @@ impl ExplicitSparseSchur {
         self.eliminated = EliminatedBlocks::new(&partition);
         self.partition = Some(partition);
         self.verified_pattern = None;
+        self.s_bitmap = None;
         Ok(())
     }
 
@@ -866,16 +867,19 @@ impl ExplicitSparseSchur {
         let mut s_dense = vec![0.0f64; kept_dof * kept_dof];
 
         // Occupancy bitmap of the dense accumulator, one aligned word range
-        // per column: bit `(col, row)` set ⟺ `S[row, col]` was written.
-        // Captured as a side effect of the writes (one OR each — the update
-        // loop is bandwidth-bound, so this is free), it seeds the sparse
-        // output pattern without ever enumerating cliques or sorting
-        // triplets.
+        // per column: bit `(col, row)` set ⟺ `S[row, col]` was written. It
+        // seeds the sparse output pattern without ever enumerating cliques or
+        // sorting triplets.
+        //
+        // The pattern is a property of the structure, not of the values, so the
+        // first call on a structure marks every slot a block can touch and
+        // later calls reuse the bitmap. Marking is an OR per update, about half
+        // of the update loop's memory traffic.
         let extraction_fp = self.extraction.as_ref().map(|c| c.fingerprint);
         let words = kept_dof * wpc;
-        let mut bits = match self.s_bitmap.take() {
-            Some((fp, b)) if Some(fp) == extraction_fp && b.len() == words => b,
-            _ => vec![0u64; words],
+        let (mut bits, pattern_known) = match self.s_bitmap.take() {
+            Some((fp, b)) if Some(fp) == extraction_fp && b.len() == words => (b, true),
+            _ => (vec![0u64; words], false),
         };
 
         // S starts as H_kk.
@@ -885,7 +889,9 @@ impl ExplicitSparseSchur {
             let vals = h_kk.val_of_col(col);
             for (idx, &row) in rows.iter().enumerate() {
                 s_dense[row * kept_dof + col] += vals[idx];
-                set_dense_bit(&mut bits, wpc, row, col);
+                if !pattern_known {
+                    set_dense_bit(&mut bits, wpc, row, col);
+                }
             }
         }
 
@@ -901,6 +907,7 @@ impl ExplicitSparseSchur {
         let mut kept_rows: Vec<usize> = Vec::with_capacity(32);
         let mut h_ke_rows: Vec<f64> = Vec::with_capacity(32 * max_dof);
         let mut contrib: Vec<f64> = Vec::with_capacity(32 * max_dof);
+        let mut runs: Vec<(usize, usize)> = Vec::with_capacity(16);
         let mut cursors: Vec<usize> = Vec::with_capacity(max_dof);
         let mut col_rows: Vec<&[usize]> = Vec::with_capacity(max_dof);
         let mut col_vals: Vec<&[f64]> = Vec::with_capacity(max_dof);
@@ -954,7 +961,10 @@ impl ExplicitSparseSchur {
                 // columns — a reprojection residual over `SE_2(3)` emits the
                 // velocity block as zeros — and the rank update below is
                 // quadratic in the rows kept, so dropping them is a large saving.
-                if h_ke_rows[strip..].iter().all(|&v| v == 0.0) {
+                // Not on the call that marks the pattern: a value that is zero
+                // at this linearization may not be at the next, and the pattern
+                // must not depend on it.
+                if pattern_known && h_ke_rows[strip..].iter().all(|&v| v == 0.0) {
                     h_ke_rows.truncate(strip);
                     continue;
                 }
@@ -988,7 +998,30 @@ impl ExplicitSparseSchur {
             // so the 3-DOF case — points in classic BA — gets an unrolled path.
             // The general loop below handles every other size, including mixed
             // ones within the same problem.
-            if dof == 3 {
+            if dof == 1 && pattern_known {
+                // One scalar per retained row, and a variable's columns are
+                // adjacent, so the retained rows form short runs of consecutive
+                // columns; a run is a contiguous multiply-subtract.
+                runs.clear();
+                let mut start = 0;
+                for j in 1..=kept_rows.len() {
+                    if j == kept_rows.len() || kept_rows[j] != kept_rows[j - 1] + 1 {
+                        runs.push((start, j - start));
+                        start = j;
+                    }
+                }
+                for (i, &row_i) in kept_rows.iter().enumerate() {
+                    let c = contrib[i];
+                    let s_row = &mut s_dense[row_i * kept_dof..(row_i + 1) * kept_dof];
+                    for &(start, len) in &runs {
+                        let col = kept_rows[start];
+                        let h = &h_ke_rows[start..start + len];
+                        for (s, &h) in s_row[col..col + len].iter_mut().zip(h) {
+                            *s -= c * h;
+                        }
+                    }
+                }
+            } else if dof == 3 {
                 for (i, &row_i) in kept_rows.iter().enumerate() {
                     let (c0, c1, c2) = (contrib[i * 3], contrib[i * 3 + 1], contrib[i * 3 + 2]);
                     let base = row_i * kept_dof;
@@ -997,7 +1030,9 @@ impl ExplicitSparseSchur {
                             + c1 * h_ke_rows[j * 3 + 1]
                             + c2 * h_ke_rows[j * 3 + 2];
                         s_dense[base + row_j] -= dot;
-                        set_dense_bit(&mut bits, wpc, row_i, row_j);
+                        if !pattern_known {
+                            set_dense_bit(&mut bits, wpc, row_i, row_j);
+                        }
                     }
                 }
             } else {
@@ -1011,7 +1046,9 @@ impl ExplicitSparseSchur {
                             dot += contrib_i[k] * h_ke_j[k];
                         }
                         s_dense[base + row_j] -= dot;
-                        set_dense_bit(&mut bits, wpc, row_i, row_j);
+                        if !pattern_known {
+                            set_dense_bit(&mut bits, wpc, row_i, row_j);
+                        }
                     }
                 }
             }
@@ -1028,6 +1065,7 @@ impl ExplicitSparseSchur {
             let (symbolic, s_values, pattern_hash) =
                 build_schur_output(kept_dof, wpc, &bits, &s_dense);
             let s = SparseColMat::new(symbolic, s_values);
+            self.s_bitmap = extraction_fp.map(|fp| (fp, bits));
             return Ok((s, Some(pattern_hash)));
         } else {
             // Force exact symmetry: accumulation over many blocks drifts.
@@ -1910,11 +1948,13 @@ mod tests {
 
     /// A window-shaped setup whose Jacobian stores columns that are zero.
     ///
-    /// Three 9-DOF states whose last three columns (velocity) are stored as
+    /// Four 9-DOF states whose last three columns (velocity) are stored as
     /// zeros in every row, a 6-DOF extrinsic, then two 1-DOF and two 3-DOF
     /// eliminated blocks. A state column couples to one column of a 3-DOF
     /// block (`k % 3`), so those strips are partly zero and must still be kept.
-    /// The third state is not seen from every block, so some strips are absent.
+    /// Every block has the first state as host and two of the others as
+    /// observers, so two observers meet in `S` only through fill-in, never in
+    /// `H_kk`.
     fn create_zero_coupling_setup() -> Result<TestSetup, Box<dyn std::error::Error>> {
         let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
         let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
@@ -1935,6 +1975,7 @@ mod tests {
             add_block(9, false),
             add_block(9, false),
             add_block(9, false),
+            add_block(9, false),
         ];
         let extrinsic = add_block(6, false);
         let landmarks = [
@@ -1944,14 +1985,19 @@ mod tests {
             (add_block(3, true), 3),
         ];
         let n_cols = next_col;
+        let observers = [(1, 2), (1, 3), (2, 3), (1, 2)];
 
         let value = |row: usize, col: usize| 0.5 + ((row * 31 + col * 17) % 13) as f64 * 0.25;
         let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
         let mut row = 0usize;
         for (index, &(landmark, landmark_dof)) in landmarks.iter().enumerate() {
-            let host = states[index % 3];
-            let observer = states[(index + 1) % 3];
+            let host = states[0];
             for r in 0..6 {
+                let observer = states[if r < 3 {
+                    observers[index].0
+                } else {
+                    observers[index].1
+                }];
                 for state in [host, observer] {
                     for k in 0..9 {
                         let coupled = k < 6 && (landmark_dof == 1 || r % 3 == k % 3);
@@ -1989,6 +2035,88 @@ mod tests {
     #[test]
     fn stored_zero_couplings_leave_the_schur_complement_unchanged() -> TestResult {
         assert_schur_matches_naive_dense(create_zero_coupling_setup()?)
+    }
+
+    /// `jacobian` with the same stored pattern and the values of `zeroed`
+    /// columns replaced by zero.
+    fn with_columns_zeroed(
+        jacobian: &SparseColMat<usize, f64>,
+        zeroed: std::ops::Range<usize>,
+    ) -> Result<SparseColMat<usize, f64>, Box<dyn std::error::Error>> {
+        let mut triplets = Vec::with_capacity(jacobian.compute_nnz());
+        for col in 0..jacobian.ncols() {
+            let rows = jacobian.symbolic().row_idx_of_col_raw(col);
+            for (&row, &v) in rows.iter().zip(jacobian.val_of_col(col)) {
+                let v = if zeroed.contains(&col) { 0.0 } else { v };
+                triplets.push(Triplet::new(row, col, v));
+            }
+        }
+        Ok(SparseColMat::try_new_from_triplets(
+            jacobian.nrows(),
+            jacobian.ncols(),
+            &triplets,
+        )?)
+    }
+
+    fn solve_step(
+        solver: &mut ExplicitSparseSchur,
+        residuals: &Mat<f64>,
+        jacobian: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        LinearSolver::<SparseMode>::solve_augmented_equation(
+            solver,
+            residuals,
+            jacobian,
+            &Damping::identity(0.1),
+        )
+    }
+
+    /// The first solve on a structure marks the pattern and leaves it for the
+    /// next, which then skips the marking: both steps must be the same.
+    #[test]
+    fn a_repeated_solve_reuses_the_pattern_and_takes_the_same_step() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_zero_coupling_setup()?;
+        let mut solver = ExplicitSparseSchur::new();
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
+
+        let first = solve_step(&mut solver, &residuals, &jacobian)?;
+        assert!(
+            solver.s_bitmap.is_some(),
+            "the first solve must leave its pattern for the next"
+        );
+        let second = solve_step(&mut solver, &residuals, &jacobian)?;
+
+        assert_eq!(first.nrows(), second.nrows());
+        for i in 0..first.nrows() {
+            assert_eq!(first[(i, 0)], second[(i, 0)], "step component {i}");
+        }
+        Ok(())
+    }
+
+    /// A coupling that happens to be zero at one linearization and is not at the
+    /// next must reach `S`: the pattern the first solve leaves is structural, so
+    /// the second solve agrees with a solver that never saw the zeros.
+    #[test]
+    fn a_coupling_that_is_zero_at_first_is_not_lost_from_the_pattern() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_zero_coupling_setup()?;
+        let early = with_columns_zeroed(&jacobian, 9..15)?;
+
+        let mut reused = ExplicitSparseSchur::new();
+        reused.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
+        solve_step(&mut reused, &residuals, &early)?;
+        let got = solve_step(&mut reused, &residuals, &jacobian)?;
+
+        let mut fresh = ExplicitSparseSchur::new();
+        fresh.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
+        let want = solve_step(&mut fresh, &residuals, &jacobian)?;
+
+        assert_eq!(got.nrows(), want.nrows());
+        for i in 0..got.nrows() {
+            assert_eq!(got[(i, 0)], want[(i, 0)], "step component {i}");
+        }
+        Ok(())
     }
 
     #[test]
