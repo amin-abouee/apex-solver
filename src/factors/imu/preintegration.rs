@@ -22,6 +22,36 @@ use super::types::{
 };
 use crate::factors::common::math::{sinc, skew, symm_sqrt_inverse};
 
+/// `P ← 0.5·(P + Pᵀ)`, in place and with the same result as that expression.
+///
+/// Each pair of mirrored entries gets the one value `0.5·(a + b)`, which is
+/// symmetric in `a` and `b` because addition is, and a diagonal entry keeps
+/// `0.5·(a + a)`, which is `a`. The expression itself builds a transposed copy
+/// and two more matrices; this does one pass.
+fn symmetrize(p: &mut SMatrix<f64, 15, 15>) {
+    for col in 1..15 {
+        for row in 0..col {
+            let mean = 0.5 * (p[(row, col)] + p[(col, row)]);
+            p[(row, col)] = mean;
+            p[(col, row)] = mean;
+        }
+    }
+}
+
+/// `P ← P + K` for a `K` that is zero except for `value` on the diagonal of
+/// each 3x3 block starting at `start`.
+///
+/// Adding the scalar to a diagonal entry does to it what adding the full
+/// matrix did; the zeros the full matrix also added to the rest changed
+/// nothing (but the sign of an exact zero).
+fn add_block_diagonals(p: &mut SMatrix<f64, 15, 15>, blocks: &[(usize, f64)]) {
+    for &(start, value) in blocks {
+        for d in 0..3 {
+            p[(start + d, start + d)] += value;
+        }
+    }
+}
+
 /// Accumulated preintegration state between two keyframes.
 #[derive(Clone)]
 pub struct ImuPreintegration {
@@ -392,32 +422,23 @@ impl ImuPreintegration {
                 .fixed_view_mut::<3, 3>(6, 12)
                 .copy_from(&(-c_mid * dt));
 
-            // K matrices (per-sigma² noise)
-            let mut k0 = SMatrix::<f64, 15, 15>::zeros();
-            k0.fixed_view_mut::<3, 3>(3, 3)
-                .copy_from(&(gyr_sat_mult * dt * Matrix3::identity()));
-
-            let mut k1 = SMatrix::<f64, 15, 15>::zeros();
-            k1.fixed_view_mut::<3, 3>(0, 0)
-                .copy_from(&(0.5 * dt * dt * dt * acc_sat_mult.powi(3) * Matrix3::identity()));
-            k1.fixed_view_mut::<3, 3>(6, 6)
-                .copy_from(&(acc_sat_mult * dt * Matrix3::identity()));
-
-            let mut k2 = SMatrix::<f64, 15, 15>::zeros();
-            k2.fixed_view_mut::<3, 3>(9, 9)
-                .copy_from(&(dt * Matrix3::identity()));
-
-            let mut k3 = SMatrix::<f64, 15, 15>::zeros();
-            k3.fixed_view_mut::<3, 3>(12, 12)
-                .copy_from(&(dt * Matrix3::identity()));
+            // K matrices (per-sigma² noise): scaled identities on a few 3x3
+            // diagonal blocks.
+            let k_diagonals: [&[(usize, f64)]; 4] = [
+                &[(3, gyr_sat_mult * dt)],
+                &[
+                    (0, 0.5 * dt * dt * dt * acc_sat_mult.powi(3)),
+                    (6, acc_sat_mult * dt),
+                ],
+                &[(9, dt)],
+                &[(12, dt)],
+            ];
 
             let f_t = f_delta.transpose();
-            self.dp_dsigma[0] = f_delta * self.dp_dsigma[0] * f_t + k0;
-            self.dp_dsigma[1] = f_delta * self.dp_dsigma[1] * f_t + k1;
-            self.dp_dsigma[2] = f_delta * self.dp_dsigma[2] * f_t + k2;
-            self.dp_dsigma[3] = f_delta * self.dp_dsigma[3] * f_t + k3;
-            for j in 0..4 {
-                self.dp_dsigma[j] = 0.5 * (self.dp_dsigma[j] + self.dp_dsigma[j].transpose());
+            for (dp, blocks) in self.dp_dsigma.iter_mut().zip(k_diagonals) {
+                *dp = f_delta * *dp * f_t;
+                add_block_diagonals(dp, blocks);
+                symmetrize(dp);
             }
 
             self.delta_q = delta_q_new;
@@ -723,6 +744,68 @@ impl ImuPreintegration {
 mod tests {
     use super::*;
     use apex_manifolds::se3::SE3;
+
+    /// Deterministic values in roughly [-1, 1), none of them zero.
+    fn values(seed: u64) -> impl FnMut() -> f64 {
+        let mut state = seed | 1;
+        move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) % 2000) as f64 / 1000.0 - 0.9995
+        }
+    }
+
+    /// Entry-wise equality, which also accepts `-0.0` for `0.0`: the one
+    /// difference the rewritten expressions can make.
+    fn same(a: &SMatrix<f64, 15, 15>, b: &SMatrix<f64, 15, 15>) -> bool {
+        a.iter().zip(b.iter()).all(|(x, y)| x == y)
+    }
+
+    /// The in-place symmetrization is the expression it replaced, entry for
+    /// entry, for a general matrix and for one with exact zeros and a large
+    /// dynamic range, where an unlucky rounding would show.
+    #[test]
+    fn in_place_symmetrization_equals_the_expression_it_replaced() {
+        let mut next = values(7);
+        for trial in 0..4 {
+            let mut p = SMatrix::<f64, 15, 15>::from_fn(|_, _| next());
+            if trial >= 2 {
+                p = p.map(|v| {
+                    if v.abs() < 0.4 {
+                        0.0
+                    } else {
+                        v * 10f64.powi((v * 20.0) as i32)
+                    }
+                });
+            }
+            let expected = 0.5 * (p + p.transpose());
+            let mut actual = p;
+            symmetrize(&mut actual);
+            assert!(same(&expected, &actual), "trial {trial}");
+        }
+    }
+
+    /// Adding scalars to the diagonal of 3x3 blocks is adding the matrix that
+    /// holds them, which is how the covariance propagation used to do it.
+    #[test]
+    fn diagonal_block_adds_equal_adding_the_full_matrix() {
+        let mut next = values(11);
+        let blocks: [&[(usize, f64)]; 3] =
+            [&[(3, 0.013)], &[(0, 7.1e-9), (6, -0.25)], &[(12, 1e-3)]];
+        for blocks in blocks {
+            let p = SMatrix::<f64, 15, 15>::from_fn(|_, _| next());
+            let mut full = SMatrix::<f64, 15, 15>::zeros();
+            for &(start, value) in blocks {
+                full.fixed_view_mut::<3, 3>(start, start)
+                    .copy_from(&(value * Matrix3::identity()));
+            }
+            let expected = p + full;
+            let mut actual = p;
+            add_block_diagonals(&mut actual, blocks);
+            assert!(same(&expected, &actual));
+        }
+    }
 
     fn euroc_params() -> ImuParameters {
         ImuParameters {
