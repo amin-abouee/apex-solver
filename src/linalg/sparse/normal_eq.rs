@@ -21,21 +21,13 @@
 //! construction — the linearizer rebuilds `J` from the same symbolic structure
 //! every iteration.
 
-use dyn_stack::MemStack;
 use faer::{
     Accum, Mat, get_global_parallelism,
     prelude::Reborrow,
-    sparse::linalg::matmul::{
-        SparseMatMulInfo, sparse_dense_matmul, sparse_sparse_matmul_numeric,
-        sparse_sparse_matmul_numeric_scratch, sparse_sparse_matmul_symbolic,
-    },
-    sparse::{
-        SparseColMat, SparseColMatMut, SparseColMatRef, SymbolicSparseColMat,
-        SymbolicSparseColMatRef,
-    },
+    sparse::linalg::matmul::{sparse_dense_matmul, sparse_sparse_matmul_symbolic},
+    sparse::{SparseColMat, SparseColMatRef, SymbolicSparseColMat, SymbolicSparseColMatRef},
 };
 use rayon::prelude::*;
-use std::mem::MaybeUninit;
 
 use crate::error::ErrorLogging;
 use crate::linalg::{Damping, LinAlgError, LinAlgResult};
@@ -52,8 +44,6 @@ pub struct NormalEquationsCache {
     /// Fingerprint of [`Self::product_symbolic`], computed once: every `H` this
     /// cache forms has that pattern, so its consumers need not hash it again.
     product_fingerprint: super::pattern::PatternFingerprint,
-    /// Per-column flop counts used by faer to partition the numeric matmul.
-    product_info: SparseMatMulInfo,
     /// Position of the diagonal entry within each column of `JᵀJ`
     /// (`None` for structurally empty diagonals).
     diag_pos: Vec<Option<usize>>,
@@ -75,8 +65,6 @@ pub struct NormalEquationsCache {
     jt_values: Vec<f64>,
     /// Reusable `JᵀJ` value buffer.
     hessian_values: Vec<f64>,
-    /// Reusable scratch for faer's numeric kernel.
-    stack_buf: Vec<MaybeUninit<u8>>,
 }
 
 /// The undamped normal equations of one linearization.
@@ -161,13 +149,83 @@ impl LazyNormalEquations {
     }
 }
 
+/// `H = JᵀJ` into `values` (laid out by `product`), one column at a time.
+///
+/// Column `c` of `H` is the sum, over the rows `r` of `J`'s column `c`, of `J[r,c]`
+/// times row `r` of `J`, accumulated in ascending `r` into a dense column and
+/// gathered into the product's pattern. A factor that is exactly zero adds
+/// nothing, so it is skipped; Jacobians of window problems store whole zero
+/// columns (the velocity columns of a state), and skipping them is about
+/// two fifths of the work. Columns are independent, so any partition of them
+/// gives the same bits.
+fn jtj_numeric(
+    jt_pattern: SymbolicSparseColMatRef<'_, usize>,
+    jt_values: &[f64],
+    jacobian: SparseColMatRef<'_, usize, f64>,
+    product: SymbolicSparseColMatRef<'_, usize>,
+    values: &mut [f64],
+) {
+    let ncols = product.ncols();
+    let col_ptr = product.col_ptr();
+    let threads = rayon::current_num_threads().max(1);
+    let target = col_ptr[ncols].div_ceil(threads * 4).max(1);
+
+    // Split the columns into runs of about equal output size, each with its own
+    // disjoint slice of `values`.
+    let mut jobs: Vec<(std::ops::Range<usize>, &mut [f64])> = Vec::new();
+    let mut rest = values;
+    let mut start = 0usize;
+    while start < ncols {
+        let mut end = start + 1;
+        while end < ncols && col_ptr[end] - col_ptr[start] < target {
+            end += 1;
+        }
+        let (head, tail) = rest.split_at_mut(col_ptr[end] - col_ptr[start]);
+        jobs.push((start..end, head));
+        rest = tail;
+        start = end;
+    }
+
+    jobs.into_par_iter().for_each(|(columns, out)| {
+        let mut accumulator = vec![0.0f64; product.nrows()];
+        let base = col_ptr[columns.start];
+        for c in columns {
+            let rows = jacobian.symbolic().row_idx_of_col_raw(c);
+            for (&r, &j_rc) in rows.iter().zip(jacobian.val_of_col(c)) {
+                if j_rc == 0.0 {
+                    continue;
+                }
+                let range = jt_pattern.col_range(r);
+                for (&i, &j_ri) in jt_pattern
+                    .row_idx_of_col_raw(r)
+                    .iter()
+                    .zip(&jt_values[range])
+                {
+                    if j_ri != 0.0 {
+                        accumulator[i] += j_ri * j_rc;
+                    }
+                }
+            }
+            let range = product.col_range(c);
+            for (&i, slot) in product
+                .row_idx_of_col_raw(c)
+                .iter()
+                .zip(&mut out[range.start - base..range.end - base])
+            {
+                *slot = accumulator[i];
+                accumulator[i] = 0.0;
+            }
+        }
+    });
+}
+
 impl NormalEquationsCache {
     /// Build the cache for a Jacobian sparsity pattern.
     pub fn try_new(jacobian: &SparseColMat<usize, f64>) -> LinAlgResult<Self> {
         let sym = jacobian.as_ref().symbolic();
         let (jt_pattern, value_perm) = transpose_symbolic(sym)?;
-        let (product_symbolic, product_info) = sparse_sparse_matmul_symbolic(jt_pattern.rb(), sym)
-            .map_err(|e| {
+        let (product_symbolic, _) =
+            sparse_sparse_matmul_symbolic(jt_pattern.rb(), sym).map_err(|e| {
                 LinAlgError::MatrixConversion(format!("Symbolic JᵀJ product failed: {e:?}"))
                     .log_with_source(e)
             })?;
@@ -185,11 +243,6 @@ impl NormalEquationsCache {
             })
             .collect();
 
-        let scratch_req = sparse_sparse_matmul_numeric_scratch::<usize, f64>(
-            product_symbolic.rb(),
-            get_global_parallelism(),
-        );
-
         let augmented = if diag_pos.iter().any(Option::is_none) {
             Some(AugmentedDiagonal::build(&product_symbolic)?)
         } else {
@@ -202,11 +255,9 @@ impl NormalEquationsCache {
             ),
             jt_values: vec![0.0; jt_pattern.compute_nnz()],
             hessian_values: vec![0.0; product_symbolic.compute_nnz()],
-            stack_buf: vec![MaybeUninit::uninit(); scratch_req.unaligned_bytes_required()],
             jt_pattern,
             value_perm,
             product_symbolic,
-            product_info,
             diag_pos,
             augmented,
             pattern: super::pattern::PatternFingerprint::of(jacobian),
@@ -249,24 +300,13 @@ impl NormalEquationsCache {
 
         // Parallel sparse×sparse numeric product into the cached pattern.
         let hessian = {
-            let mut stack_buf = std::mem::take(&mut self.stack_buf);
-            {
-                let stack = MemStack::new(&mut stack_buf);
-                let dst =
-                    SparseColMatMut::new(self.product_symbolic.rb(), &mut self.hessian_values);
-                let jt = SparseColMatRef::new(self.jt_pattern.rb(), &self.jt_values);
-                sparse_sparse_matmul_numeric(
-                    dst,
-                    Accum::Replace,
-                    jt,
-                    jacobian.as_ref(),
-                    1.0,
-                    &self.product_info,
-                    get_global_parallelism(),
-                    stack,
-                );
-            }
-            self.stack_buf = stack_buf;
+            jtj_numeric(
+                self.jt_pattern.rb(),
+                &self.jt_values,
+                jacobian.as_ref(),
+                self.product_symbolic.rb(),
+                &mut self.hessian_values,
+            );
             SparseColMat::new(self.product_symbolic.clone(), self.hessian_values.clone())
         };
 
@@ -459,6 +499,83 @@ mod tests {
             }
         }
         Ok(SparseColMat::try_new_from_triplets(m, n, &triplets)?)
+    }
+
+    /// Zero out whole columns' values but keep the pattern, as a factor that stores
+    /// its velocity block does.
+    fn with_stored_zeros(
+        j: &SparseColMat<usize, f64>,
+        zeroed: &[usize],
+    ) -> TestResult<SparseColMat<usize, f64>> {
+        let mut triplets = Vec::new();
+        for col in 0..j.ncols() {
+            for (&row, &v) in j
+                .symbolic()
+                .row_idx_of_col_raw(col)
+                .iter()
+                .zip(j.val_of_col(col))
+            {
+                triplets.push(Triplet::new(
+                    row,
+                    col,
+                    if zeroed.contains(&col) { 0.0 } else { v },
+                ));
+            }
+        }
+        Ok(SparseColMat::try_new_from_triplets(
+            j.nrows(),
+            j.ncols(),
+            &triplets,
+        )?)
+    }
+
+    #[test]
+    fn the_zero_skipping_kernel_reproduces_the_generic_product() -> TestResult<()> {
+        for (m, n, seed, zeroed) in [
+            (60usize, 24usize, 3u64, vec![]),
+            (80, 30, 5, vec![2, 3, 4, 11, 12]),
+            (120, 45, 9, vec![0, 1, 7, 20, 21, 22]),
+        ] {
+            use dyn_stack::MemStack;
+            use faer::sparse::SparseColMatMut;
+            use faer::sparse::linalg::matmul::{
+                sparse_sparse_matmul_numeric, sparse_sparse_matmul_numeric_scratch,
+            };
+
+            let j = with_stored_zeros(&sample_jacobian(m, n, seed)?, &zeroed)?;
+            let mut cache = NormalEquationsCache::try_new(&j)?;
+            let residuals = Mat::from_fn(m, 1, |i, _| i as f64 * 0.01);
+            let mine = cache.compute(&residuals, &j)?;
+
+            // faer's own kernel on the same operands is the reference.
+            let (product, info) =
+                sparse_sparse_matmul_symbolic(cache.jt_pattern.rb(), j.symbolic())
+                    .map_err(|e| format!("symbolic product failed: {e:?}"))?;
+            let mut reference = vec![0.0; product.compute_nnz()];
+            let mut scratch = vec![
+                std::mem::MaybeUninit::<u8>::uninit();
+                sparse_sparse_matmul_numeric_scratch::<usize, f64>(
+                    product.rb(),
+                    get_global_parallelism()
+                )
+                .unaligned_bytes_required()
+            ];
+            sparse_sparse_matmul_numeric(
+                SparseColMatMut::new(product.rb(), &mut reference),
+                Accum::Replace,
+                SparseColMatRef::new(cache.jt_pattern.rb(), &cache.jt_values),
+                j.as_ref(),
+                1.0,
+                &info,
+                get_global_parallelism(),
+                MemStack::new(&mut scratch),
+            );
+            let ours = mine.hessian.val();
+            assert_eq!(ours.len(), reference.len());
+            let bad = ours.iter().zip(&reference).filter(|(a, b)| a != b).count();
+            assert_eq!(bad, 0, "{bad} of {} entries differ for {m}x{n}", ours.len());
+        }
+        Ok(())
     }
 
     /// Consumers key their caches on the cached fingerprint instead of hashing
