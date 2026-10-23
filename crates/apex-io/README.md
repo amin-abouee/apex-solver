@@ -570,6 +570,21 @@ values match and Meta reads files written by `VrsWriter` identically to the orig
 files; the upstream header comments are partly outdated): file header 80 B, record header 32 B, index entries 19 B
 `{ts, size, type, stream}` with offsets implied by cumulative sizes, var-size layout pieces stored as `(offset, length)` pairs.
 
+### LaMAria
+
+A LaMAria sequence is the VRS recording plus two small files, each with a reader:
+
+```rust
+use apex_io::lamaria::Calibration;
+use apex_io::{TrajectoryLoader, TumNanosLoader};
+
+let calibration = Calibration::load("aria_calibrations/R_06_medium.json")?; // cameras, IMU, T_body_sensor
+let truth = TumNanosLoader::load("ground_truth/pGT/R_06_medium.txt")?;      // TUM rows, integer-ns timestamps
+```
+
+Checked on the dataset itself: all 86 calibration files parse and all 21 ground truths load and lie inside their recording's
+time range (`APEX_LAMARIA_ROOT=... cargo test -p apex-io --features vrs --release --test lamaria_real_files`).
+
 ## CLI Binaries
 
 All binaries ship with the crate. Run them via:

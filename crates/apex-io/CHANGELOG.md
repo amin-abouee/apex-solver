@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (LaMAria)
+- **`lamaria::Calibration`**: a typed reader for the dataset's `aria_calibrations/<sequence>.json` (two
+  `RAD_TAN_THIN_PRISM_FISHEYE` cameras and the IMU: intrinsics, `T_body_sensor`, noise and saturation). All 86 files parse.
+- **`TumNanosLoader`** and `TrajectoryFormat::TumNanos`: TUM rows with an integer-nanosecond timestamp, which is how LaMAria's
+  `ground_truth/pGT/<sequence>.txt` is stored. `TumLoader` reads such a bare integer as seconds and overflows.
+- `tests/lamaria_real_files.rs` (set `APEX_LAMARIA_ROOT`): parses every calibration, loads every ground truth, and checks it lies
+  inside its recording's time range, which also fixes the unit as nanoseconds.
+- Cookbook chapter *VRS and LaMAria*, and the `vrs` feature in the feature table.
+
+### Fixed
+- A ROS 2 MCAP bag whose `metadata.yaml` says `compression_mode: message` with an empty `compression_format` (what `bag_convert`
+  wrote) is read with plain payloads. The MESSAGE-compression check introduced with the reader overhaul rejected it with
+  "Unsupported compression format".
+
+### Changed (merge)
+- The VRS work and the ROS 1 / ROS 2 overhaul are merged onto the line that reads MCAP with `mcap` 0.23: the MCAP reader and writer
+  are the chunked implementation of the overhaul, and the hand-written per-type converters of `bag_convert` are replaced by its
+  schema-driven transcoder (which covers `PointCloud2` and `tf2_msgs/TFMessage`). The `mcap_stream` benchmark is superseded by
+  `rosbag_bench`.
+
 ### Added (verified optimisation pass)
 - **`BagReader::iter(&Selection)`**: a pull iterator (`BagIterator`: `next_into`, `next_message`, `Iterator`) over *every*
   container (ROS1, sqlite3, MCAP, VRS) yielding exactly what `for_each` yields, for consumers such as a VIO front end that keep
