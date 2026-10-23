@@ -163,14 +163,18 @@ impl Reader {
         let metadata = self.metadata.as_ref().ok_or(BagError::BagNotOpen)?;
         let info = metadata.info();
 
-        // MESSAGE compression: payloads are zstd frames. Anything else is
-        // rejected loudly rather than handing out compressed bytes.
-        let message_compressed = info.compression_mode.eq_ignore_ascii_case("message");
-        if message_compressed && info.compression_format != "zstd" {
+        // MESSAGE compression: payloads are zstd frames. Another named format
+        // is rejected loudly rather than handing out compressed bytes. An empty
+        // format names none, as in an MCAP bag, whose chunks the container
+        // compresses itself: the payloads are plain.
+        let message_mode = info.compression_mode.eq_ignore_ascii_case("message");
+        if message_mode && !info.compression_format.is_empty() && info.compression_format != "zstd"
+        {
             return Err(ReaderError::UnsupportedCompressionFormat {
                 format: info.compression_format.clone(),
             });
         }
+        let message_compressed = message_mode && info.compression_format == "zstd";
 
         self.connections = info
             .topics_with_message_count
@@ -623,6 +627,50 @@ rosbag2_bagfile_information:
             })?;
         }
         writer.finish()?;
+        Ok(())
+    }
+
+    /// A bag converted with `compression_mode: message` and no format, as
+    /// `bag_convert` wrote MCAP bags, holds plain payloads: the MCAP chunks are
+    /// compressed by the container, and nothing is zstd-decoded per message.
+    #[test]
+    fn test_mcap_bag_with_message_mode_and_no_format_reads_plain_payloads() -> TestResult {
+        let temp_dir = TempDir::new()?;
+        write_bare_mcap(&temp_dir.path().join("record.mcap"), 3)?;
+        fs::write(
+            temp_dir.path().join("metadata.yaml"),
+            r#"
+rosbag2_bagfile_information:
+  version: 5
+  storage_identifier: mcap
+  relative_file_paths:
+    - record.mcap
+  duration:
+    nanoseconds: 2
+  starting_time:
+    nanoseconds_since_epoch: 1700000000000000000
+  message_count: 3
+  compression_format: ''
+  compression_mode: message
+  topics_with_message_count:
+    - topic_metadata:
+        name: /imu
+        type: sensor_msgs/msg/Imu
+        serialization_format: cdr
+        offered_qos_profiles: ''
+        type_description_hash: ''
+      message_count: 3
+"#
+            .trim(),
+        )?;
+
+        let mut reader = Reader::new(temp_dir.path())?;
+        reader.open()?;
+        let payloads: Vec<Vec<u8>> = reader
+            .raw_messages()?
+            .map(|message| message.map(|m| m.raw_data.to_vec()))
+            .collect::<Result<_>>()?;
+        assert_eq!(payloads, vec![vec![0u8; 4]; 3]);
         Ok(())
     }
 
