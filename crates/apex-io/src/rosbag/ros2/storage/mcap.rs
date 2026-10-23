@@ -11,7 +11,7 @@
 //! `message_type`.
 //!
 //! Reading is bounded-memory: the low-level container reader
-//! ([`mcap_format`]) seeks to the summary, then streams messages
+//! (the private `mcap_format` module) seeks to the summary, then streams messages
 //! chunk-by-chunk, holding one decompressed chunk at a time -- multi-GB
 //! dataset bags never enter memory whole.
 
