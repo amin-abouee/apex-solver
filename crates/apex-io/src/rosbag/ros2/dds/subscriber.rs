@@ -175,7 +175,7 @@ fn run_reader_loop(
                         .unwrap_or(0);
 
                     let msg = RawMessage {
-                        connection: connection.clone(),
+                        connection: std::sync::Arc::new(connection.clone()),
                         timestamp,
                         raw_data,
                     };

@@ -10,6 +10,9 @@ pub mod utils;
 #[cfg(feature = "rosbag")]
 pub mod rosbag;
 
+#[cfg(feature = "vrs")]
+pub mod vrs;
+
 #[cfg(feature = "dds")]
 pub use rosbag::ros2::dds;
 

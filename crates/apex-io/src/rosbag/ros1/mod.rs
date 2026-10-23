@@ -25,5 +25,5 @@ pub mod writer;
 
 pub use deserialize::{Ros1Deserializer, Ros1Serializer};
 pub use format::{OpCode, Ros1Compression};
-pub use reader::Ros1Reader;
+pub use reader::{Ros1MessageIter, Ros1Reader};
 pub use writer::Ros1Writer;

@@ -1,6 +1,6 @@
 [package]
 name = "apex-io"
-version = "0.4.0"
+version = "0.5.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -37,6 +37,26 @@ path = "bin/bag_filter.rs"
 required-features = ["rosbag", "cli"]
 
 [[bin]]
+name = "bag_verify"
+path = "bin/bag_verify.rs"
+required-features = ["rosbag", "cli"]
+
+[[bin]]
+name = "vrs_copy"
+path = "bin/vrs_copy.rs"
+required-features = ["vrs", "cli"]
+
+[[bin]]
+name = "vrs_dump"
+path = "bin/vrs_dump.rs"
+required-features = ["vrs", "cli"]
+
+[[bin]]
+name = "vrs_info"
+path = "bin/vrs_info.rs"
+required-features = ["vrs", "cli"]
+
+[[bin]]
 name = "extract_topic_data"
 path = "bin/extract_topic_data.rs"
 required-features = ["rosbag"]
@@ -62,6 +82,11 @@ path = "tests/rosbag_ros2_integration_tests.rs"
 required-features = ["rosbag"]
 
 [[test]]
+name = "hilti_mcap"
+path = "tests/hilti_mcap.rs"
+required-features = ["rosbag"]
+
+[[test]]
 name = "rosbag_ros1_integration_tests"
 path = "tests/rosbag_ros1_integration_tests.rs"
 required-features = ["rosbag"]
@@ -73,6 +98,26 @@ path = "tests/asl_integration_tests.rs"
 [[test]]
 name = "trajectory_integration_tests"
 path = "tests/trajectory_integration_tests.rs"
+
+[[test]]
+name = "transcode_typed_crosscheck"
+path = "tests/transcode_typed_crosscheck.rs"
+required-features = ["rosbag"]
+
+[[test]]
+name = "cli_roundtrip"
+path = "tests/cli_roundtrip.rs"
+required-features = ["rosbag", "cli"]
+
+[[test]]
+name = "vrs_real_file"
+path = "tests/vrs_real_file.rs"
+required-features = ["vrs"]
+
+[[test]]
+name = "bag_pull_real"
+path = "tests/bag_pull_real.rs"
+required-features = ["rosbag", "vrs"]
 
 [[test]]
 name = "ros2_cdr_alignment_tests"
@@ -144,6 +189,14 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.md5]
+workspace = true
+optional = true
+
+[dependencies.crc32fast]
+workspace = true
+optional = true
+
 [dependencies.lz4_flex]
 workspace = true
 optional = true
@@ -182,20 +235,31 @@ rosbag = [
     "dep:byteorder",
     "dep:hex",
     "dep:bzip2",
+    "dep:md5",
+    "dep:crc32fast",
 ]
+# Meta VRS container (Project Aria) reader/writer.
+vrs = ["dep:zstd", "dep:lz4_flex"]
 # Dataset download helpers (`download_file`, `decompress_bzip2`, `extract_tar_gz`
 # and the `ensure_*_dataset` network fallback). On by default; `image` stays
 # mandatory regardless (ASL streaming API returns `image::DynamicImage`).
 download = ["dep:ureq", "dep:bzip2", "dep:flate2", "dep:tar"]
 
 [dev-dependencies]
-tempfile.workspace = true
 criterion.workspace = true
+tempfile.workspace = true
 
 [[bench]]
-name = "mcap_stream"
-required-features = ["rosbag"]
+name = "rosbag_bench"
+path = "benches/rosbag_bench.rs"
 harness = false
+required-features = ["rosbag"]
+
+[[bench]]
+name = "vrs_bench"
+path = "benches/vrs_bench.rs"
+harness = false
+required-features = ["vrs"]
 
 [lints]
 workspace = true

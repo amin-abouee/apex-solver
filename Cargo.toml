@@ -16,7 +16,7 @@ rust-version = "1.93"
 
 [workspace.dependencies]
 apex-manifolds = { path = "crates/apex-manifolds", version = "0.4.0" }
-apex-io = { path = "crates/apex-io", version = "0.4.0" }
+apex-io = { path = "crates/apex-io", version = "0.5.0" }
 apex-camera-models = { path = "crates/apex-camera-models", version = "0.4.0" }
 
 # External dependencies (shared versions)
@@ -55,6 +55,8 @@ image      = "0.25"
 rusqlite   = { version = "0.31", features = ["bundled"] }
 zstd       = "0.13"
 mcap       = "0.23"
+md5        = "0.7"
+crc32fast  = "1.5"
 lz4_flex   = { version = "0.11", default-features = false, features = ["std", "safe-decode", "safe-encode", "frame"] }
 
 # DDS support
@@ -148,6 +150,8 @@ visualization = ["dep:rerun", "apex-io/visualization"]
 cli = ["dep:clap"]
 # ROS1/ROS2 bag I/O pass-through (opt-in; pulls bundled SQLite + codecs).
 rosbag = ["apex-io/rosbag"]
+# Meta VRS (Project Aria) reader/writer pass-through (opt-in; reuses zstd/lz4).
+vrs = ["apex-io/vrs"]
 # Dataset download helpers pass-through (on by default).
 download = ["apex-io/download"]
 
@@ -173,7 +177,7 @@ smallvec.workspace = true
 # version strings in sync on release.
 [dependencies.apex-io]
 path = "crates/apex-io"
-version = "0.4.0"
+version = "0.5.0"
 default-features = false
 
 [dependencies.rerun]
