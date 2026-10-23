@@ -5,6 +5,25 @@ All notable changes to `apex-camera-models` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`Fisheye62Camera`** (12 params) and **`Fisheye624Camera`** (16 params): Project Aria's fisheye models, the
+  latter being LaMAria's `RAD_TAN_THIN_PRISM_FISHEYE`. Six radial terms in the incidence angle, two tangential, and
+  (624 only) four thin-prism terms; analytic point and intrinsic Jacobians; Newton unprojection. Project Aria's
+  single-focal-length vectors (15 and 11 entries) convert with `from_aria_params` / `to_aria_params`.
+  Model definition and parameter order follow Meta's
+  [Project Aria camera intrinsic models](https://facebookresearch.github.io/projectaria_tools/docs/tech_insights/camera_intrinsic_models)
+  and `FisheyeRadTanThinPrism.h` in [projectaria_tools](https://github.com/facebookresearch/projectaria_tools).
+- **`convert_camera`**, `ConversionOptions`, `ConversionReport`: fits a camera of any model to another's rays with
+  Levenberg-Marquardt on the analytic intrinsic Jacobian, and reports the residual in pixels. Exact `From` embeddings:
+  Kannala-Brandt → Fisheye62 / Fisheye624, Fisheye62 → Fisheye624; `TryFrom` back, only when no term is dropped.
+- Cookbook chapters *Fisheye62*, *Fisheye624* and *Conversion*.
+
+### Changed
+- **Breaking:** `DistortionModel` gains the variants `Fisheye62 { k, p }` and `Fisheye624 { k, p, s }`, so an exhaustive
+  `match` on it needs two more arms.
+
 ## [0.4.0] - 2026-09-29
 
 ### Changed
