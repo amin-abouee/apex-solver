@@ -137,8 +137,8 @@ pub struct TopicInfo {
 /// A message from the bag file
 #[derive(Debug, Clone)]
 pub struct Message {
-    /// Connection this message belongs to
-    pub connection: Connection,
+    /// Connection this message belongs to (shared, cheap to clone)
+    pub connection: std::sync::Arc<Connection>,
     /// Topic name (convenience field)
     pub topic: String,
     /// Timestamp in nanoseconds since epoch
@@ -151,8 +151,8 @@ pub struct Message {
 /// This is equivalent to ROS2's SerializedBagMessage for high-performance operations
 #[derive(Debug, Clone)]
 pub struct RawMessage {
-    /// Connection this message belongs to
-    pub connection: Connection,
+    /// Connection this message belongs to (shared, cheap to clone)
+    pub connection: std::sync::Arc<Connection>,
     /// Timestamp in nanoseconds since epoch
     pub timestamp: u64,
     /// Raw serialized message data (CDR format)

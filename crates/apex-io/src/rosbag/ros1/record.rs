@@ -15,7 +15,7 @@
 use crate::rosbag::error::{BagError, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use super::format::OpCode;
 
@@ -230,6 +230,93 @@ pub fn read_record<R: Read>(r: &mut R) -> Result<Option<Record>> {
     let mut data = vec![0u8; data_len];
     r.read_exact(&mut data)?;
     Ok(Some(Record { header, data }))
+}
+
+/// Read one record's header and skip its data without loading it.
+///
+/// Returns the header and the data length; the stream is left positioned
+/// after the record. Used to hop over large chunk payloads while indexing.
+pub fn read_record_skip_data<R: Read + Seek>(r: &mut R) -> Result<Option<(RecordHeader, u32)>> {
+    let header_len = match r.read_u32::<LittleEndian>() {
+        Ok(v) => v as usize,
+        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(BagError::Io(e)),
+    };
+    let mut header_bytes = vec![0u8; header_len];
+    r.read_exact(&mut header_bytes)?;
+    let header = parse_header(&header_bytes)?;
+    let data_len = r.read_u32::<LittleEndian>()?;
+    r.seek(SeekFrom::Current(i64::from(data_len)))?;
+    Ok(Some((header, data_len)))
+}
+
+/// Return the payload of the record starting at `buf[0]` as a sub-slice,
+/// without parsing its header (the index already supplies conn and time).
+pub fn record_data_slice(buf: &[u8]) -> Result<&[u8]> {
+    let malformed = |reason: &str| BagError::Ros1MalformedRecord {
+        reason: reason.into(),
+    };
+    let header_len = buf
+        .get(..4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+        .ok_or_else(|| malformed("truncated record header length"))?;
+    let data_off = 4usize
+        .checked_add(header_len)
+        .ok_or_else(|| malformed("header length overflow"))?;
+    let data_len = buf
+        .get(data_off..data_off + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+        .ok_or_else(|| malformed("truncated record data length"))?;
+    buf.get(data_off + 4..data_off + 4 + data_len)
+        .ok_or_else(|| malformed("truncated record data"))
+}
+
+/// Walk the `name=value` fields of an encoded header without allocating.
+///
+/// `f` receives each `(name, value)` pair. This is the hot-path alternative
+/// to [`parse_header`] for records whose few fields of interest are known.
+pub fn scan_header_fields<'a>(
+    mut bytes: &'a [u8],
+    mut f: impl FnMut(&'a [u8], &'a [u8]),
+) -> Result<()> {
+    while !bytes.is_empty() {
+        if bytes.len() < 4 {
+            return Err(BagError::Ros1MalformedRecord {
+                reason: "truncated header field length".into(),
+            });
+        }
+        let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        bytes = &bytes[4..];
+        let field = bytes
+            .get(..len)
+            .ok_or_else(|| BagError::Ros1MalformedRecord {
+                reason: format!("header field truncated (need {len}, have {})", bytes.len()),
+            })?;
+        bytes = &bytes[len..];
+        let eq =
+            field
+                .iter()
+                .position(|&b| b == b'=')
+                .ok_or_else(|| BagError::Ros1MalformedRecord {
+                    reason: "header field missing `=`".into(),
+                })?;
+        f(&field[..eq], &field[eq + 1..]);
+    }
+    Ok(())
+}
+
+/// Read a record's raw header bytes into `header` and return the length of
+/// its data, leaving the stream at the start of the data. `None` on clean EOF.
+pub fn read_record_prefix<R: Read>(r: &mut R, header: &mut Vec<u8>) -> Result<Option<u32>> {
+    let header_len = match r.read_u32::<LittleEndian>() {
+        Ok(v) => v as usize,
+        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(BagError::Io(e)),
+    };
+    header.clear();
+    header.resize(header_len, 0);
+    r.read_exact(header)?;
+    Ok(Some(r.read_u32::<LittleEndian>()?))
 }
 
 /// Write a record (header + data) to `w`.

@@ -3,12 +3,16 @@ pub mod asl;
 pub mod bal;
 mod csv;
 pub mod graph;
+pub mod lamaria;
 pub mod logger;
 pub mod trajectory;
 pub mod utils;
 
 #[cfg(feature = "rosbag")]
 pub mod rosbag;
+
+#[cfg(feature = "vrs")]
+pub mod vrs;
 
 #[cfg(feature = "dds")]
 pub use rosbag::ros2::dds;
@@ -44,5 +48,5 @@ pub use graph::toro::ToroLoader;
 pub use graph::{EdgeSE2, EdgeSE3, Graph, GraphLoader, IoError, VertexSE2, VertexSE3, load_graph};
 pub use trajectory::{
     InertialState, Trajectory, TrajectoryError, TrajectoryFormat, TrajectoryLoader, TrajectoryPose,
-    TumLoader, load_trajectory, load_trajectory_as,
+    TumLoader, TumNanosLoader, load_trajectory, load_trajectory_as,
 };
