@@ -15,10 +15,11 @@
 use crate::rosbag::error::{BagError, Result};
 use crate::rosbag::types::{Connection, MessageDefinition, MessageDefinitionFormat};
 use byteorder::{LittleEndian, WriteBytesExt};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use super::format::{OpCode, Ros1Compression};
 use super::record::{RecordHeader, write_record};
@@ -58,7 +59,96 @@ struct ChunkInfo {
     counts: HashMap<u32, u32>,
 }
 
+/// One chunk handed to the compression pool.
+struct ChunkJob {
+    buf: Vec<u8>,
+    indices: HashMap<u32, Vec<IndexEntry>>,
+    start_ns: u64,
+    end_ns: u64,
+    compression: Ros1Compression,
+}
+
+/// A compressed chunk and its index records, ready to be written.
+struct DoneChunk {
+    payload: Vec<u8>,
+    uncompressed_size: u32,
+    /// All `IndexData` records of the chunk, serialised.
+    index_records: Vec<u8>,
+    start_ns: u64,
+    end_ns: u64,
+    counts: HashMap<u32, u32>,
+    compression: Ros1Compression,
+}
+
+type ChunkResult = (u64, std::result::Result<DoneChunk, String>);
+
+/// Compress a chunk and serialise its index. Pure, so it can run on any core.
+fn build_chunk(job: ChunkJob) -> Result<DoneChunk> {
+    let uncompressed_size = u32::try_from(job.buf.len())
+        .map_err(|_| BagError::writer("chunk exceeds 4 GiB uncompressed"))?;
+
+    // ROS1's `lz4` chunk compression is the LZ4 *frame* format (what
+    // `rosbag`/roslz4 read and write), not the raw block format.
+    let payload = match job.compression {
+        Ros1Compression::None => job.buf,
+        Ros1Compression::Bz2 => {
+            let mut out = Vec::new();
+            let mut enc = bzip2::write::BzEncoder::new(&mut out, bzip2::Compression::default());
+            enc.write_all(&job.buf)?;
+            enc.finish()?;
+            out
+        }
+        Ros1Compression::Lz4 => {
+            let mut enc = lz4_flex::frame::FrameEncoder::new(Vec::new());
+            enc.write_all(&job.buf)?;
+            enc.finish()
+                .map_err(|e| BagError::compression(format!("lz4 encode: {e}")))?
+        }
+    };
+
+    // One IndexData record per connection, in connection order.
+    let mut conn_ids: Vec<u32> = job.indices.keys().copied().collect();
+    conn_ids.sort_unstable();
+    let mut index_records = Vec::new();
+    let mut counts = HashMap::new();
+    for cid in &conn_ids {
+        let entries = &job.indices[cid];
+        counts.insert(*cid, entries.len() as u32);
+
+        let mut header = RecordHeader::new();
+        header
+            .put_op(OpCode::IndexData)
+            .put_u32("ver", 1)
+            .put_u32("conn", *cid)
+            .put_u32("count", entries.len() as u32);
+
+        let mut data = Vec::with_capacity(entries.len() * 12);
+        for e in entries {
+            let secs = (e.time_ns / 1_000_000_000) as u32;
+            let nsecs = (e.time_ns % 1_000_000_000) as u32;
+            data.write_u32::<LittleEndian>(secs)?;
+            data.write_u32::<LittleEndian>(nsecs)?;
+            data.write_u32::<LittleEndian>(e.offset)?;
+        }
+        write_record(&mut index_records, &header, &data)?;
+    }
+
+    Ok(DoneChunk {
+        payload,
+        uncompressed_size,
+        index_records,
+        start_ns: job.start_ns,
+        end_ns: job.end_ns,
+        counts,
+        compression: job.compression,
+    })
+}
+
 /// Writer for ROS1 bag v2.0 files.
+///
+/// Chunks are compressed (bz2/lz4) on several cores and written back in
+/// order, so compressed bags are written at the speed of the slowest core
+/// pool rather than of one core.
 pub struct Ros1Writer {
     path: PathBuf,
     file: Option<BufWriter<File>>,
@@ -75,10 +165,19 @@ pub struct Ros1Writer {
     chunk_end_ns: u64,
     chunk_indices: HashMap<u32, Vec<IndexEntry>>,
     /// Connections already emitted inside the current chunk.
-    chunk_emitted_conns: HashMap<u32, ()>,
+    chunk_emitted_conns: Vec<bool>,
 
     chunks: Vec<ChunkInfo>,
     bag_header_pos: u64,
+
+    // Parallel chunk pipeline (results are written strictly in order).
+    tx: mpsc::Sender<ChunkResult>,
+    rx: mpsc::Receiver<ChunkResult>,
+    next_seq: u64,
+    next_to_write: u64,
+    ready: BTreeMap<u64, DoneChunk>,
+    inflight: usize,
+    max_inflight: usize,
 }
 
 impl Ros1Writer {
@@ -88,6 +187,8 @@ impl Ros1Writer {
         if path.exists() {
             return Err(BagError::BagAlreadyExists { path });
         }
+        let (tx, rx) = mpsc::channel();
+        let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
         Ok(Self {
             path,
             file: None,
@@ -100,9 +201,16 @@ impl Ros1Writer {
             chunk_start_ns: None,
             chunk_end_ns: 0,
             chunk_indices: HashMap::new(),
-            chunk_emitted_conns: HashMap::new(),
+            chunk_emitted_conns: Vec::new(),
             chunks: Vec::new(),
             bag_header_pos: 0,
+            tx,
+            rx,
+            next_seq: 0,
+            next_to_write: 0,
+            ready: BTreeMap::new(),
+            inflight: 0,
+            max_inflight: (workers * 2).max(2),
         })
     }
 
@@ -205,28 +313,32 @@ impl Ros1Writer {
         if !self.is_open {
             return Err(BagError::BagNotOpen);
         }
+        // Ids are assigned sequentially from 0, so the id is the index.
+        let slot = connection.id as usize;
         let descriptor = self
             .connections
-            .iter()
-            .find(|c| c.id == connection.id)
-            .cloned()
+            .get(slot)
+            .filter(|c| c.id == connection.id)
             .ok_or_else(|| BagError::connection_not_found(&connection.topic))?;
+        let descriptor_id = descriptor.id;
 
         // Emit the connection record into the chunk on first use within this chunk.
-        if !self.chunk_emitted_conns.contains_key(&descriptor.id) {
-            let offset = encode_connection_record(&mut self.chunk_buf, &descriptor)?;
-            self.chunk_emitted_conns.insert(descriptor.id, ());
-            let _ = offset; // connection records are not indexed
+        if self.chunk_emitted_conns.len() <= slot {
+            self.chunk_emitted_conns.resize(slot + 1, false);
+        }
+        if !self.chunk_emitted_conns[slot] {
+            encode_connection_record(&mut self.chunk_buf, descriptor)?;
+            self.chunk_emitted_conns[slot] = true;
         }
 
         let offset = self.chunk_buf.len();
         if offset > u32::MAX as usize {
             return Err(BagError::writer("chunk exceeds 4 GiB uncompressed"));
         }
-        encode_message_data_record(&mut self.chunk_buf, descriptor.id, timestamp_ns, data)?;
+        encode_message_data_record(&mut self.chunk_buf, descriptor_id, timestamp_ns, data)?;
 
         self.chunk_indices
-            .entry(descriptor.id)
+            .entry(descriptor_id)
             .or_default()
             .push(IndexEntry {
                 time_ns: timestamp_ns,
@@ -254,6 +366,11 @@ impl Ros1Writer {
         if !self.chunk_buf.is_empty() {
             self.flush_chunk()?;
         }
+        // Every submitted chunk must be on disk before the tail is written.
+        while self.inflight > 0 {
+            self.receive(true)?;
+        }
+        self.write_ready()?;
 
         let file = self.file.as_mut().ok_or(BagError::BagNotOpen)?;
         let index_pos = file.stream_position()?;
@@ -320,75 +437,91 @@ impl Ros1Writer {
         self.is_open
     }
 
+    /// Hand the current chunk to the compression pool (or build it inline
+    /// when there is nothing to compress).
     fn flush_chunk(&mut self) -> Result<()> {
-        let file = self.file.as_mut().ok_or(BagError::BagNotOpen)?;
-        let chunk_pos = file.stream_position()?;
-        let uncompressed = std::mem::take(&mut self.chunk_buf);
-        let uncompressed_size = uncompressed.len() as u32;
-
-        let payload = match self.compression {
-            Ros1Compression::None => uncompressed.clone(),
-            Ros1Compression::Bz2 => {
-                let mut out = Vec::new();
-                let mut enc = bzip2::write::BzEncoder::new(&mut out, bzip2::Compression::default());
-                enc.write_all(&uncompressed)?;
-                enc.finish()?;
-                out
-            }
-            // An LZ4 frame, as `roslz4` writes and reads it.
-            Ros1Compression::Lz4 => {
-                let mut enc = lz4_flex::frame::FrameEncoder::new(Vec::new());
-                enc.write_all(&uncompressed)?;
-                enc.finish()
-                    .map_err(|e| BagError::compression(format!("lz4 encode: {e}")))?
-            }
+        let job = ChunkJob {
+            buf: std::mem::take(&mut self.chunk_buf),
+            indices: std::mem::take(&mut self.chunk_indices),
+            start_ns: self.chunk_start_ns.unwrap_or(0),
+            end_ns: self.chunk_end_ns,
+            compression: self.compression,
         };
-
-        let mut chunk_header = RecordHeader::new();
-        chunk_header
-            .put_op(OpCode::Chunk)
-            .put_str("compression", self.compression.as_str())
-            .put_u32("size", uncompressed_size);
-        write_record(file, &chunk_header, &payload)?;
-
-        // IndexData records, one per connection in this chunk.
-        let mut conn_ids: Vec<u32> = self.chunk_indices.keys().copied().collect();
-        conn_ids.sort();
-        let mut counts: HashMap<u32, u32> = HashMap::new();
-        for cid in &conn_ids {
-            let entries = &self.chunk_indices[cid];
-            counts.insert(*cid, entries.len() as u32);
-
-            let mut header = RecordHeader::new();
-            header
-                .put_op(OpCode::IndexData)
-                .put_u32("ver", 1)
-                .put_u32("conn", *cid)
-                .put_u32("count", entries.len() as u32);
-
-            let mut data = Vec::with_capacity(entries.len() * 12);
-            for e in entries {
-                let secs = (e.time_ns / 1_000_000_000) as u32;
-                let nsecs = (e.time_ns % 1_000_000_000) as u32;
-                data.write_u32::<LittleEndian>(secs)?;
-                data.write_u32::<LittleEndian>(nsecs)?;
-                data.write_u32::<LittleEndian>(e.offset)?;
-            }
-            write_record(file, &header, &data)?;
-        }
-
-        self.chunks.push(ChunkInfo {
-            chunk_pos,
-            start_time_ns: self.chunk_start_ns.unwrap_or(0),
-            end_time_ns: self.chunk_end_ns,
-            counts,
-        });
-
-        // Reset chunk state.
-        self.chunk_indices.clear();
         self.chunk_emitted_conns.clear();
         self.chunk_start_ns = None;
         self.chunk_end_ns = 0;
+
+        let seq = self.next_seq;
+        self.next_seq += 1;
+
+        if job.compression == Ros1Compression::None {
+            let done = build_chunk(job)?;
+            self.ready.insert(seq, done);
+            return self.write_ready();
+        }
+
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        rayon::spawn(move || {
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_chunk(job)))
+                    .map_err(|_| "chunk compression panicked".to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()));
+            let _ = tx.send((seq, result));
+        });
+
+        // Bound the memory held by chunks waiting for a core.
+        while self.inflight >= self.max_inflight {
+            self.receive(true)?;
+        }
+        self.receive(false)
+    }
+
+    /// Collect finished chunks; with `block`, first wait for one (only when
+    /// something is in flight, so this cannot hang).
+    fn receive(&mut self, block: bool) -> Result<()> {
+        if block && self.inflight > 0 {
+            let item = self
+                .rx
+                .recv()
+                .map_err(|_| BagError::writer("chunk compression workers disconnected"))?;
+            self.accept(item)?;
+        }
+        while let Ok(item) = self.rx.try_recv() {
+            self.accept(item)?;
+        }
+        self.write_ready()
+    }
+
+    fn accept(&mut self, (seq, result): ChunkResult) -> Result<()> {
+        self.inflight -= 1;
+        let done = result.map_err(|e| BagError::writer(format!("chunk: {e}")))?;
+        self.ready.insert(seq, done);
+        Ok(())
+    }
+
+    /// Write every chunk whose predecessors are already written.
+    fn write_ready(&mut self) -> Result<()> {
+        while let Some(done) = self.ready.remove(&self.next_to_write) {
+            self.next_to_write += 1;
+            let file = self.file.as_mut().ok_or(BagError::BagNotOpen)?;
+            let chunk_pos = file.stream_position()?;
+
+            let mut chunk_header = RecordHeader::new();
+            chunk_header
+                .put_op(OpCode::Chunk)
+                .put_str("compression", done.compression.as_str())
+                .put_u32("size", done.uncompressed_size);
+            write_record(file, &chunk_header, &done.payload)?;
+            file.write_all(&done.index_records)?;
+
+            self.chunks.push(ChunkInfo {
+                chunk_pos,
+                start_time_ns: done.start_ns,
+                end_time_ns: done.end_ns,
+                counts: done.counts,
+            });
+        }
         Ok(())
     }
 }
@@ -463,19 +596,53 @@ fn encode_message_data_record(
     timestamp_ns: u64,
     data: &[u8],
 ) -> Result<()> {
-    let mut header = RecordHeader::new();
+    // Fixed-shape header (fields in sorted order: conn, op, time), written
+    // without allocating a `RecordHeader`: 13 + 8 + 17 = 38 bytes.
+    let data_len =
+        u32::try_from(data.len()).map_err(|_| BagError::writer("message larger than 4 GiB"))?;
     let secs = (timestamp_ns / 1_000_000_000) as u32;
     let nsecs = (timestamp_ns % 1_000_000_000) as u32;
-    header
-        .put_op(OpCode::MessageData)
-        .put_u32("conn", conn_id)
-        .put_time("time", secs, nsecs);
-    write_record(buf, &header, data)
+    buf.reserve(46 + data.len());
+    buf.extend_from_slice(&38u32.to_le_bytes());
+    buf.extend_from_slice(&9u32.to_le_bytes());
+    buf.extend_from_slice(b"conn=");
+    buf.extend_from_slice(&conn_id.to_le_bytes());
+    buf.extend_from_slice(&4u32.to_le_bytes());
+    buf.extend_from_slice(b"op=");
+    buf.push(OpCode::MessageData.as_u8());
+    buf.extend_from_slice(&13u32.to_le_bytes());
+    buf.extend_from_slice(b"time=");
+    buf.extend_from_slice(&secs.to_le_bytes());
+    buf.extend_from_slice(&nsecs.to_le_bytes());
+    buf.extend_from_slice(&data_len.to_le_bytes());
+    buf.extend_from_slice(data);
+    Ok(())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    /// ROS1 tools read `lz4` chunks as LZ4 frames; make sure we emit that.
+    #[test]
+    fn lz4_chunks_are_lz4_frames() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lz4.bag");
+        let mut w = Ros1Writer::new(&path).unwrap();
+        w.set_compression(Ros1Compression::Lz4).unwrap();
+        w.open().unwrap();
+        let c = w
+            .add_connection("/t", "std_msgs/String", "hash", "", false)
+            .unwrap();
+        w.write(&c, 1, &[0u8; 4096]).unwrap();
+        w.close().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let magic = [0x04u8, 0x22, 0x4D, 0x18];
+        assert!(
+            bytes.windows(4).any(|w| w == magic),
+            "no LZ4 frame magic found"
+        );
+    }
+
     use super::*;
     use tempfile::tempdir;
 

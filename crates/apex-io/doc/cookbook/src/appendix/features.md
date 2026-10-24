@@ -11,6 +11,7 @@ binaries. Bag handling, visualization, live DDS, and async ASL are opt-in.
 | `cli` | ✓ | CLI parsing for `download_datasets`, `bag_filter`, `bag_convert` | `clap` |
 | `rosbag` | ✗ | ROS1/ROS2 bag read/write (SQLite3 & MCAP storage, CDR, message types) and the `bag_info`, `bag_filter`, `bag_convert`, `extract_topic_data`, `write_dummy_bag` binaries | `rusqlite` (bundled SQLite), `mcap`, `zstd`, `lz4_flex`, `serde_norway`, `byteorder`, `hex`, `bzip2` |
 | `visualization` | ✗ | `to_rerun_*` conversions on `VertexSE2`/`VertexSE3`; solver visualization | `rerun` |
+| `vrs` | ✗ | Meta VRS / Project Aria reader and writer (`apex_io::vrs`), VRS as a `BagReader`/`BagWriter` container, and the `vrs_info`, `vrs_copy`, `vrs_dump` binaries | `zstd`, `lz4_flex` |
 | `dds` | ✗ | The `dds` module (`DdsSubscriber`, `DdsListener`, QoS mapping) and the `dds_multi_listener` binary | `rustdds`, `tokio`, `futures` |
 | `asl-async` | ✗ | Async ASL streaming | `tokio` |
 

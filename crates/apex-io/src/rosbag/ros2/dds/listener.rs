@@ -227,7 +227,7 @@ mod tests {
         raw: Vec<u8>,
     ) -> RawMessage {
         RawMessage {
-            connection: Connection {
+            connection: std::sync::Arc::new(Connection {
                 id: 1,
                 topic: topic.to_string(),
                 message_type: msg_type.to_string(),
@@ -236,7 +236,7 @@ mod tests {
                 message_count: 0,
                 serialization_format: "cdr".to_string(),
                 offered_qos_profiles: Vec::new(),
-            },
+            }),
             timestamp: timestamp_ns,
             raw_data: raw,
         }
