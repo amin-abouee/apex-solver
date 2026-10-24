@@ -24,6 +24,12 @@ the equations in the previous chapters.
 
 - Kannala, J. & Brandt, S. S. (2006). *A Generic Camera Model and Calibration Method for Conventional, Wide-Angle, and Fish-Eye Lenses*. IEEE Transactions on Pattern Analysis and Machine Intelligence 28(8), 1335–1340. DOI: 10.1109/TPAMI.2006.153.
 
+## Fisheye62 and Fisheye624 (Project Aria)
+
+- Meta Reality Labs Research. *Camera Intrinsic Models*, Project Aria Tools documentation. <https://facebookresearch.github.io/projectaria_tools/docs/tech_insights/camera_intrinsic_models>.
+- Meta Platforms. `projectaria_tools`, `core/calibration/camera_projections/FisheyeRadTanThinPrism.h`. <https://github.com/facebookresearch/projectaria_tools>.
+- Engel, J. et al. (2023). *Project Aria: A New Tool for Egocentric Multi-Modal AI Research*. arXiv:2308.13561.
+
 ## FOV (Field-of-View)
 
 - Devernay, F. & Faugeras, O. (2001). *Straight Lines Have to Be Straight: Automatic Calibration and Removal of Distortion from Scenes of Structured Environments*. Machine Vision and Applications 13(1), 14–24.

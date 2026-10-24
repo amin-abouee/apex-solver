@@ -77,6 +77,19 @@ All models implement the `CameraModel` trait providing a unified interface for p
   - Distortion: Polynomial d(θ) = θ + k₁θ³ + k₂θ⁵ + k₃θ⁷ + k₄θ⁹
   - Use: Action cameras, GoPro, OpenCV fisheye calibration
 
+- **Fisheye62** (Project Aria): fisheye with six radial and two tangential terms
+  - Parameters: 12 (fx, fy, cx, cy, k0..k5, p0, p1)
+  - FOV: ~180°
+  - Distortion: R(θ) = θ + k₀θ³ + … + k₅θ¹³ in the incidence angle, then tangential
+  - Use: Project Aria glasses; `Fisheye624` without thin-prism terms
+
+- **Fisheye624** (Project Aria, `RAD_TAN_THIN_PRISM_FISHEYE` in LaMAria): fisheye with radial, tangential and thin-prism terms
+  - Parameters: 16 (fx, fy, cx, cy, k0..k5, p0, p1, s0..s3); Aria's own vector has one focal length, 15 entries
+  - FOV: ~180°
+  - Distortion: `Fisheye62` plus thin-prism terms s₀..s₃
+  - Use: Project Aria SLAM and RGB cameras, the LaMAria dataset
+  - Source: Meta's [Project Aria camera intrinsic models](https://facebookresearch.github.io/projectaria_tools/docs/tech_insights/camera_intrinsic_models) and `FisheyeRadTanThinPrism.h` in [projectaria_tools](https://github.com/facebookresearch/projectaria_tools)
+
 ### Omnidirectional Models
 
 - **FOV (Field-of-View)**: Variable FOV distortion
@@ -110,6 +123,22 @@ All models implement the `CameraModel` trait providing a unified interface for p
   - Note: No separate focal length — k₁ acts as pixels-per-radian
   - Use: Automotive surround-view cameras, robotics fisheye, NVIDIA DriveWorks
 
+## Converting Between Models
+
+A camera can be moved to another model two ways. Some conversions are exact `From` impls
+(Kannala-Brandt → Fisheye62/624, Fisheye62 → Fisheye624). For any other pair,
+`convert_camera` fits the target's parameters to the source's rays and reports the
+reprojection error in pixels:
+
+```rust,ignore
+use apex_camera_models::{convert_camera, ConversionOptions};
+
+let (target, report) = convert_camera(&source, &initial, 640, 480, &ConversionOptions::default())?;
+println!("rms {:.3} px", report.rms_px);
+```
+
+See the cookbook chapter *Conversion*.
+
 ## Camera Model Comparison
 
 | Model | Parameters | FOV Range | Distortion Type | Jacobian Complexity | Primary Use Case |
@@ -117,6 +146,8 @@ All models implement the `CameraModel` trait providing a unified interface for p
 | **Pinhole** | 4 | ~60° | None | Simple | Standard cameras, initial estimates |
 | **RadTan** | 9 | ~100° | Radial + Tangential | Medium | OpenCV calibration, most cameras |
 | **Kannala-Brandt** | 8 | ~180° | Polynomial on θ | Complex | GoPro, action cameras |
+| **Fisheye62** | 12 | ~180° | Polynomial on θ + tangential | Complex | Project Aria |
+| **Fisheye624** | 16 | ~180° | Polynomial on θ + tangential + thin prism | Complex | Project Aria, LaMAria |
 | **FOV** | 5 | Variable | Atan-based | Medium | SLAM with wide-angle |
 | **UCM** | 5 | >90° | Unified sphere | Medium | Catadioptric cameras |
 | **EUCM** | 6 | >180° | Extended unified | Medium | High-distortion fisheye |
@@ -145,6 +176,7 @@ All models implement the `CameraModel` trait providing a unified interface for p
 
 **Wide FOV (120°-180°)**
 - Fisheye lenses: **Kannala-Brandt**
+- Project Aria / LaMAria cameras: **Fisheye624** (or **Fisheye62**)
 - Action cameras (GoPro): **Kannala-Brandt**
 - SLAM applications: **FOV**
 

@@ -4,6 +4,12 @@
 //! unprojection, and analytic point / pose / intrinsic Jacobians. The
 //! [cookbook](https://github.com/amin-abouee/apex-solver/tree/main/crates/apex-camera-models/doc/cookbook)
 //! has the full mathematical formulations.
+//!
+//! [`Fisheye62Camera`] and [`Fisheye624Camera`] are Project Aria's fisheye models
+//! (LaMAria's `RAD_TAN_THIN_PRISM_FISHEYE`), after Meta's
+//! [camera intrinsic models](https://facebookresearch.github.io/projectaria_tools/docs/tech_insights/camera_intrinsic_models)
+//! and [`projectaria_tools`](https://github.com/facebookresearch/projectaria_tools).
+//! [`convert_camera`] fits a camera of any model to another.
 
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
@@ -165,6 +171,18 @@ pub enum DistortionModel {
 
     /// NVIDIA f-theta polynomial fisheye.
     FTheta { k1: f64, k2: f64, k3: f64, k4: f64 },
+
+    /// Project Aria `Fisheye62`: a fisheye polynomial with six radial terms
+    /// `k0..k5` in the incidence angle and two tangential terms `p0, p1`.
+    Fisheye62 { k: [f64; 6], p: [f64; 2] },
+
+    /// Project Aria `Fisheye624` (`FisheyeRadTanThinPrism`): `Fisheye62` plus
+    /// four thin-prism terms `s0..s3`.
+    Fisheye624 {
+        k: [f64; 6],
+        p: [f64; 2],
+        s: [f64; 4],
+    },
 }
 
 fn check_finite(name: &str, value: f64) -> Result<(), CameraModelError> {
@@ -173,6 +191,13 @@ fn check_finite(name: &str, value: f64) -> Result<(), CameraModelError> {
             name: name.to_string(),
             value,
         });
+    }
+    Ok(())
+}
+
+fn check_all_finite(prefix: &str, values: &[f64]) -> Result<(), CameraModelError> {
+    for (index, value) in values.iter().enumerate() {
+        check_finite(&format!("{prefix}{index}"), *value)?;
     }
     Ok(())
 }
@@ -267,6 +292,15 @@ impl DistortionModel {
                 check_finite("k3", *k3)?;
                 check_finite("k4", *k4)
             }
+            DistortionModel::Fisheye62 { k, p } => {
+                check_all_finite("k", k)?;
+                check_all_finite("p", p)
+            }
+            DistortionModel::Fisheye624 { k, p, s } => {
+                check_all_finite("k", k)?;
+                check_all_finite("p", p)?;
+                check_all_finite("s", s)
+            }
         }
     }
 }
@@ -285,8 +319,11 @@ pub fn validate_point_in_front(z: f64) -> Result<(), CameraModelError> {
 // Camera model modules
 
 pub mod bal_pinhole;
+pub mod convert;
 pub mod double_sphere;
 pub mod eucm;
+pub mod fisheye62;
+pub mod fisheye624;
 pub mod fov;
 pub mod ftheta;
 pub mod kannala_brandt;
@@ -294,10 +331,15 @@ pub mod pinhole;
 pub mod rad_tan;
 pub mod ucm;
 
+mod fisheye_core;
+
 // Re-export camera types
 pub use bal_pinhole::BALPinholeCameraStrict;
+pub use convert::{ConversionOptions, ConversionReport, convert_camera};
 pub use double_sphere::DoubleSphereCamera;
 pub use eucm::EucmCamera;
+pub use fisheye62::Fisheye62Camera;
+pub use fisheye624::Fisheye624Camera;
 pub use fov::FovCamera;
 pub use ftheta::FThetaCamera;
 pub use kannala_brandt::KannalaBrandtCamera;
