@@ -132,6 +132,16 @@ impl<'a> CdrDeserializer<'a> {
         self.read_primitive(4)
     }
 
+    /// Read an i64 value
+    pub fn read_i64(&mut self) -> Result<i64> {
+        self.read_primitive(8)
+    }
+
+    /// Read a u64 value
+    pub fn read_u64(&mut self) -> Result<u64> {
+        self.read_primitive(8)
+    }
+
     /// Read an f64 value
     pub fn read_f64(&mut self) -> Result<f64> {
         // In CDR, f64 values are aligned to 8-byte boundaries
@@ -193,7 +203,10 @@ impl<'a> CdrDeserializer<'a> {
         F: Fn(&mut Self) -> Result<T>,
     {
         let length = self.read_u32()? as usize;
-        let mut vec = Vec::with_capacity(length);
+        // A corrupt length must not ask for gigabytes of capacity: the most
+        // elements that can possibly follow is one per remaining byte.
+        let remaining = self.data.len().saturating_sub(self.pos);
+        let mut vec = Vec::with_capacity(length.min(remaining));
 
         for _ in 0..length {
             vec.push(read_element(self)?);
@@ -328,6 +341,25 @@ impl FromBytes for u32 {
     }
 }
 
+impl FromBytes for i64 {
+    fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self> {
+        Ok(u64::from_bytes(bytes, endianness)? as i64)
+    }
+}
+
+impl FromBytes for u64 {
+    fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self> {
+        let array: [u8; 8] = bytes
+            .try_into()
+            .map_err(|_| ReaderError::generic("Invalid u64 bytes"))?;
+
+        Ok(match endianness {
+            Endianness::LittleEndian => u64::from_le_bytes(array),
+            Endianness::BigEndian => u64::from_be_bytes(array),
+        })
+    }
+}
+
 impl FromBytes for f32 {
     fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self> {
         let array: [u8; 4] = bytes
@@ -443,6 +475,38 @@ mod tests {
 
     fn be_header() -> Vec<u8> {
         vec![0x00, 0x00, 0x00, 0x00]
+    }
+
+    // ── 64-bit integers and hostile sequence lengths ─────────────────────────
+
+    #[test]
+    fn reads_64_bit_integers_with_8_byte_alignment_both_endians() -> TestResult {
+        // header(4) | u8 pad to 8-aligned (relative to data start) | i64 | u64
+        let mut le = le_header();
+        le.push(0xAA); // 1 byte, so the next i64 needs 7 bytes of padding
+        le.extend_from_slice(&[0; 7]);
+        le.extend_from_slice(&(-5i64).to_le_bytes());
+        le.extend_from_slice(&u64::MAX.to_le_bytes());
+        let mut d = CdrDeserializer::new(&le)?;
+        assert_eq!(d.read_u8()?, 0xAA);
+        assert_eq!(d.read_i64()?, -5);
+        assert_eq!(d.read_u64()?, u64::MAX);
+
+        let mut be = be_header();
+        be.extend_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
+        let mut d = CdrDeserializer::new(&be)?;
+        assert_eq!(d.read_u64()?, 0x0102_0304_0506_0708);
+        Ok(())
+    }
+
+    #[test]
+    fn a_corrupt_sequence_length_fails_without_over_allocating() -> TestResult {
+        let mut data = le_header();
+        data.extend_from_slice(&u32::MAX.to_le_bytes()); // 4G elements, no data
+        let mut d = CdrDeserializer::new(&data)?;
+        let result = d.read_sequence(|d| d.read_u8());
+        assert!(result.is_err());
+        Ok(())
     }
 
     // ── CdrHeader::parse ────────────────────────────────────────────────────

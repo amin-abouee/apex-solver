@@ -12,6 +12,7 @@ use tracing::Level;
 /// Format: `[LEVEL YYYY-MM-DD HH:MM:SS module]`
 pub fn init_logger() {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::builder()
                 .with_default_directive(Level::INFO.into())

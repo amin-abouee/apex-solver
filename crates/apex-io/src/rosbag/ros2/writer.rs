@@ -9,13 +9,8 @@ use crate::rosbag::types::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Buffered message for batch writing
-#[derive(Debug, Clone)]
-struct BufferedMessage {
-    connection: Connection,
-    timestamp: u64,
-    data: Vec<u8>,
-}
+/// Default number of messages per storage commit.
+const DEFAULT_COMMIT_INTERVAL: usize = 20_000;
 
 /// Main writer for ROS2 bag files
 pub struct Writer {
@@ -33,10 +28,11 @@ pub struct Writer {
     min_timestamp: u64,
     max_timestamp: u64,
     is_open: bool,
-    message_buffer: Vec<BufferedMessage>,
-    buffer_size_limit: usize,
-    current_buffer_size: usize,
+    /// Messages per storage commit (sqlite transaction size).
     batch_threshold: usize,
+    /// Reused zstd context for [`CompressionMode::Message`].
+    compressor: Option<zstd::bulk::Compressor<'static>>,
+    compress_buf: Vec<u8>,
 }
 
 impl std::fmt::Debug for Writer {
@@ -85,10 +81,9 @@ impl Writer {
             min_timestamp: u64::MAX,
             max_timestamp: 0,
             is_open: false,
-            message_buffer: Vec::new(),
-            buffer_size_limit: 10 * 1024 * 1024, // 10MB
-            current_buffer_size: 0,
-            batch_threshold: 100,
+            batch_threshold: DEFAULT_COMMIT_INTERVAL,
+            compressor: None,
+            compress_buf: Vec::new(),
         })
     }
 
@@ -113,46 +108,27 @@ impl Writer {
         Ok(())
     }
 
-    /// Configure message buffer settings for performance optimization
+    /// Configure how many messages are committed to storage at a time.
+    ///
+    /// Messages are written straight through to the storage backend (no
+    /// intermediate buffering); `batch_threshold` only sizes the sqlite
+    /// transaction. `buffer_size_mb` is accepted for compatibility and ignored.
     pub fn configure_buffer(
         &mut self,
-        buffer_size_mb: usize,
+        _buffer_size_mb: usize,
         batch_threshold: usize,
     ) -> Result<()> {
         if self.is_open {
             return Err(BagError::BagAlreadyOpen);
         }
-
-        self.buffer_size_limit = buffer_size_mb * 1024 * 1024;
-        self.batch_threshold = batch_threshold;
+        self.batch_threshold = batch_threshold.max(1);
         Ok(())
     }
 
-    /// Flush the message buffer to storage
+    /// Retained for API compatibility: writes are not buffered, so there is
+    /// nothing to flush.
     pub fn flush_buffer(&mut self) -> Result<()> {
-        if self.message_buffer.is_empty() {
-            return Ok(());
-        }
-
-        let batch_messages: Vec<(Connection, u64, Vec<u8>)> = self
-            .message_buffer
-            .iter()
-            .map(|msg| (msg.connection.clone(), msg.timestamp, msg.data.clone()))
-            .collect();
-
-        let storage = self.storage.as_mut().ok_or(BagError::BagNotOpen)?;
-        storage.write_batch(&batch_messages)?;
-
-        self.message_buffer.clear();
-        self.current_buffer_size = 0;
-
         Ok(())
-    }
-
-    /// Check if buffer should be flushed
-    fn should_flush_buffer(&self) -> bool {
-        self.message_buffer.len() >= self.batch_threshold
-            || self.current_buffer_size >= self.buffer_size_limit
     }
 
     /// Open the bag for writing
@@ -166,6 +142,7 @@ impl Writer {
         let mut storage =
             create_storage_writer(self.storage_plugin, &self.bag_path, self.compression_mode)?;
         storage.open()?;
+        storage.set_commit_interval(self.batch_threshold);
 
         self.storage = Some(storage);
         self.is_open = true;
@@ -237,42 +214,49 @@ impl Writer {
         if !self.is_open {
             return Err(BagError::BagNotOpen);
         }
+        self.check_connection(connection)?;
 
-        if !self.connections.iter().any(|c| c.id == connection.id) {
-            return Err(BagError::ConnectionNotFound {
-                topic: connection.topic.clone(),
-            });
+        if self.compression_mode == CompressionMode::Message
+            && self.compression_format == CompressionFormat::Zstd
+        {
+            let compressor = match &mut self.compressor {
+                Some(c) => c,
+                slot => slot.insert(zstd::bulk::Compressor::new(0)?),
+            };
+            self.compress_buf.clear();
+            self.compress_buf
+                .reserve(zstd::zstd_safe::compress_bound(data.len()));
+            compressor.compress_to_buffer(data, &mut self.compress_buf)?;
+            let storage = self.storage.as_mut().ok_or(BagError::BagNotOpen)?;
+            storage.write(connection, timestamp, &self.compress_buf)?;
+        } else {
+            let storage = self.storage.as_mut().ok_or(BagError::BagNotOpen)?;
+            storage.write(connection, timestamp, data)?;
         }
+        self.record_message(connection.id, timestamp);
+        Ok(())
+    }
 
-        let final_data = match self.compression_mode {
-            CompressionMode::Message => {
-                if self.compression_format == CompressionFormat::Zstd {
-                    zstd::encode_all(data, 0)?
-                } else {
-                    data.to_vec()
-                }
-            }
-            _ => data.to_vec(),
-        };
+    /// Ensure `connection` was registered through [`Self::add_connection`].
+    fn check_connection(&self, connection: &Connection) -> Result<()> {
+        // Ids are assigned sequentially from 1.
+        let known = (connection.id as usize)
+            .checked_sub(1)
+            .and_then(|i| self.connections.get(i))
+            .is_some_and(|c| c.id == connection.id);
+        if known {
+            Ok(())
+        } else {
+            Err(BagError::ConnectionNotFound {
+                topic: connection.topic.clone(),
+            })
+        }
+    }
 
-        let buffered_message = BufferedMessage {
-            connection: connection.clone(),
-            timestamp,
-            data: final_data.clone(),
-        };
-
-        self.current_buffer_size += final_data.len();
-        self.message_buffer.push(buffered_message);
-
-        *self.message_counts.entry(connection.id).or_insert(0) += 1;
+    fn record_message(&mut self, connection_id: u32, timestamp: u64) {
+        *self.message_counts.entry(connection_id).or_insert(0) += 1;
         self.min_timestamp = self.min_timestamp.min(timestamp);
         self.max_timestamp = self.max_timestamp.max(timestamp);
-
-        if self.should_flush_buffer() {
-            self.flush_buffer()?;
-        }
-
-        Ok(())
     }
 
     /// Close the bag and write metadata
@@ -280,8 +264,6 @@ impl Writer {
         if !self.is_open {
             return Ok(());
         }
-
-        self.flush_buffer()?;
 
         let bag_info = self.generate_metadata()?;
         let metadata = BagMetadata {
@@ -403,8 +385,13 @@ impl Writer {
         Ok(yaml.trim().to_string())
     }
 
-    /// Compress storage file (for file-level compression)
+    /// Compress storage file (for file-level compression).
+    ///
+    /// Streams through a bounded buffer instead of reading the whole storage
+    /// file into memory: bag-level zstd must not need the file size in RAM.
     fn compress_storage_file(&self) -> Result<()> {
+        use std::io::{BufReader, BufWriter, Write};
+
         let bag_file_name = self
             .bag_path
             .file_name()
@@ -424,15 +411,18 @@ impl Writer {
         let compressed_file =
             storage_file.with_extension(format!("{}.{}", ext, self.compression_format.as_str()));
 
-        let input_data = std::fs::read(&storage_file)?;
-        let compressed_data = zstd::encode_all(input_data.as_slice(), 0)?;
-        std::fs::write(&compressed_file, compressed_data)?;
+        let mut input = BufReader::with_capacity(4 << 20, std::fs::File::open(&storage_file)?);
+        let output = BufWriter::with_capacity(1 << 20, std::fs::File::create(&compressed_file)?);
+        let mut writer = zstd::stream::Encoder::new(output, 0)?;
+        std::io::copy(&mut input, &mut writer)?;
+        writer.finish()?.flush()?;
         std::fs::remove_file(&storage_file)?;
 
         Ok(())
     }
 
-    /// Write a raw serialized message directly without deserialization overhead
+    /// Write a raw serialized message directly, without any message-level
+    /// compression (the payload is stored as given).
     pub fn write_raw_message(
         &mut self,
         connection: &Connection,
@@ -442,61 +432,21 @@ impl Writer {
         if !self.is_open {
             return Err(BagError::BagNotOpen);
         }
-
-        if timestamp < self.min_timestamp {
-            self.min_timestamp = timestamp;
-        }
-        if timestamp > self.max_timestamp {
-            self.max_timestamp = timestamp;
-        }
-
-        *self.message_counts.entry(connection.id).or_insert(0) += 1;
-
-        let buffered_msg = BufferedMessage {
-            connection: connection.clone(),
-            timestamp,
-            data: raw_data.to_vec(),
-        };
-
-        self.current_buffer_size += raw_data.len();
-        self.message_buffer.push(buffered_msg);
-
-        if self.should_flush_buffer() {
-            self.flush_buffer()?;
-        }
-
+        self.check_connection(connection)?;
+        let storage = self.storage.as_mut().ok_or(BagError::BagNotOpen)?;
+        storage.write(connection, timestamp, raw_data)?;
+        self.record_message(connection.id, timestamp);
         Ok(())
     }
 
-    /// Write multiple raw messages in a batch for maximum performance
+    /// Write multiple raw messages.
     pub fn write_raw_messages_batch(
         &mut self,
         messages: &[(Connection, u64, Vec<u8>)],
     ) -> Result<()> {
-        if !self.is_open {
-            return Err(BagError::BagNotOpen);
+        for (connection, timestamp, data) in messages {
+            self.write_raw_message(connection, *timestamp, data)?;
         }
-
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        self.flush_buffer()?;
-
-        for (connection, timestamp, _data) in messages {
-            if *timestamp < self.min_timestamp {
-                self.min_timestamp = *timestamp;
-            }
-            if *timestamp > self.max_timestamp {
-                self.max_timestamp = *timestamp;
-            }
-            *self.message_counts.entry(connection.id).or_insert(0) += 1;
-        }
-
-        if let Some(storage) = &mut self.storage {
-            storage.write_batch(messages)?;
-        }
-
         Ok(())
     }
 

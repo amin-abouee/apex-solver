@@ -57,46 +57,7 @@ impl TumLoader {
     ///
     /// See [`TrajectoryError`].
     pub fn parse(text: &str, path: &Path) -> Result<Trajectory> {
-        let rows = csv::split_rows(text, None);
-        let mut poses = Vec::with_capacity(rows.len());
-
-        for (index, row) in rows.iter().enumerate() {
-            let line = index + 1;
-            if row.len() != TUM_COLUMNS {
-                return Err(TrajectoryError::MissingColumns {
-                    path: path.to_path_buf(),
-                    line,
-                    expected: TUM_COLUMNS,
-                    got: row.len(),
-                });
-            }
-
-            let timestamp_ns = parse_timestamp(row[0], path, line)?;
-
-            let qx = parse_field(row, 4, "qx", path, line)?;
-            let qy = parse_field(row, 5, "qy", path, line)?;
-            let qz = parse_field(row, 6, "qz", path, line)?;
-            let qw = parse_field(row, 7, "qw", path, line)?;
-            let orientation = super::text_orientation(qw, qx, qy, qz).ok_or_else(|| {
-                TrajectoryError::InvalidQuaternion {
-                    path: path.to_path_buf(),
-                    line,
-                    norm: (qw * qw + qx * qx + qy * qy + qz * qz).sqrt(),
-                }
-            })?;
-
-            poses.push(TrajectoryPose::new(
-                timestamp_ns,
-                Vector3::new(
-                    parse_field(row, 1, "tx", path, line)?,
-                    parse_field(row, 2, "ty", path, line)?,
-                    parse_field(row, 3, "tz", path, line)?,
-                ),
-                orientation,
-            ));
-        }
-
-        Ok(Trajectory::from_poses(poses))
+        parse_rows(text, path, parse_timestamp)
     }
 
     /// Render TUM text.
@@ -106,38 +67,141 @@ impl TumLoader {
     /// has no place for them, and refusing would make the common export
     /// impossible.
     pub fn render(trajectory: &Trajectory) -> String {
-        let mut out = String::with_capacity(trajectory.len() * 128);
-        out.push_str("# trajectory written by apex-io\n");
-        let _ = writeln!(out, "# Timestamp: {}", chrono::Local::now());
-        out.push_str("# timestamp tx ty tz qx qy qz qw\n");
-
-        for sample in trajectory.poses() {
-            // TUM stores w LAST.
-            let [qw, qx, qy, qz] = sample.orientation.coeffs();
-            let seconds = sample.timestamp_ns / NANOS_PER_SEC;
-            let nanos = sample.timestamp_ns % NANOS_PER_SEC;
-            let p = sample.position;
-            let _ = writeln!(
-                out,
-                "{seconds}.{nanos:09} {:.*} {:.*} {:.*} {:.*} {:.*} {:.*} {:.*}",
-                POSE_PRECISION,
-                p.x,
-                POSE_PRECISION,
-                p.y,
-                POSE_PRECISION,
-                p.z,
-                POSE_PRECISION,
-                qx,
-                POSE_PRECISION,
-                qy,
-                POSE_PRECISION,
-                qz,
-                POSE_PRECISION,
-                qw
-            );
-        }
-        out
+        render_with(trajectory, |ns| {
+            format!("{}.{:09}", ns / NANOS_PER_SEC, ns % NANOS_PER_SEC)
+        })
     }
+}
+
+/// Loader for TUM rows whose timestamp is an **integer count of nanoseconds**
+/// rather than decimal seconds, as the LaMAria ground truth (`pGT/<sequence>.txt`)
+/// stores them. Every other column is TUM's: `tx ty tz qx qy qz qw`, w last.
+///
+/// [`TumLoader`] cannot read such a file: it takes a bare integer for seconds,
+/// and a device-clock nanosecond count overflows `u64` once scaled.
+pub struct TumNanosLoader;
+
+impl TrajectoryLoader for TumNanosLoader {
+    fn load<P: AsRef<Path>>(path: P) -> Result<Trajectory> {
+        let path = path.as_ref();
+        let content = read_file(path)?;
+        Self::parse(&content, path)
+    }
+
+    fn write<P: AsRef<Path>>(trajectory: &Trajectory, path: P) -> Result<()> {
+        write_file(path.as_ref(), &Self::render(trajectory))
+    }
+}
+
+impl TumNanosLoader {
+    /// Parse text with integer-nanosecond timestamps. `path` labels errors only.
+    ///
+    /// # Errors
+    ///
+    /// See [`TrajectoryError`].
+    pub fn parse(text: &str, path: &Path) -> Result<Trajectory> {
+        parse_rows(text, path, parse_nanos_timestamp)
+    }
+
+    /// Render TUM text with integer-nanosecond timestamps; pose columns as in
+    /// [`TumLoader::render`].
+    pub fn render(trajectory: &Trajectory) -> String {
+        render_with(trajectory, |ns| ns.to_string())
+    }
+}
+
+/// Parse a timestamp that is a plain unsigned integer of nanoseconds.
+fn parse_nanos_timestamp(raw: &str, path: &Path, line: usize) -> Result<u64> {
+    raw.parse::<u64>()
+        .map_err(|_| TrajectoryError::InvalidNumber {
+            path: path.to_path_buf(),
+            line,
+            field: "timestamp (integer nanoseconds)".to_owned(),
+            value: raw.to_owned(),
+        })
+}
+
+/// TUM text with column 0 written by `time`.
+fn render_with(trajectory: &Trajectory, time: fn(u64) -> String) -> String {
+    let mut out = String::with_capacity(trajectory.len() * 128);
+    out.push_str("# trajectory written by apex-io\n");
+    let _ = writeln!(out, "# Timestamp: {}", chrono::Local::now());
+    out.push_str("# timestamp tx ty tz qx qy qz qw\n");
+
+    for sample in trajectory.poses() {
+        // TUM stores w LAST.
+        let [qw, qx, qy, qz] = sample.orientation.coeffs();
+        let p = sample.position;
+        let _ = writeln!(
+            out,
+            "{} {:.*} {:.*} {:.*} {:.*} {:.*} {:.*} {:.*}",
+            time(sample.timestamp_ns),
+            POSE_PRECISION,
+            p.x,
+            POSE_PRECISION,
+            p.y,
+            POSE_PRECISION,
+            p.z,
+            POSE_PRECISION,
+            qx,
+            POSE_PRECISION,
+            qy,
+            POSE_PRECISION,
+            qz,
+            POSE_PRECISION,
+            qw
+        );
+    }
+    out
+}
+
+/// Parse the eight TUM columns of every row, reading column 0 with
+/// `timestamp`: the one body behind [`TumLoader`] and [`TumNanosLoader`].
+fn parse_rows(
+    text: &str,
+    path: &Path,
+    timestamp: fn(&str, &Path, usize) -> Result<u64>,
+) -> Result<Trajectory> {
+    let rows = csv::split_rows(text, None);
+    let mut poses = Vec::with_capacity(rows.len());
+
+    for (index, row) in rows.iter().enumerate() {
+        let line = index + 1;
+        if row.len() != TUM_COLUMNS {
+            return Err(TrajectoryError::MissingColumns {
+                path: path.to_path_buf(),
+                line,
+                expected: TUM_COLUMNS,
+                got: row.len(),
+            });
+        }
+
+        let timestamp_ns = timestamp(row[0], path, line)?;
+
+        let qx = parse_field(row, 4, "qx", path, line)?;
+        let qy = parse_field(row, 5, "qy", path, line)?;
+        let qz = parse_field(row, 6, "qz", path, line)?;
+        let qw = parse_field(row, 7, "qw", path, line)?;
+        let orientation = super::text_orientation(qw, qx, qy, qz).ok_or_else(|| {
+            TrajectoryError::InvalidQuaternion {
+                path: path.to_path_buf(),
+                line,
+                norm: (qw * qw + qx * qx + qy * qy + qz * qz).sqrt(),
+            }
+        })?;
+
+        poses.push(TrajectoryPose::new(
+            timestamp_ns,
+            Vector3::new(
+                parse_field(row, 1, "tx", path, line)?,
+                parse_field(row, 2, "ty", path, line)?,
+                parse_field(row, 3, "tz", path, line)?,
+            ),
+            orientation,
+        ));
+    }
+
+    Ok(Trajectory::from_poses(poses))
 }
 
 /// Parse a TUM timestamp to exact nanoseconds where possible.
@@ -382,6 +446,48 @@ mod tests {
         let parsed = TumLoader::parse(&TumLoader::render(&t), path())?;
         assert_eq!(parsed.len(), 1);
         assert!(!parsed.has_inertial());
+        Ok(())
+    }
+
+    /// The first rows of LaMAria `R_06_medium/ground_truth/pGT/R_06_medium.txt`.
+    const LAMARIA_ROWS: &str = "\
+529350454850 38.333472544627845 -122.96156759435415 9.08780737026622 0.38367592594093525 -0.5332363604485482 -0.3897479310897915 -0.6454055453435299
+529400454850 38.333472544627845 -122.96156759435415 9.08780737026622 0.38367592594093525 -0.5332363604485482 -0.3897479310897915 -0.6454055453435299
+";
+
+    #[test]
+    fn nanosecond_rows_load_with_exact_timestamps() -> TestResult {
+        let trajectory = TumNanosLoader::parse(LAMARIA_ROWS, path())?;
+        let poses = trajectory.poses();
+        assert_eq!(poses.len(), 2);
+        assert_eq!(poses[0].timestamp_ns, 529_350_454_850);
+        assert_eq!(poses[1].timestamp_ns, 529_400_454_850);
+        assert!((poses[0].position.y + 122.961_567_594_354_15).abs() < 1e-12);
+        Ok(())
+    }
+
+    /// The seconds loader reads the same rows as seconds and overflows, which
+    /// is why the nanosecond loader exists.
+    #[test]
+    fn the_seconds_loader_refuses_nanosecond_rows() {
+        assert!(TumLoader::parse(LAMARIA_ROWS, path()).is_err());
+    }
+
+    #[test]
+    fn nanosecond_loader_refuses_decimal_seconds() {
+        let text = "1.5 0 0 0 0 0 0 1\n";
+        assert!(matches!(
+            TumNanosLoader::parse(text, path()),
+            Err(TrajectoryError::InvalidNumber { .. })
+        ));
+    }
+
+    #[test]
+    fn nanosecond_text_round_trips_exactly() -> TestResult {
+        let original = TumNanosLoader::parse(LAMARIA_ROWS, path())?;
+        let again = TumNanosLoader::parse(&TumNanosLoader::render(&original), path())?;
+        let stamps = |t: &Trajectory| t.poses().iter().map(|p| p.timestamp_ns).collect::<Vec<_>>();
+        assert_eq!(stamps(&original), stamps(&again));
         Ok(())
     }
 }

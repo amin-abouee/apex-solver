@@ -3,6 +3,7 @@
 //! | Loader | Format | Quaternion | Separator |
 //! |---|---|---|---|
 //! | [`TumLoader`] | `timestamp tx ty tz qx qy qz qw` | **w last** | whitespace |
+//! | [`TumNanosLoader`] | the same, `timestamp` an integer of nanoseconds (LaMAria `pGT`) | **w last** | whitespace |
 //! | [`crate::asl::AslTrajectoryLoader`] | EuRoC 17-column or `mocap0` 8-column CSV | **w first** | `,` |
 //!
 //! One implementation shared by every consumer of this crate, replacing the
@@ -35,7 +36,7 @@ use apex_manifolds::se3::SE3;
 use nalgebra::Vector3;
 
 pub use error::{Result, TrajectoryError};
-pub use tum::TumLoader;
+pub use tum::{TumLoader, TumNanosLoader};
 pub use types::{InertialState, TrajectoryFormat, TrajectoryPose};
 
 use types::NANOS_PER_SECOND;
@@ -458,6 +459,7 @@ pub fn load_trajectory<P: AsRef<Path>>(path: P) -> Result<Trajectory> {
 pub fn load_trajectory_as<P: AsRef<Path>>(path: P, format: TrajectoryFormat) -> Result<Trajectory> {
     match format {
         TrajectoryFormat::Tum => TumLoader::load(path),
+        TrajectoryFormat::TumNanos => TumNanosLoader::load(path),
         TrajectoryFormat::Asl => crate::asl::AslTrajectoryLoader::load(path),
     }
 }

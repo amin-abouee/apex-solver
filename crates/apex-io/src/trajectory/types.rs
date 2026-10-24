@@ -84,6 +84,8 @@ pub struct InertialState {
 pub enum TrajectoryFormat {
     /// TUM: whitespace-separated, `timestamp tx ty tz qx qy qz qw`.
     Tum,
+    /// TUM columns with an integer-nanosecond timestamp (LaMAria `pGT`).
+    TumNanos,
     /// ASL/EuRoC CSV, either layout of [`AslLayout`](crate::asl::AslLayout).
     Asl,
 }

@@ -111,55 +111,6 @@ impl SqliteReader {
 
         Ok(definitions)
     }
-
-    /// Build a query for messages with optional filters
-    fn build_message_query(
-        &self,
-        connections: Option<&[Connection]>,
-        start: Option<u64>,
-        stop: Option<u64>,
-    ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-        let mut query = String::from(
-            "SELECT topics.id, messages.timestamp, messages.data
-             FROM messages JOIN topics ON messages.topic_id = topics.id",
-        );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        let mut conditions = Vec::new();
-
-        if let Some(conns) = connections
-            && !conns.is_empty()
-        {
-            let topic_names: Vec<&str> = conns.iter().map(|c| c.topic.as_str()).collect();
-            let placeholders = topic_names
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
-            conditions.push(format!("topics.name IN ({placeholders})"));
-            for topic in topic_names {
-                params.push(Box::new(topic.to_string()));
-            }
-        }
-
-        if let Some(start_time) = start {
-            conditions.push("messages.timestamp >= ?".to_string());
-            params.push(Box::new(start_time as i64));
-        }
-
-        if let Some(stop_time) = stop {
-            conditions.push("messages.timestamp < ?".to_string());
-            params.push(Box::new(stop_time as i64));
-        }
-
-        if !conditions.is_empty() {
-            query.push_str(" WHERE ");
-            query.push_str(&conditions.join(" AND "));
-        }
-
-        query.push_str(" ORDER BY messages.timestamp");
-
-        (query, params)
-    }
 }
 
 impl StorageReader for SqliteReader {
@@ -173,6 +124,15 @@ impl StorageReader for SqliteReader {
                 path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )?;
+
+            // Read-path tuning: mmap mapped pages for the keyset pagination
+            // scans and a roomy page cache. Read-only, so durability is
+            // untouched.
+            for pragma in ["PRAGMA mmap_size = 268435456", "PRAGMA cache_size = -65536"] {
+                if let Err(e) = conn.execute_batch(pragma) {
+                    tracing::debug!("sqlite pragma '{pragma}' failed on {}: {e}", path.display());
+                }
+            }
 
             {
                 let mut stmt = conn.prepare(
@@ -228,64 +188,15 @@ impl StorageReader for SqliteReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Box<dyn Iterator<Item = Result<Message>> + '_>> {
-        if !self.is_open {
-            return Err(ReaderError::BagNotOpen);
-        }
-
-        let mut all_messages = Vec::new();
-
-        for db_conn in &self.connections {
-            let (query, params) = self.build_message_query(connections, start, stop);
-
-            let mut topic_map = HashMap::new();
-            let mut stmt = db_conn.prepare("SELECT id, name FROM topics")?;
-            let topic_rows = stmt.query_map([], |row| {
-                let id: i32 = row.get(0)?;
-                let name: String = row.get(1)?;
-                Ok((id, name))
-            })?;
-
-            for row in topic_rows {
-                let (topic_id, topic_name) = row?;
-                if let Some(conn) = self
-                    .topic_connections
-                    .iter()
-                    .find(|c| c.topic == topic_name)
-                {
-                    topic_map.insert(topic_id, conn.clone());
-                }
-            }
-
-            let mut stmt = db_conn.prepare(&query)?;
-            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            let message_rows = stmt.query_map(param_refs.as_slice(), |row| {
-                let topic_id: i32 = row.get(0)?;
-                let timestamp: i64 = row.get(1)?;
-                let data: Vec<u8> = row.get(2)?;
-                Ok((topic_id, timestamp as u64, data))
-            })?;
-
-            for row in message_rows {
-                let (topic_id, timestamp, data) = row?;
-
-                if let Some(connection) = topic_map.get(&topic_id) {
-                    let message = Message {
-                        connection: connection.clone(),
-                        topic: connection.topic.clone(),
-                        timestamp,
-                        data,
-                    };
-                    all_messages.push(Ok(message));
-                }
-            }
-        }
-
-        all_messages.sort_by(|a, b| match (a, b) {
-            (Ok(msg_a), Ok(msg_b)) => msg_a.timestamp.cmp(&msg_b.timestamp),
-            _ => std::cmp::Ordering::Equal,
-        });
-
-        Ok(Box::new(all_messages.into_iter()))
+        let raw = self.raw_messages_filtered(connections, start, stop)?;
+        Ok(Box::new(raw.map(|r| {
+            r.map(|m| Message {
+                topic: m.connection.topic.clone(),
+                connection: m.connection,
+                timestamp: m.timestamp,
+                data: m.raw_data,
+            })
+        })))
     }
 
     fn is_open(&self) -> bool {
@@ -305,60 +216,10 @@ impl StorageReader for SqliteReader {
         if !self.is_open {
             return Err(ReaderError::BagNotOpen);
         }
-
-        let mut all_messages = Vec::new();
-
-        for db_conn in &self.connections {
-            let (query, params) = self.build_message_query(connections, start, stop);
-
-            let mut topic_map = HashMap::new();
-            let mut stmt = db_conn.prepare("SELECT id, name FROM topics")?;
-            let topic_rows = stmt.query_map([], |row| {
-                let id: i32 = row.get(0)?;
-                let name: String = row.get(1)?;
-                Ok((id, name))
-            })?;
-
-            for row in topic_rows {
-                let (topic_id, topic_name) = row?;
-                if let Some(conn) = self
-                    .topic_connections
-                    .iter()
-                    .find(|c| c.topic == topic_name)
-                {
-                    topic_map.insert(topic_id, conn.clone());
-                }
-            }
-
-            let mut stmt = db_conn.prepare(&query)?;
-            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            let message_rows = stmt.query_map(param_refs.as_slice(), |row| {
-                let topic_id: i32 = row.get(0)?;
-                let timestamp: i64 = row.get(1)?;
-                let data: Vec<u8> = row.get(2)?;
-                Ok((topic_id, timestamp as u64, data))
-            })?;
-
-            for row in message_rows {
-                let (topic_id, timestamp, raw_data) = row?;
-
-                if let Some(connection) = topic_map.get(&topic_id) {
-                    let raw_message = RawMessage {
-                        connection: connection.clone(),
-                        timestamp,
-                        raw_data,
-                    };
-                    all_messages.push(Ok(raw_message));
-                }
-            }
-        }
-
-        all_messages.sort_by(|a, b| match (a, b) {
-            (Ok(msg_a), Ok(msg_b)) => msg_a.timestamp.cmp(&msg_b.timestamp),
-            _ => std::cmp::Ordering::Equal,
-        });
-
-        Ok(Box::new(all_messages.into_iter()))
+        let topics = connections
+            .filter(|c| !c.is_empty())
+            .map(|c| c.iter().map(|c| c.topic.clone()).collect());
+        Ok(Box::new(SqliteMessageIter::new(self, topics, start, stop)))
     }
 
     fn read_raw_messages_batch(
@@ -367,60 +228,8 @@ impl StorageReader for SqliteReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Vec<RawMessage>> {
-        if !self.is_open {
-            return Err(ReaderError::BagNotOpen);
-        }
-
-        let mut all_messages = Vec::new();
-
-        for db_conn in &self.connections {
-            let (query, params) = self.build_message_query(connections, start, stop);
-
-            let mut topic_map = HashMap::new();
-            let mut stmt = db_conn.prepare("SELECT id, name FROM topics")?;
-            let topic_rows = stmt.query_map([], |row| {
-                let id: i32 = row.get(0)?;
-                let name: String = row.get(1)?;
-                Ok((id, name))
-            })?;
-
-            for row in topic_rows {
-                let (topic_id, topic_name) = row?;
-                if let Some(conn) = self
-                    .topic_connections
-                    .iter()
-                    .find(|c| c.topic == topic_name)
-                {
-                    topic_map.insert(topic_id, conn.clone());
-                }
-            }
-
-            let mut stmt = db_conn.prepare(&query)?;
-            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            let message_rows = stmt.query_map(param_refs.as_slice(), |row| {
-                let topic_id: i32 = row.get(0)?;
-                let timestamp: i64 = row.get(1)?;
-                let data: Vec<u8> = row.get(2)?;
-                Ok((topic_id, timestamp as u64, data))
-            })?;
-
-            for row in message_rows {
-                let (topic_id, timestamp, raw_data) = row?;
-
-                if let Some(connection) = topic_map.get(&topic_id) {
-                    let raw_message = RawMessage {
-                        connection: connection.clone(),
-                        timestamp,
-                        raw_data,
-                    };
-                    all_messages.push(raw_message);
-                }
-            }
-        }
-
-        all_messages.sort_by_key(|a| a.timestamp);
-
-        Ok(all_messages)
+        self.raw_messages_filtered(connections, start, stop)?
+            .collect()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -438,8 +247,14 @@ impl SqliteReader {
         let mut all_connections = Vec::new();
 
         for db_conn in &self.connections {
+            // One GROUP BY over `messages` counts every topic in a single
+            // pass; the old form ran one COUNT(*) query per topic, so a bag
+            // with 94 topics paid 94 table scans on every open.
             let mut stmt = db_conn.prepare(
-                "SELECT id, name, type, serialization_format, offered_qos_profiles FROM topics ORDER BY id"
+                "SELECT t.id, t.name, t.type, t.serialization_format, t.offered_qos_profiles, \
+                 COUNT(m.id) \
+                 FROM topics t LEFT JOIN messages m ON m.topic_id = t.id \
+                 GROUP BY t.id ORDER BY t.id",
             )?;
 
             let topic_rows = stmt.query_map([], |row| {
@@ -448,25 +263,20 @@ impl SqliteReader {
                 let message_type: String = row.get(2)?;
                 let serialization_format: String = row.get(3)?;
                 let offered_qos_profiles: String = row.get(4)?;
+                let message_count: i64 = row.get(5)?;
                 Ok((
                     id,
                     name,
                     message_type,
                     serialization_format,
                     offered_qos_profiles,
+                    message_count,
                 ))
             })?;
 
             for topic_result in topic_rows {
-                let (topic_id, name, message_type, serialization_format, _qos_profiles) =
+                let (_topic_id, name, message_type, serialization_format, _qos_profiles, count) =
                     topic_result?;
-
-                let mut count_stmt =
-                    db_conn.prepare("SELECT COUNT(*) FROM messages WHERE topic_id = ?")?;
-                let message_count: u64 = count_stmt.query_row([topic_id], |row| {
-                    let count: i64 = row.get(0)?;
-                    Ok(count as u64)
-                })?;
 
                 let connection = Connection {
                     id: (all_connections.len() + 1) as u32,
@@ -474,7 +284,7 @@ impl SqliteReader {
                     message_type,
                     message_definition: MessageDefinition::default(),
                     type_description_hash: String::new(),
-                    message_count,
+                    message_count: count.max(0) as u64,
                     serialization_format,
                     offered_qos_profiles: Vec::new(),
                 };
@@ -484,6 +294,219 @@ impl SqliteReader {
         }
 
         Ok(all_connections)
+    }
+}
+
+/// Maximum rows fetched per page.
+const PAGE_ROWS: usize = 2048;
+/// Stop filling a page once it holds this many payload bytes, so a page of
+/// camera frames stays small.
+const PAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Streaming, bounded-memory message iterator over the db files of a bag.
+///
+/// Pages through each file's `messages` with a `(timestamp, id)` keyset
+/// instead of materialising the result set, and merges the files by their
+/// head keys, so messages come out in global timestamp order whatever the
+/// number of files. Memory is one page per file, whatever the bag size.
+struct SqliteMessageIter<'a> {
+    reader: &'a SqliteReader,
+    topics: Option<Vec<String>>,
+    start: i64,
+    stop: i64,
+    /// Per-file state, built lazily when a file is first visited.
+    states: Vec<Option<FileState>>,
+    failed: bool,
+}
+
+struct FileState {
+    topic_map: HashMap<i64, std::sync::Arc<Connection>>,
+    /// `topic_id IN (...)` clause, empty when every topic is wanted.
+    topic_clause: String,
+    last: Option<(i64, i64)>,
+    /// Page of fetched messages with their `(timestamp, id)` sort keys.
+    page: std::collections::VecDeque<((i64, i64), Result<RawMessage>)>,
+    done: bool,
+}
+
+impl<'a> SqliteMessageIter<'a> {
+    fn new(
+        reader: &'a SqliteReader,
+        topics: Option<Vec<String>>,
+        start: Option<u64>,
+        stop: Option<u64>,
+    ) -> Self {
+        Self {
+            reader,
+            topics,
+            start: start.map_or(i64::MIN, |s| i64::try_from(s).unwrap_or(i64::MAX)),
+            stop: stop.map_or(i64::MAX, |s| i64::try_from(s).unwrap_or(i64::MAX)),
+            states: Vec::new(),
+            failed: false,
+        }
+    }
+
+    fn init_file(&self, db: &SqliteConnection) -> Result<FileState> {
+        let mut topic_map = HashMap::new();
+        let mut wanted_ids = Vec::new();
+        let mut stmt = db.prepare("SELECT id, name, type, serialization_format FROM topics")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, name, message_type, serialization_format) = row?;
+            if self.topics.as_ref().is_some_and(|t| !t.contains(&name)) {
+                continue;
+            }
+            let connection = self
+                .reader
+                .topic_connections
+                .iter()
+                .find(|c| c.topic == name)
+                .cloned()
+                .unwrap_or_else(|| Connection {
+                    id: u32::try_from(id).unwrap_or(0),
+                    topic: name,
+                    message_type,
+                    message_definition: MessageDefinition::default(),
+                    type_description_hash: String::new(),
+                    message_count: 0,
+                    serialization_format,
+                    offered_qos_profiles: Vec::new(),
+                });
+            wanted_ids.push(id.to_string());
+            topic_map.insert(id, std::sync::Arc::new(connection));
+        }
+        let topic_clause = if self.topics.is_some() {
+            if wanted_ids.is_empty() {
+                // None of the requested topics live in this file.
+                "AND 0".to_string()
+            } else {
+                format!("AND topic_id IN ({})", wanted_ids.join(","))
+            }
+        } else {
+            String::new()
+        };
+        Ok(FileState {
+            topic_map,
+            topic_clause,
+            last: None,
+            page: std::collections::VecDeque::new(),
+            done: false,
+        })
+    }
+
+    /// Fetch the next page of file `idx` into its queue.
+    fn fill_page(&mut self, idx: usize) -> Result<()> {
+        let db = &self.reader.connections[idx];
+        let Some(state) = self.states[idx].as_mut() else {
+            return Ok(());
+        };
+        let (last_ts, last_id) = state.last.unwrap_or((i64::MIN, i64::MIN));
+        let sql = format!(
+            "SELECT id, topic_id, timestamp, data FROM messages \
+             WHERE (timestamp > ?1 OR (timestamp = ?1 AND id > ?2)) \
+             AND timestamp >= ?3 AND timestamp < ?4 {} \
+             ORDER BY timestamp, id LIMIT {PAGE_ROWS}",
+            state.topic_clause
+        );
+        let mut stmt = db.prepare_cached(&sql)?;
+        let mut rows = stmt.query((last_ts, last_id, self.start, self.stop))?;
+        let mut fetched = 0usize;
+        let mut bytes = 0usize;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let topic_id: i64 = row.get(1)?;
+            let timestamp: i64 = row.get(2)?;
+            let data: Vec<u8> = row.get(3)?;
+            state.last = Some((timestamp, id));
+            fetched += 1;
+            bytes += data.len();
+            if let Some(connection) = state.topic_map.get(&topic_id) {
+                state.page.push_back((
+                    (timestamp, id),
+                    Ok(RawMessage {
+                        connection: connection.clone(),
+                        timestamp: timestamp as u64,
+                        raw_data: data,
+                    }),
+                ));
+            }
+            if bytes >= PAGE_BYTES {
+                break;
+            }
+        }
+        if fetched == 0 {
+            state.done = true;
+        }
+        Ok(())
+    }
+
+    /// Make sure file `idx` has a state and a filled page. After this
+    /// returns `Ok`, the file's head message is available unless the file is
+    /// done.
+    fn ensure_head(&mut self, idx: usize) -> Result<()> {
+        if self.states.len() <= idx {
+            self.states.resize_with(idx + 1, || None);
+        }
+        if self.states[idx].is_none() {
+            self.states[idx] = Some(self.init_file(&self.reader.connections[idx])?);
+        }
+        let Some(state) = self.states[idx].as_mut() else {
+            return Ok(());
+        };
+        if state.page.is_empty() && !state.done {
+            self.fill_page(idx)?;
+        }
+        Ok(())
+    }
+
+    /// The `(timestamp, id)` sort key of file `idx`'s head message.
+    fn head_key(&self, idx: usize) -> Option<(i64, i64)> {
+        self.states
+            .get(idx)?
+            .as_ref()?
+            .page
+            .front()
+            .map(|(key, _)| *key)
+    }
+}
+
+impl Iterator for SqliteMessageIter<'_> {
+    type Item = Result<RawMessage>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        // K-way merge by head key: pick the file whose front message has the
+        // smallest (timestamp, id); earlier files win ties so equal
+        // timestamps interleave in file order.
+        let mut best: Option<(usize, i64, i64)> = None;
+        for idx in 0..self.reader.connections.len() {
+            if let Err(e) = self.ensure_head(idx) {
+                self.failed = true;
+                return Some(Err(e));
+            }
+            let Some((ts, id)) = self.head_key(idx) else {
+                continue;
+            };
+            if best.is_none_or(|(_, bts, bid)| ts < bts || (ts == bts && id < bid)) {
+                best = Some((idx, ts, id));
+            }
+        }
+        let (idx, _, _) = best?;
+        // `best` came from a checked head, so the pop cannot come back empty.
+        self.states
+            .get_mut(idx)
+            .and_then(|s| s.as_mut())
+            .and_then(|s| s.page.pop_front())
+            .map(|(_, msg)| msg)
     }
 }
 
@@ -499,9 +522,31 @@ pub struct SqliteWriter {
     is_open: bool,
     /// Connection ID mapping: topic -> database topic_id
     topic_id_map: HashMap<String, i32>,
+    /// Messages inserted since the last COMMIT.
+    pending: usize,
+    /// Messages per transaction.
+    commit_interval: usize,
 }
 
 impl SqliteWriter {
+    fn begin(&mut self) -> Result<()> {
+        if let Some(conn) = &self.connection {
+            conn.execute_batch("BEGIN")?;
+        }
+        self.pending = 0;
+        Ok(())
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        if let Some(conn) = &self.connection
+            && !conn.is_autocommit()
+        {
+            conn.execute_batch("COMMIT")?;
+        }
+        self.pending = 0;
+        Ok(())
+    }
+
     /// Create a new SQLite writer
     pub fn new(
         path: &Path,
@@ -525,6 +570,8 @@ impl SqliteWriter {
             _compression_mode: compression_mode,
             is_open: false,
             topic_id_map: HashMap::new(),
+            pending: 0,
+            commit_interval: 20_000,
         })
     }
 
@@ -563,7 +610,6 @@ impl SqliteWriter {
                 timestamp INTEGER NOT NULL,
                 data BLOB NOT NULL
             );
-            CREATE INDEX timestamp_idx ON messages (timestamp ASC);
             INSERT INTO schema(schema_version, ros_distro) VALUES (4, 'rosbags');
         "#;
 
@@ -579,9 +625,17 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
         }
 
         let connection = SqliteConnection::open(&self.db_path)?;
+        // A freshly written bag needs no crash safety: skip the journal and
+        // fsyncs, keep a large page cache, and insert inside one long
+        // transaction. The timestamp index is built once at close.
+        connection.execute_batch(
+            "PRAGMA page_size=32768; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; \
+             PRAGMA locking_mode=EXCLUSIVE; PRAGMA cache_size=-65536;",
+        )?;
         self.connection = Some(connection);
 
         self.create_schema()?;
+        self.begin()?;
 
         self.is_open = true;
         Ok(())
@@ -597,7 +651,9 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
                 "INSERT INTO metadata(metadata_version, metadata) VALUES (?1, ?2)",
                 (version, metadata),
             )?;
+            conn.execute_batch("CREATE INDEX timestamp_idx ON messages (timestamp ASC);")?;
         }
+        self.commit()?;
 
         self.connection = None;
         self.is_open = false;
@@ -672,47 +728,19 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
 
         let conn = self.connection.as_ref().ok_or(BagError::BagNotOpen)?;
 
-        conn.execute(
-            "INSERT INTO messages(topic_id, timestamp, data) VALUES (?1, ?2, ?3)",
-            (topic_id, timestamp as i64, data),
-        )?;
+        conn.prepare_cached("INSERT INTO messages(topic_id, timestamp, data) VALUES (?1, ?2, ?3)")?
+            .execute((topic_id, timestamp as i64, data))?;
 
+        self.pending += 1;
+        if self.pending >= self.commit_interval {
+            self.commit()?;
+            self.begin()?;
+        }
         Ok(())
     }
 
-    fn write_batch(&mut self, messages: &[(Connection, u64, Vec<u8>)]) -> Result<()> {
-        if !self.is_open {
-            return Err(BagError::BagNotOpen);
-        }
-
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        // Take the connection temporarily to avoid borrow conflicts during transaction
-        let mut conn = self.connection.take().ok_or(BagError::BagNotOpen)?;
-
-        let tx = conn.transaction()?;
-
-        {
-            let mut stmt =
-                tx.prepare("INSERT INTO messages(topic_id, timestamp, data) VALUES (?1, ?2, ?3)")?;
-
-            for (connection, timestamp, data) in messages {
-                let topic_id = self
-                    .topic_id_map
-                    .get(&connection.topic)
-                    .ok_or_else(|| BagError::connection_not_found(&connection.topic))?;
-
-                stmt.execute((topic_id, *timestamp as i64, data))?;
-            }
-        }
-
-        tx.commit()?;
-
-        self.connection = Some(conn);
-
-        Ok(())
+    fn set_commit_interval(&mut self, messages: usize) {
+        self.commit_interval = messages.max(1);
     }
 
     fn is_open(&self) -> bool {
@@ -1068,6 +1096,49 @@ mod tests {
             offered_qos_profiles: Vec::new(),
         };
         assert!(writer.write(&unknown_conn, 0, &[]).is_err());
+        Ok(())
+    }
+    #[test]
+    fn multi_file_streams_in_global_timestamp_order() -> TestResult {
+        use crate::rosbag::types::CompressionMode;
+        let dir = tempfile::tempdir()?;
+
+        // Two single-file bags with interleaved timestamps: file A holds
+        // 100/102/104 ns, file B holds 101/103/105 ns on the same topic.
+        let mut db_paths = Vec::new();
+        let connection = Connection {
+            id: 1,
+            topic: "/t".into(),
+            message_type: "std_msgs/msg/Int32".into(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".into(),
+            offered_qos_profiles: Vec::new(),
+        };
+        for (name, times) in [("a", [100u64, 102, 104]), ("b", [101u64, 103, 105])] {
+            let bag = dir.path().join(name);
+            std::fs::create_dir(&bag)?;
+            let mut w = SqliteWriter::new(&bag, CompressionMode::None)?;
+            w.open()?;
+            w.add_connection(&connection, "")?;
+            for ts in times {
+                w.write(&connection, ts, &ts.to_le_bytes())?;
+            }
+            w.close(4, "")?;
+            db_paths.push(bag.join(format!("{name}.db3")));
+        }
+
+        let path_refs: Vec<&std::path::Path> = db_paths.iter().map(|p| p.as_path()).collect();
+        let mut reader = SqliteReader::new(path_refs, vec![])?;
+        reader.open()?;
+        let timestamps: Vec<u64> = reader
+            .raw_messages()?
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|m| m.timestamp)
+            .collect();
+        assert_eq!(timestamps, vec![100, 101, 102, 103, 104, 105]);
         Ok(())
     }
 }

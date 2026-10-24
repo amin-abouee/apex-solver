@@ -12,6 +12,7 @@
 # Sensor Datasets
 
 - [ASL / EuRoC](./datasets/asl.md)
+- [VRS and LaMAria](./datasets/lamaria.md)
 
 # ROS Bags
 
