@@ -553,7 +553,14 @@ impl Marginal {
     ///
     /// [`MarginalizationError::Factor`] if the factor rejects the dimensions.
     pub fn to_factor(&self) -> MarginalizationResult<(Vec<VarKey>, MarginalPriorFactor)> {
-        self.clone().into_factor()
+        let factor = prior_factor(
+            &self.manifolds,
+            &self.linearization_point,
+            self.dims.clone(),
+            self.sqrt_information.clone(),
+            self.offset.clone(),
+        )?;
+        Ok((self.kept.clone(), factor))
     }
 
     /// The prior as a [`MarginalPriorFactorT`], for a marginal whose kept
@@ -592,30 +599,46 @@ impl Marginal {
     ///
     /// [`MarginalizationError::Factor`] if the factor rejects the dimensions.
     pub fn into_factor(self) -> MarginalizationResult<(Vec<VarKey>, MarginalPriorFactor)> {
-        let logs: Vec<BlockLog> = self
-            .manifolds
-            .iter()
-            .zip(self.linearization_point.iter())
-            .map(|(manifold, x0)| block_local_log(*manifold, x0.as_slice()))
-            .collect();
-        let dims = self.dims.clone();
-
-        let local_log: LocalLogFn = Box::new(move |params, out| {
-            let mut offset = 0usize;
-            for ((log, dim), param) in logs.iter().zip(dims.iter()).zip(params.iter()) {
-                let end = (offset + dim).min(out.len());
-                if offset < end {
-                    log(param, &mut out[offset..end]);
-                }
-                offset += dim;
-            }
-        });
-
-        let factor =
-            MarginalPriorFactor::new(self.dims, self.sqrt_information, self.offset, local_log)
-                .map_err(|e| MarginalizationError::Factor(e.to_string()))?;
+        let factor = prior_factor(
+            &self.manifolds,
+            &self.linearization_point,
+            self.dims,
+            self.sqrt_information,
+            self.offset,
+        )?;
         Ok((self.kept, factor))
     }
+}
+
+/// The prior factor of a marginal, from only the parts the factor keeps: the
+/// information, gradient and absorbed blocks are never copied.
+fn prior_factor(
+    manifolds: &[ManifoldType],
+    linearization_point: &[DVector<f64>],
+    dims: Vec<usize>,
+    sqrt_information: DMatrix<f64>,
+    offset: DVector<f64>,
+) -> MarginalizationResult<MarginalPriorFactor> {
+    let logs: Vec<BlockLog> = manifolds
+        .iter()
+        .zip(linearization_point.iter())
+        .map(|(manifold, x0)| block_local_log(*manifold, x0.as_slice()))
+        .collect();
+    let block_dims = dims.clone();
+
+    let local_log: LocalLogFn = Box::new(move |params, out| {
+        let mut offset = 0usize;
+        for ((log, dim), param) in logs.iter().zip(block_dims.iter()).zip(params.iter()) {
+            let end = (offset + dim).min(out.len());
+            if offset < end {
+                log(param, &mut out[offset..end]);
+            }
+            offset += dim;
+        }
+    });
+
+    MarginalPriorFactor::new(dims, sqrt_information, offset, local_log)
+        .map_err(|e| MarginalizationError::Factor(e.to_string()))
 }
 
 /// What [`Marginalizer::apply`] did.
