@@ -221,6 +221,8 @@ impl<G: ActsOnPoints3, CAM: CameraModel> PhotometricPatchFactor<G, CAM> {
         let extrinsic = SE3::from_param_slice(params[1]);
         let body = into_anchor(&state, &self.point_w);
         let cam = into_anchor(&extrinsic, &body.point);
+        // A point that does not project is an expected per-residual outcome
+        // (D3): the patch is dropped, nothing is logged.
         let centre = self.camera.project(&cam.point).ok()?;
         let samples: Vec<(f64, Vector2<f64>)> = self
             .offsets

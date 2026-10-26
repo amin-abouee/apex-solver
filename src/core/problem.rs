@@ -1976,6 +1976,20 @@ mod tests {
     }
 
     #[test]
+    fn try_add_variable_rejects_a_wrong_length_without_adding_it() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let Err(CoreError::Manifold(_)) =
+            problem.try_add_variable(ManifoldType::SE3, dvector![0.0, 0.0, 0.0])
+        else {
+            return Err("a 3-value SE3 must be rejected".into());
+        };
+        assert_eq!(problem.num_variables(), 0);
+        let key = problem.try_add_variable(ManifoldType::SE3, se3_at(1.0))?;
+        assert_eq!(problem.variable_params(key).map(<[f64]>::len), Some(7));
+        Ok(())
+    }
+
+    #[test]
     fn set_variable_params_rejects_a_wrong_length() -> TestResult {
         let (mut problem, keys, _blocks) = three_pose_chain()?;
         let Err(CoreError::DimensionMismatch { .. }) =

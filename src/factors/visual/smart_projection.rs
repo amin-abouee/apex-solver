@@ -169,6 +169,8 @@ impl<CAM: CameraModel> SmartProjectionFactor<CAM> {
         let n = poses.len();
         let mut a = DMatrix::<f64>::zeros(3 * n, 4);
         for (i, pose) in poses.iter().enumerate() {
+            // An observation outside the model's domain makes triangulation
+            // fail; the caller records the status, so it is not logged here.
             let ray = self.camera.unproject(&self.observations[i]).ok()?;
             let r = pose.rotation_so3().rotation_matrix();
             let t = pose.translation();
@@ -250,6 +252,9 @@ impl<CAM: CameraModel> SmartProjectionFactor<CAM> {
         p_cam: &Vector3<f64>,
     ) -> (SVector<f64, 2>, SMatrix<f64, 2, 6>, SMatrix<f64, 2, 3>) {
         let inv_sigma = 1.0 / self.sigmas[i];
+        // Callers handle points behind the camera before this; a projection
+        // that still fails yields a zero pixel, an unlogged per-residual
+        // fallback.
         let uv = self
             .camera
             .project(p_cam)

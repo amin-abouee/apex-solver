@@ -176,6 +176,8 @@ impl<G: ActsOnPoints3, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
         if in_camera.z <= 0.0 {
             return None;
         }
+        // Projection and unprojection failures below are expected per-residual
+        // outcomes (D3): the residual is unavailable and nothing is logged.
         let centre = self.camera.project(&in_camera).ok()?;
         let mut current = Vec::with_capacity(self.offsets.len());
         let mut reference = Vec::with_capacity(self.offsets.len());

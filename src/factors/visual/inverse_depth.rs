@@ -64,6 +64,8 @@ impl<CAM: CameraModel> InverseDepthFactor<CAM> {
         if !(d.is_finite() && d > 0.0) {
             return None;
         }
+        // An anchor pixel outside the model's domain is an expected outcome
+        // here, reported to the caller as `None`, never logged.
         let ray = self.camera.unproject(&Vector2::new(u, v)).ok()?;
         Some(ray / d)
     }
@@ -76,6 +78,9 @@ impl<CAM: CameraModel> InverseDepthFactor<CAM> {
             (0usize, (NUMERICAL_DERIVATIVE_EPS, 0.0)),
             (1, (0.0, NUMERICAL_DERIVATIVE_EPS)),
         ] {
+            // A pixel nudged past the model's field of view has no ray; its
+            // difference column falls back to zero, a deliberate, unlogged
+            // per-residual fallback.
             let plus = self
                 .camera
                 .unproject(&Vector2::new(u + du, v + dv))

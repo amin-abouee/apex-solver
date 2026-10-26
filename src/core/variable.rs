@@ -361,11 +361,18 @@ pub trait ManifoldVariable: Send + Sync + 'static {
 
     /// Expand a free-space step (length `free_dof()`) into a `dof()`-length
     /// buffer, writing `0.0` at every fixed local index in ascending order.
+    ///
+    /// The optimizer checks the step length before calling this (see
+    /// `apply_parameter_step`). A shorter `free_step` or `out` does not
+    /// panic: missing step entries are taken as `0.0` and `out` is filled
+    /// only as far as it reaches.
     fn expand_free_step(&self, free_step: &[f64], out: &mut [f64]) {
         let fixed = self.get_fixed_indices();
         let dof = self.dof();
         if fixed.is_empty() {
-            out[..dof].copy_from_slice(&free_step[..dof]);
+            for (local, slot) in out.iter_mut().enumerate().take(dof) {
+                *slot = free_step.get(local).copied().unwrap_or(0.0);
+            }
             return;
         }
         let mut free_idx = 0usize;
@@ -477,11 +484,16 @@ where
 
     fn apply_tangent_step(&mut self, step: &[f64]) {
         let dof = self.dof();
+        // A step shorter than `dof` (never produced by the optimizer, which
+        // checks lengths first) is padded with zeros instead of panicking.
+        let entry = |i: usize| step.get(i).copied().unwrap_or(0.0);
         // Stack buffer for fixed-size manifolds (all current types have DOF ≤ 10).
         // Fall back to heap Vec only for large dynamic Rn variables.
         if dof <= 16 {
             let mut buf = [0f64; 16];
-            buf[..dof].copy_from_slice(&step[..dof]);
+            for (i, slot) in buf.iter_mut().enumerate().take(dof) {
+                *slot = entry(i);
+            }
             for &idx in &self.fixed_indices {
                 if idx < dof {
                     buf[idx] = 0.0;
@@ -490,7 +502,7 @@ where
             let tangent = M::TangentVector::from_slice(&buf[..dof]);
             self.value = self.value.plus(&tangent, None, None);
         } else {
-            let mut v = step[..dof].to_vec();
+            let mut v: Vec<f64> = (0..dof).map(entry).collect();
             for &idx in &self.fixed_indices {
                 if idx < dof {
                     v[idx] = 0.0;
