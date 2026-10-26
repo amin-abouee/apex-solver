@@ -34,8 +34,8 @@ use crate::vrs::{
 use std::collections::BTreeMap;
 use std::path::Path;
 
-fn vrs_err(e: VrsError) -> BagError {
-    BagError::generic(format!("VRS: {e}"))
+fn vrs_err(e: impl Into<VrsError>) -> BagError {
+    BagError::generic(format!("VRS: {}", e.into()))
 }
 
 const TAG_TOPIC: &str = "apex_ros_topic";

@@ -7,7 +7,7 @@
 
 use super::datalayout::{DataLayout, LayoutView};
 use super::description::StreamTags;
-use super::error::{Result, VrsError};
+use super::error::{LayoutError, Result, VrsError};
 use super::format::RecordType;
 
 /// Encoding of an image block.
@@ -111,7 +111,10 @@ impl RecordFormat {
                 },
                 "empty" => BlockSpec::Empty,
                 other => {
-                    return Err(VrsError::Layout(format!("unknown content block '{other}'")));
+                    return Err(LayoutError::UnknownBlock {
+                        block: other.to_string(),
+                    }
+                    .into());
                 }
             };
             blocks.push(spec);
@@ -173,7 +176,7 @@ impl RecordLayout {
         Some(Self::build(tags, name, version, rf))
     }
 
-    fn build(tags: &StreamTags, name: &str, version: u32, rf: &str) -> Result<Self> {
+    fn build(tags: &StreamTags, name: &'static str, version: u32, rf: &str) -> Result<Self> {
         let format = RecordFormat::parse(rf)?;
         let wanted = format
             .blocks()
@@ -182,10 +185,13 @@ impl RecordLayout {
             .count();
         let mut layouts = Vec::with_capacity(wanted);
         for i in 0..wanted {
-            let json = tags
-                .vrs
-                .get(&format!("DL:{name}:{version}:{i}"))
-                .ok_or_else(|| VrsError::Layout(format!("missing tag DL:{name}:{version}:{i}")))?;
+            let json = tags.vrs.get(&format!("DL:{name}:{version}:{i}")).ok_or(
+                LayoutError::MissingLayoutTag {
+                    record_type: name,
+                    version,
+                    index: i,
+                },
+            )?;
             layouts.push(DataLayout::from_json(json)?);
         }
         Ok(Self { format, layouts })
@@ -220,7 +226,10 @@ impl RecordLayout {
         for (bi, spec) in self.format.blocks.iter().enumerate() {
             let rest = payload
                 .get(pos..)
-                .ok_or_else(|| VrsError::Layout("record shorter than its format".into()))?;
+                .ok_or(LayoutError::RecordShorterThanFormat {
+                    len: payload.len(),
+                    block: bi,
+                })?;
             match spec {
                 BlockSpec::DataLayout { size } => {
                     let layout = &self.layouts[layout_i];
@@ -230,10 +239,11 @@ impl RecordLayout {
                         && layout.var_count() == 0
                         && *sz != layout.fixed_size()
                     {
-                        return Err(VrsError::Layout(format!(
-                            "format says data_layout/size={sz} but the layout is {} bytes",
-                            layout.fixed_size()
-                        )));
+                        return Err(LayoutError::LayoutSize {
+                            declared: *sz,
+                            actual: layout.fixed_size(),
+                        }
+                        .into());
                     }
                     pos += view.total_len();
                     out.push(Block::Layout(view));
@@ -249,14 +259,14 @@ impl RecordLayout {
                         Some(n) => n,
                         None if bi == last => rest.len(),
                         None => {
-                            return Err(VrsError::unsupported(
-                                "content block without a size that is not the last block",
-                            ));
+                            return Err(VrsError::UnsizedBlock { block: bi });
                         }
                     };
-                    let bytes = rest
-                        .get(..len)
-                        .ok_or_else(|| VrsError::Layout("content block exceeds record".into()))?;
+                    let bytes = rest.get(..len).ok_or(LayoutError::BlockExceedsRecord {
+                        block: bi,
+                        size: len,
+                        available: rest.len(),
+                    })?;
                     pos += len;
                     out.push(match spec {
                         BlockSpec::Image(i) => Block::Image { spec: i, bytes },

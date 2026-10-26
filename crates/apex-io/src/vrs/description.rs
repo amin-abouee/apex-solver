@@ -46,7 +46,11 @@ impl<'a> Cursor<'a> {
             .pos
             .checked_add(n)
             .filter(|&e| e <= self.buf.len())
-            .ok_or_else(|| VrsError::corrupt("description record truncated"))?;
+            .ok_or(VrsError::Truncated {
+                what: "description record",
+                len: self.buf.len(),
+                need: self.pos.saturating_add(n),
+            })?;
         let s = &self.buf[self.pos..end];
         self.pos = end;
         Ok(s)

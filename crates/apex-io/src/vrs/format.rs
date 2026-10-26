@@ -12,6 +12,9 @@
 //! Every record starts with a 32-byte [`RecordHeader`] whose `record_size`
 //! covers header and payload; records are chained backwards through
 //! `previous_record_size`.
+//!
+//! The parsers here build their errors without logging; the reader logs one
+//! where it aborts a read.
 
 use super::error::{Result, VrsError};
 use std::fmt;
@@ -74,7 +77,11 @@ impl StreamId {
     /// Parse from the 6-byte on-disk form.
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
         if b.len() < 6 {
-            return Err(VrsError::corrupt("truncated stream id"));
+            return Err(VrsError::Truncated {
+                what: "stream id",
+                len: b.len(),
+                need: 6,
+            });
         }
         Ok(Self::new(le_i32(b, 0), le_u16(b, 4)))
     }
@@ -162,7 +169,7 @@ impl Compression {
             0 => Ok(Self::None),
             1 => Ok(Self::Lz4),
             2 => Ok(Self::Zstd),
-            other => Err(VrsError::unsupported(format!("compression type {other}"))),
+            value => Err(VrsError::UnknownCompression { value }),
         }
     }
 
@@ -203,10 +210,9 @@ impl FileHeader {
             return Ok(None);
         }
         if le_u32(b, 76) != FORMAT_VERSION {
-            return Err(VrsError::unsupported(format!(
-                "VRS format version {:?}",
-                String::from_utf8_lossy(&b[76..80])
-            )));
+            return Err(VrsError::FormatVersion {
+                version: String::from_utf8_lossy(&b[76..80]).into_owned(),
+            });
         }
         let header = Self {
             creation_id: le_u64(b, 8),
@@ -217,16 +223,16 @@ impl FileHeader {
             first_user_record_offset: le_u64(b, 40) as i64,
         };
         if header.file_header_size as usize != FILE_HEADER_SIZE {
-            return Err(VrsError::unsupported(format!(
-                "file header size {}",
-                header.file_header_size
-            )));
+            return Err(VrsError::HeaderSize {
+                what: "file header size",
+                value: header.file_header_size,
+            });
         }
         if header.record_header_size as usize != RECORD_HEADER_SIZE {
-            return Err(VrsError::unsupported(format!(
-                "record header size {}",
-                header.record_header_size
-            )));
+            return Err(VrsError::HeaderSize {
+                what: "record header size",
+                value: header.record_header_size,
+            });
         }
         Ok(Some(header))
     }
@@ -276,7 +282,11 @@ impl RecordHeader {
     /// Parse from at least 32 bytes.
     pub fn parse(b: &[u8]) -> Result<Self> {
         if b.len() < RECORD_HEADER_SIZE {
-            return Err(VrsError::corrupt("truncated record header"));
+            return Err(VrsError::Truncated {
+                what: "record header",
+                len: b.len(),
+                need: RECORD_HEADER_SIZE,
+            });
         }
         let header = Self {
             record_size: le_u32(b, 0),
@@ -290,10 +300,10 @@ impl RecordHeader {
             uncompressed_size: le_u32(b, 28),
         };
         if (header.record_size as usize) < RECORD_HEADER_SIZE {
-            return Err(VrsError::corrupt(format!(
-                "record size {} smaller than its header",
-                header.record_size
-            )));
+            return Err(VrsError::RecordTooSmall {
+                size: header.record_size,
+                header: RECORD_HEADER_SIZE,
+            });
         }
         Ok(header)
     }
@@ -341,7 +351,11 @@ impl IndexEntry {
     /// Parse one 19-byte entry.
     pub fn parse(b: &[u8]) -> Result<Self> {
         if b.len() < INDEX_ENTRY_SIZE {
-            return Err(VrsError::corrupt("truncated index entry"));
+            return Err(VrsError::Truncated {
+                what: "index entry",
+                len: b.len(),
+                need: INDEX_ENTRY_SIZE,
+            });
         }
         Ok(Self {
             timestamp: le_f64(b, 0),

@@ -12,6 +12,7 @@ use super::codec::Decompressor;
 use super::error::{Result, VrsError};
 use super::format::{RECORD_HEADER_SIZE, RecordHeader, RecordType, StreamId};
 use super::reader::{Cursor, RecordFilter, RecordMeta, VrsReader};
+use apex_error::ErrorLogging;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -58,10 +59,10 @@ struct Worker {
 impl Worker {
     fn send(&mut self, batch: Vec<Job>) -> Result<()> {
         let Some(tx) = self.job_tx.as_ref() else {
-            return Err(VrsError::Usage("read-ahead worker closed".into()));
+            return Err(VrsError::ReadAheadStopped.log());
         };
-        tx.send(batch)
-            .map_err(|_| VrsError::Usage("read-ahead worker exited".into()))
+        // A send fails only when the worker thread has exited.
+        tx.send(batch).map_err(|_| VrsError::ReadAheadStopped.log())
     }
 
     fn spawn(file: File) -> Result<Self> {
@@ -86,7 +87,7 @@ impl Worker {
                     }
                 }
             })
-            .map_err(|e| VrsError::Usage(format!("cannot spawn read-ahead thread: {e}")))?;
+            .map_err(|e| VrsError::ReadAheadSpawn(e).log())?;
         Ok(Self {
             handle: Some(handle),
             job_tx: Some(job_tx),
@@ -117,13 +118,13 @@ fn read_job(file: &File, codec: &mut Decompressor, job: Job, raw: &mut Vec<u8>) 
         file.read_exact(raw)?;
         let header = RecordHeader::parse(raw)?;
         if header.record_size != job.size || header.stream_id() != job.stream {
-            return Err(VrsError::corrupt(format!(
-                "record {} does not match the index",
-                job.index
-            )));
+            return Err(VrsError::IndexMismatch {
+                index: job.index,
+                offset: job.offset,
+            });
         }
         let mut payload = Vec::new();
-        codec.decompress(
+        codec.decompress_unlogged(
             header.compression,
             &raw[RECORD_HEADER_SIZE..],
             header.uncompressed_size as usize,
@@ -221,7 +222,11 @@ impl<'a> SequentialReader<'a> {
         let worker = match &mut self.worker {
             Some(w) => w,
             None => {
-                let file = self.reader.file_handle().try_clone()?;
+                let file = self
+                    .reader
+                    .file_handle()
+                    .try_clone()
+                    .map_err(|e| VrsError::Io(e).log())?;
                 self.worker.insert(Worker::spawn(file)?)
             }
         };
@@ -243,7 +248,7 @@ impl<'a> SequentialReader<'a> {
                 if self.pending.len() + self.inflight < self.max_records / 2 {
                     self.dispatch()?;
                 }
-                let payload = first.payload?;
+                let payload = first.payload.map_err(ErrorLogging::log)?;
                 let meta = first.meta;
                 *buf = payload;
                 return Ok(Some(meta));
@@ -261,9 +266,12 @@ impl<'a> SequentialReader<'a> {
             let Some(worker) = self.worker.as_mut() else {
                 return Ok(None);
             };
+            // The worker answers every batch it was sent; no answer while
+            // records are in flight means it died, and waiting again would
+            // spin forever.
             let Some(batch) = worker.res_rx.as_ref().and_then(|rx| rx.recv().ok()) else {
                 self.done = true;
-                continue;
+                return Err(VrsError::ReadAheadStopped.log());
             };
             self.inflight -= batch.len();
             self.inflight_bytes -= batch.iter().map(|d| d.size as usize).sum::<usize>();

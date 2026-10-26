@@ -11,6 +11,7 @@ use super::format::{
     Compression, DESCRIPTION_TYPE_ID, FileHeader, INDEX_ENTRY_SIZE, INDEX_TYPE_ID, IndexEntry,
     RECORD_HEADER_SIZE, RecordHeader, RecordType, StreamId,
 };
+use apex_error::ErrorLogging;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 
@@ -41,11 +42,25 @@ pub enum IndexSource {
 /// Upper bound on index entries we are willing to allocate for (≈ 38 GB of index data).
 const MAX_RECORDS: u64 = 1 << 31;
 
+/// Read `len` bytes at `offset`; callers have checked the range against the file length.
 fn read_exact_at(file: &mut File, offset: u64, len: usize) -> Result<Vec<u8>> {
     file.seek(SeekFrom::Start(offset))?;
     let mut buf = vec![0u8; len];
     file.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+/// Fail unless `len` bytes from `offset` lie inside a `file_len`-byte file.
+fn check_in_file(what: &'static str, offset: u64, len: u64, file_len: u64) -> Result<()> {
+    if offset.checked_add(len).is_none_or(|end| end > file_len) {
+        return Err(VrsError::OutOfFile {
+            what,
+            offset,
+            len,
+            file_len,
+        });
+    }
+    Ok(())
 }
 
 /// Read the description/index-style special record at `offset`: header plus
@@ -55,25 +70,24 @@ pub fn read_special_record(
     offset: u64,
     file_len: u64,
 ) -> Result<(RecordHeader, Vec<u8>)> {
-    if offset
-        .checked_add(RECORD_HEADER_SIZE as u64)
-        .is_none_or(|e| e > file_len)
-    {
-        return Err(VrsError::corrupt(format!(
-            "record offset {offset} is outside the file"
-        )));
-    }
+    read_special_record_unlogged(file, offset, file_len).map_err(ErrorLogging::log)
+}
+
+fn read_special_record_unlogged(
+    file: &mut File,
+    offset: u64,
+    file_len: u64,
+) -> Result<(RecordHeader, Vec<u8>)> {
+    check_in_file("record header", offset, RECORD_HEADER_SIZE as u64, file_len)?;
     let header = RecordHeader::parse(&read_exact_at(file, offset, RECORD_HEADER_SIZE)?)?;
-    if offset + u64::from(header.record_size) > file_len {
-        return Err(VrsError::corrupt("record extends past end of file"));
-    }
+    check_in_file("record", offset, u64::from(header.record_size), file_len)?;
     let raw = read_exact_at(
         file,
         offset + RECORD_HEADER_SIZE as u64,
         header.payload_size(),
     )?;
     let mut payload = Vec::new();
-    codec::decompress(
+    codec::decompress_unlogged(
         header.compression,
         &raw,
         header.uncompressed_size as usize,
@@ -101,37 +115,53 @@ fn with_offsets(entries: &[IndexEntry], first_offset: u64) -> Vec<RecordInfo> {
         .collect()
 }
 
-/// Decode an index record into entries. `None` if the record is unusable.
-fn decode_index(header: &RecordHeader, raw: &[u8]) -> Option<Vec<IndexEntry>> {
-    let n_streams = u32::from_le_bytes(raw.get(..4)?.try_into().ok()?) as usize;
-    let prefix = 4usize.checked_add(n_streams.checked_mul(6)?)?;
-    let n_records = u32::from_le_bytes(raw.get(prefix..prefix + 4)?.try_into().ok()?) as usize;
-    let body = raw.get(prefix + 4..)?;
+/// Decode an index record into entries, or say why it is unusable.
+fn decode_index(header: &RecordHeader, raw: &[u8]) -> Result<Vec<IndexEntry>> {
+    let bad = |reason: &'static str| VrsError::BadIndex { reason };
+    let read_u32 = |at: usize| -> Result<usize> {
+        let bytes = raw
+            .get(at..at.saturating_add(4))
+            .ok_or(bad("count field past the end"))?;
+        let mut word = [0u8; 4];
+        word.copy_from_slice(bytes);
+        Ok(u32::from_le_bytes(word) as usize)
+    };
+    let n_streams = read_u32(0)?;
+    let prefix = n_streams
+        .checked_mul(6)
+        .and_then(|n| n.checked_add(4))
+        .ok_or(bad("stream count overflows"))?;
+    let n_records = read_u32(prefix)?;
+    let body = raw.get(prefix + 4..).ok_or(bad("no entry section"))?;
     if n_records as u64 > MAX_RECORDS {
-        return None;
+        return Err(bad("record count above the supported maximum"));
     }
-    let expected = n_records.checked_mul(INDEX_ENTRY_SIZE)?;
+    let expected = n_records
+        .checked_mul(INDEX_ENTRY_SIZE)
+        .ok_or(bad("record count overflows"))?;
     // A compressed body cannot plausibly expand more than ~4096x; refuse
     // counts that would make us allocate far more than the file can hold.
     if header.compression != Compression::None
         && expected > body.len().saturating_mul(4096).max(1 << 20)
     {
-        return None;
+        return Err(bad("record count larger than the compressed body can hold"));
     }
 
     let mut decoded = Vec::new();
     let entries_bytes: &[u8] = if header.compression == Compression::None {
-        body.get(..expected)?
+        body.get(..expected)
+            .ok_or(bad("entry section shorter than its count"))?
     } else {
-        codec::decompress(header.compression, body, expected, &mut decoded).ok()?;
+        codec::decompress_unlogged(header.compression, body, expected, &mut decoded)?;
         &decoded
     };
     let (chunks, _) = entries_bytes.as_chunks::<INDEX_ENTRY_SIZE>();
-    chunks.iter().map(|c| IndexEntry::parse(c).ok()).collect()
+    chunks.iter().map(|c| IndexEntry::parse(c)).collect()
 }
 
 /// Try to load the index recorded in the file. `Ok(None)` means "absent or
-/// inconsistent -- rebuild".
+/// inconsistent -- rebuild": a missing index is an expected outcome (the
+/// writer never finished), an unusable one is warned about with its cause.
 pub fn read_index(
     file: &mut File,
     header: &FileHeader,
@@ -141,26 +171,43 @@ pub fn read_index(
         u64::try_from(header.index_record_offset),
         u64::try_from(header.first_user_record_offset),
     ) else {
+        tracing::warn!(
+            index_offset = header.index_record_offset,
+            first_user_offset = header.first_user_record_offset,
+            "VRS header has a negative index offset, rebuilding the index"
+        );
         return Ok(None);
     };
     if index_offset == 0 || first_user == 0 {
+        tracing::debug!("VRS file has no index record, rebuilding the index");
         return Ok(None);
     }
-    let Ok((rec_header, payload)) = read_index_record(file, index_offset, file_len) else {
-        return Ok(None);
-    };
-    if rec_header.type_id != INDEX_TYPE_ID {
-        return Ok(None);
-    }
-    let Some(entries) = decode_index_payload(&rec_header, &payload) else {
-        return Ok(None);
+    let decoded =
+        read_index_record(file, index_offset, file_len).and_then(|(rec_header, payload)| {
+            if rec_header.type_id != INDEX_TYPE_ID {
+                return Err(VrsError::BadIndex {
+                    reason: "the index offset does not point at an index record",
+                });
+            }
+            decode_index(&rec_header, &payload)
+        });
+    let entries = match decoded {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(%error, index_offset, "VRS index record unusable, rebuilding the index");
+            return Ok(None);
+        }
     };
     let infos = with_offsets(&entries, first_user);
     let end = infos
         .last()
         .map_or(first_user, |l| l.offset + u64::from(l.size));
-    // An index that runs past the end describes a truncated file.
     if end > file_len {
+        tracing::warn!(
+            end,
+            file_len,
+            "VRS index describes records past the end of the file, rebuilding the index"
+        );
         return Ok(None);
     }
     Ok(Some(infos))
@@ -173,26 +220,25 @@ fn read_index_record(
     offset: u64,
     file_len: u64,
 ) -> Result<(RecordHeader, Vec<u8>)> {
-    if offset
-        .checked_add(RECORD_HEADER_SIZE as u64)
-        .is_none_or(|e| e > file_len)
-    {
-        return Err(VrsError::corrupt("index offset outside the file"));
-    }
+    check_in_file(
+        "index record header",
+        offset,
+        RECORD_HEADER_SIZE as u64,
+        file_len,
+    )?;
     let header = RecordHeader::parse(&read_exact_at(file, offset, RECORD_HEADER_SIZE)?)?;
-    if offset + u64::from(header.record_size) > file_len {
-        return Err(VrsError::corrupt("index record extends past end of file"));
-    }
+    check_in_file(
+        "index record",
+        offset,
+        u64::from(header.record_size),
+        file_len,
+    )?;
     let raw = read_exact_at(
         file,
         offset + RECORD_HEADER_SIZE as u64,
         header.payload_size(),
     )?;
     Ok((header, raw))
-}
-
-fn decode_index_payload(header: &RecordHeader, raw: &[u8]) -> Option<Vec<IndexEntry>> {
-    decode_index(header, raw)
 }
 
 /// Offset where user records start when the header does not say.
@@ -203,9 +249,12 @@ fn first_user_offset(file: &mut File, header: &FileHeader, file_len: u64) -> Res
         return Ok(first);
     }
     // Header was never finalised: skip description (and index, if present).
-    let desc = u64::try_from(header.description_record_offset)
-        .map_err(|_| VrsError::corrupt("negative description offset"))?;
-    let (h, _) = read_special_record(file, desc, file_len)?;
+    let desc =
+        u64::try_from(header.description_record_offset).map_err(|_| VrsError::NegativeOffset {
+            what: "description record",
+            offset: header.description_record_offset,
+        })?;
+    let (h, _) = read_special_record_unlogged(file, desc, file_len)?;
     let mut pos = desc + u64::from(h.record_size);
     if pos + RECORD_HEADER_SIZE as u64 <= file_len {
         let next = RecordHeader::parse(&read_exact_at(file, pos, RECORD_HEADER_SIZE)?)?;
@@ -219,6 +268,14 @@ fn first_user_offset(file: &mut File, header: &FileHeader, file_len: u64) -> Res
 /// Rebuild the index by walking record headers from the first user record.
 /// A partially written final record ends the walk.
 pub fn rebuild_index(
+    file: &mut File,
+    header: &FileHeader,
+    file_len: u64,
+) -> Result<Vec<RecordInfo>> {
+    rebuild_index_unlogged(file, header, file_len).map_err(ErrorLogging::log)
+}
+
+fn rebuild_index_unlogged(
     file: &mut File,
     header: &FileHeader,
     file_len: u64,
@@ -325,11 +382,11 @@ mod tests {
             compression: Compression::Zstd,
             uncompressed_size: 0,
         };
-        assert!(decode_index(&header, &[]).is_none());
-        assert!(decode_index(&header, &u32::MAX.to_le_bytes()).is_none());
+        assert!(decode_index(&header, &[]).is_err());
+        assert!(decode_index(&header, &u32::MAX.to_le_bytes()).is_err());
         // plausible prefix, absurd record count
         let mut raw = 0u32.to_le_bytes().to_vec();
         raw.extend_from_slice(&u32::MAX.to_le_bytes());
-        assert!(decode_index(&header, &raw).is_none());
+        assert!(decode_index(&header, &raw).is_err());
     }
 }

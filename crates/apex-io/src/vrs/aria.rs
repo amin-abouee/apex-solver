@@ -29,10 +29,11 @@
 //! ```
 
 use super::datalayout::LayoutView;
-use super::error::{Result, VrsError};
+use super::error::{LayoutError, Result, VrsError};
 use super::format::{RecordType, StreamId};
 use super::reader::{Cursor, RecordFilter, RecordMeta, VrsReader};
 use super::recordformat::Block;
+use apex_error::ErrorLogging;
 use std::path::Path;
 
 /// The sensors of an Aria device, mapped to their VRS stream ids.
@@ -441,19 +442,33 @@ impl AriaRecording {
     ) -> Result<T> {
         let stream = sensor.stream_id();
         let index = self.vrs.configuration_record(stream).ok_or_else(|| {
-            VrsError::Usage(format!("{} has no configuration record", sensor.label()))
+            VrsError::NoConfiguration {
+                sensor: sensor.label(),
+            }
+            .log()
         })?;
         let mut buf = std::mem::take(&mut self.buf);
         let result = (|| {
             let meta = self.vrs.read_record_into(index, &mut buf)?;
-            let layout = self
-                .vrs
-                .record_layout(stream, RecordType::Configuration, meta.format_version)
-                .ok_or_else(|| VrsError::Layout("no configuration layout".into()))?;
-            match layout.split(&buf)?.first() {
-                Some(Block::Layout(v)) => f(v),
-                _ => Err(VrsError::Layout("configuration has no DataLayout".into())),
-            }
+            // Layout lookups do not log; this is where a bad one aborts the read.
+            let decode = || {
+                let layout = self
+                    .vrs
+                    .record_layout(stream, RecordType::Configuration, meta.format_version)
+                    .ok_or(LayoutError::NoRecordLayout {
+                        stream,
+                        record_type: RecordType::Configuration.name(),
+                        version: meta.format_version,
+                    })?;
+                match layout.split(&buf)?.first() {
+                    Some(Block::Layout(v)) => f(v),
+                    _ => Err(LayoutError::NoLayoutBlock {
+                        record_type: RecordType::Configuration.name(),
+                    }
+                    .into()),
+                }
+            };
+            decode().map_err(ErrorLogging::log)
         })();
         self.buf = buf;
         result
@@ -531,10 +546,11 @@ impl AriaRecording {
             .into_iter()
             .map(|i| match self.sample_at(i as usize)? {
                 Sample::Imu(s) => Ok(s),
-                _ => Err(VrsError::Usage(format!(
-                    "{} is not an IMU stream",
-                    sensor.label()
-                ))),
+                _ => Err(VrsError::WrongSensor {
+                    sensor: sensor.label(),
+                    expected: "IMU",
+                }
+                .log()),
             })
             .collect()
     }
@@ -544,10 +560,11 @@ impl AriaRecording {
         match self.vrs.find_nearest(sensor.stream_id(), t) {
             Some(i) => match self.sample_at(i)? {
                 Sample::Image(f) => Ok(Some(f)),
-                _ => Err(VrsError::Usage(format!(
-                    "{} is not a camera",
-                    sensor.label()
-                ))),
+                _ => Err(VrsError::WrongSensor {
+                    sensor: sensor.label(),
+                    expected: "camera",
+                }
+                .log()),
             },
             None => Ok(None),
         }
@@ -558,10 +575,11 @@ impl AriaRecording {
         match self.vrs.find_at_or_after(sensor.stream_id(), t) {
             Some(i) => match self.sample_at(i)? {
                 Sample::Image(f) => Ok(Some(f)),
-                _ => Err(VrsError::Usage(format!(
-                    "{} is not a camera",
-                    sensor.label()
-                ))),
+                _ => Err(VrsError::WrongSensor {
+                    sensor: sensor.label(),
+                    expected: "camera",
+                }
+                .log()),
             },
             None => Ok(None),
         }
@@ -572,10 +590,11 @@ impl AriaRecording {
         match self.vrs.find_nearest(sensor.stream_id(), t) {
             Some(i) => match self.sample_at(i)? {
                 Sample::Imu(s) => Ok(Some(s)),
-                _ => Err(VrsError::Usage(format!(
-                    "{} is not an IMU stream",
-                    sensor.label()
-                ))),
+                _ => Err(VrsError::WrongSensor {
+                    sensor: sensor.label(),
+                    expected: "IMU",
+                }
+                .log()),
             },
             None => Ok(None),
         }
@@ -586,18 +605,25 @@ impl AriaRecording {
     /// Decode a data record that was read with [`VrsReader::read_record_into`]
     /// or [`VrsReader::next_record_into`] into a typed [`Sample`].
     pub fn decode_record(&self, meta: RecordMeta, payload: &[u8]) -> Result<Sample> {
+        self.decode_unlogged(meta, payload)
+            .map_err(ErrorLogging::log)
+    }
+
+    fn decode_unlogged(&self, meta: RecordMeta, payload: &[u8]) -> Result<Sample> {
         let layout = self
             .vrs
             .record_layout(meta.stream, RecordType::Data, meta.format_version)
-            .ok_or_else(|| {
-                VrsError::Layout(format!(
-                    "stream {} has no layout for data format {}",
-                    meta.stream, meta.format_version
-                ))
+            .ok_or(LayoutError::NoRecordLayout {
+                stream: meta.stream,
+                record_type: RecordType::Data.name(),
+                version: meta.format_version,
             })?;
         let blocks = layout.split(payload)?;
         let Some(Block::Layout(v)) = blocks.first() else {
-            return Err(VrsError::Layout("data record has no DataLayout".into()));
+            return Err(LayoutError::NoLayoutBlock {
+                record_type: RecordType::Data.name(),
+            }
+            .into());
         };
         let time_s = meta.timestamp;
 
@@ -609,7 +635,7 @@ impl AriaRecording {
                         Block::Image { bytes, .. } => Some(bytes.to_vec()),
                         _ => None,
                     })
-                    .ok_or_else(|| VrsError::Layout("camera record has no image block".into()))?;
+                    .ok_or(LayoutError::NoImageBlock)?;
                 Ok(Sample::Image(ImageFrame {
                     stream: meta.stream,
                     time_s,
@@ -624,7 +650,7 @@ impl AriaRecording {
             1202 | 1203 => {
                 let channel = |valid: &str, field: &str| -> Result<Option<[f32; 3]>> {
                     if v.get_bool(valid)? {
-                        v.get_f32_array::<3>(field).map(Some)
+                        Ok(Some(v.get_f32_array::<3>(field)?))
                     } else {
                         Ok(None)
                     }

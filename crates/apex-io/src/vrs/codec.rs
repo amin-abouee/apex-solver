@@ -8,7 +8,26 @@
 
 use super::error::{Result, VrsError};
 use super::format::Compression;
+use apex_error::ErrorLogging;
 use std::io::Read;
+
+fn decompress_error(codec: &'static str) -> impl FnOnce(std::io::Error) -> VrsError {
+    move |source| VrsError::Decompress { codec, source }
+}
+
+fn compress_error(codec: &'static str) -> impl FnOnce(std::io::Error) -> VrsError {
+    move |source| VrsError::Compress { codec, source }
+}
+
+fn check_size(compression: Compression, out: &[u8], expected: usize) -> Result<()> {
+    if compression != Compression::None && out.len() != expected {
+        return Err(VrsError::SizeMismatch {
+            expected,
+            actual: out.len(),
+        });
+    }
+    Ok(())
+}
 
 /// Cap on up-front reservation, so a corrupt size field cannot exhaust memory.
 const MAX_PREALLOC: usize = 1 << 28;
@@ -25,6 +44,8 @@ impl Default for Decompressor {
 }
 
 impl Decompressor {
+    /// A context that cannot be created falls back to one-shot
+    /// decompression per record, which is slower but equivalent.
     pub fn new() -> Self {
         Self {
             zstd: zstd::bulk::Decompressor::new().ok(),
@@ -43,6 +64,19 @@ impl Decompressor {
         expected: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
+        self.decompress_unlogged(compression, src, expected, out)
+            .map_err(ErrorLogging::log)
+    }
+
+    /// [`Decompressor::decompress`] without logging, for a caller that logs
+    /// the error itself where it surfaces.
+    pub(crate) fn decompress_unlogged(
+        &mut self,
+        compression: Compression,
+        src: &[u8],
+        expected: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
         out.clear();
         match compression {
             Compression::None => out.extend_from_slice(src),
@@ -53,12 +87,12 @@ impl Decompressor {
                     Some(ctx) => {
                         let n = ctx
                             .decompress_to_buffer(src, out)
-                            .map_err(|e| VrsError::Decompress(e.to_string()))?;
+                            .map_err(decompress_error("zstd"))?;
                         out.truncate(n);
                     }
                     None => {
                         *out = zstd::bulk::decompress(src, expected.min(MAX_PREALLOC))
-                            .map_err(|e| VrsError::Decompress(e.to_string()))?;
+                            .map_err(decompress_error("zstd"))?;
                     }
                 }
             }
@@ -66,16 +100,10 @@ impl Decompressor {
                 out.reserve(expected.min(MAX_PREALLOC));
                 lz4_flex::frame::FrameDecoder::new(src)
                     .read_to_end(out)
-                    .map_err(|e| VrsError::Decompress(e.to_string()))?;
+                    .map_err(decompress_error("lz4"))?;
             }
         }
-        if compression != Compression::None && out.len() != expected {
-            return Err(VrsError::corrupt(format!(
-                "payload decompressed to {} bytes, header says {expected}",
-                out.len()
-            )));
-        }
-        Ok(())
+        check_size(compression, out, expected)
     }
 }
 
@@ -91,6 +119,8 @@ impl Default for Compressor {
 }
 
 impl Compressor {
+    /// A context that cannot be created falls back to one-shot
+    /// compression per record, which is slower but equivalent.
     pub fn new() -> Self {
         Self {
             zstd: zstd::bulk::Compressor::new(1).ok(),
@@ -99,6 +129,11 @@ impl Compressor {
 
     /// Compress `src` for storage; returns the bytes to write.
     pub fn compress(&mut self, compression: Compression, src: &[u8]) -> Result<Vec<u8>> {
+        self.compress_unlogged(compression, src)
+            .map_err(ErrorLogging::log)
+    }
+
+    fn compress_unlogged(&mut self, compression: Compression, src: &[u8]) -> Result<Vec<u8>> {
         match compression {
             Compression::None => Ok(src.to_vec()),
             Compression::Zstd => match self.zstd.as_mut() {
@@ -106,20 +141,17 @@ impl Compressor {
                     let mut out = Vec::with_capacity(zstd::zstd_safe::compress_bound(src.len()));
                     let n = ctx
                         .compress_to_buffer(src, &mut out)
-                        .map_err(|e| VrsError::Decompress(e.to_string()))?;
+                        .map_err(compress_error("zstd"))?;
                     out.truncate(n);
                     Ok(out)
                 }
-                None => {
-                    zstd::bulk::compress(src, 1).map_err(|e| VrsError::Decompress(e.to_string()))
-                }
+                None => zstd::bulk::compress(src, 1).map_err(compress_error("zstd")),
             },
             Compression::Lz4 => {
                 use std::io::Write;
                 let mut enc = lz4_flex::frame::FrameEncoder::new(Vec::new());
-                enc.write_all(src)?;
-                enc.finish()
-                    .map_err(|e| VrsError::Decompress(e.to_string()))
+                enc.write_all(src).map_err(compress_error("lz4"))?;
+                enc.finish().map_err(VrsError::Lz4Frame)
             }
         }
     }
@@ -135,32 +167,35 @@ pub fn decompress(
     expected: usize,
     out: &mut Vec<u8>,
 ) -> Result<()> {
+    decompress_unlogged(compression, src, expected, out).map_err(ErrorLogging::log)
+}
+
+/// [`decompress`] without logging, for a caller that treats a failure as an
+/// expected outcome (an unusable index is rebuilt, not reported).
+pub(crate) fn decompress_unlogged(
+    compression: Compression,
+    src: &[u8],
+    expected: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     out.clear();
     match compression {
         Compression::None => out.extend_from_slice(src),
         Compression::Zstd => {
             out.reserve(expected.min(MAX_PREALLOC));
             let mut decoder = zstd::stream::read::Decoder::new(src)
-                .map_err(|e| VrsError::Decompress(e.to_string()))?
+                .map_err(decompress_error("zstd"))?
                 .single_frame();
-            decoder
-                .read_to_end(out)
-                .map_err(|e| VrsError::Decompress(e.to_string()))?;
+            decoder.read_to_end(out).map_err(decompress_error("zstd"))?;
         }
         Compression::Lz4 => {
             out.reserve(expected.min(MAX_PREALLOC));
             lz4_flex::frame::FrameDecoder::new(src)
                 .read_to_end(out)
-                .map_err(|e| VrsError::Decompress(e.to_string()))?;
+                .map_err(decompress_error("lz4"))?;
         }
     }
-    if compression != Compression::None && out.len() != expected {
-        return Err(VrsError::corrupt(format!(
-            "payload decompressed to {} bytes, header says {expected}",
-            out.len()
-        )));
-    }
-    Ok(())
+    check_size(compression, out, expected)
 }
 
 /// One-shot compression with a fresh context. Hot loops should hold a

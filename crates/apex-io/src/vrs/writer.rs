@@ -20,6 +20,7 @@ use super::format::{
     RECORD_HEADER_SIZE, RecordHeader, RecordType, StreamId,
 };
 use super::reader::RecordMeta;
+use apex_error::ErrorLogging;
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -78,12 +79,21 @@ impl VrsWriter {
     /// Create `path` (which must not exist) and write a placeholder header.
     pub fn create(path: impl AsRef<Path>, options: VrsWriteOptions) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+        let open_error = |source| {
+            VrsError::Open {
+                path: path.clone(),
+                source,
+            }
+            .log()
+        };
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&path)?;
+            .open(&path)
+            .map_err(open_error)?;
         let mut out = BufWriter::with_capacity(1 << 20, file);
-        out.write_all(&[0u8; FILE_HEADER_SIZE])?;
+        out.write_all(&[0u8; FILE_HEADER_SIZE])
+            .map_err(open_error)?;
         Ok(Self {
             path,
             out: Some(out),
@@ -98,11 +108,9 @@ impl VrsWriter {
         })
     }
 
-    fn ensure_not_started(&self, what: &str) -> Result<()> {
+    fn ensure_not_started(&self, what: &'static str) -> Result<()> {
         if self.started {
-            Err(VrsError::Usage(format!(
-                "cannot {what} after the first record was written"
-            )))
+            Err(VrsError::AlreadyStarted { what }.log())
         } else {
             Ok(())
         }
@@ -119,12 +127,10 @@ impl VrsWriter {
     pub fn add_stream(&mut self, id: StreamId, tags: StreamTags) -> Result<()> {
         self.ensure_not_started("add streams")?;
         if id.type_id <= DESCRIPTION_TYPE_ID {
-            return Err(VrsError::Usage(format!(
-                "stream type ids 1 and 2 are reserved (got {id})"
-            )));
+            return Err(VrsError::ReservedStream { stream: id }.log());
         }
         if self.description.streams.insert(id, tags).is_some() {
-            return Err(VrsError::Usage(format!("stream {id} declared twice")));
+            return Err(VrsError::DuplicateStream { stream: id }.log());
         }
         Ok(())
     }
@@ -144,7 +150,7 @@ impl VrsWriter {
             .description
             .streams
             .get_mut(&stream)
-            .ok_or_else(|| VrsError::Usage(format!("stream {stream} was not declared")))?;
+            .ok_or_else(|| VrsError::UndeclaredStream { stream }.log())?;
         let name = record_type.name();
         tags.vrs
             .insert(format!("RF:{name}:{version}"), format.to_string());
@@ -158,14 +164,15 @@ impl VrsWriter {
     fn out(&mut self) -> Result<&mut BufWriter<std::fs::File>> {
         self.out
             .as_mut()
-            .ok_or_else(|| VrsError::Usage("writer already finished".into()))
+            .ok_or_else(|| VrsError::WriterFinished.log())
     }
 
     fn write_framed(&mut self, header: &RecordHeader, payload: &[u8]) -> Result<()> {
         let bytes = header.to_bytes();
         let out = self.out()?;
-        out.write_all(&bytes)?;
-        out.write_all(payload)?;
+        out.write_all(&bytes)
+            .and_then(|()| out.write_all(payload))
+            .map_err(|e| VrsError::Io(e).log())?;
         self.pos += u64::from(header.record_size);
         self.prev_size = header.record_size;
         Ok(())
@@ -224,7 +231,7 @@ impl VrsWriter {
         compression: Compression,
     ) -> Result<()> {
         if !self.description.streams.contains_key(&stream) {
-            return Err(VrsError::Usage(format!("stream {stream} was not declared")));
+            return Err(VrsError::UndeclaredStream { stream }.log());
         }
         self.start()?;
 
@@ -250,8 +257,13 @@ impl VrsWriter {
             uncompressed_size: if used == Compression::None {
                 0
             } else {
-                u32::try_from(payload.len())
-                    .map_err(|_| VrsError::Usage("record larger than 4 GiB".into()))?
+                u32::try_from(payload.len()).map_err(|_| {
+                    VrsError::TooLarge {
+                        what: "record",
+                        len: payload.len(),
+                    }
+                    .log()
+                })?
             },
         };
         self.write_framed(&header, body)?;
@@ -278,7 +290,7 @@ impl VrsWriter {
     ) -> Result<()> {
         let stream = meta.stream;
         if !self.description.streams.contains_key(&stream) {
-            return Err(VrsError::Usage(format!("stream {stream} was not declared")));
+            return Err(VrsError::UndeclaredStream { stream }.log());
         }
         self.start()?;
 
@@ -333,8 +345,13 @@ impl VrsWriter {
             instance: 0,
             record_type: RecordType::Data,
             compression: Compression::Zstd,
-            uncompressed_size: u32::try_from(prefix.len() + entries.len())
-                .map_err(|_| VrsError::Usage("index larger than 4 GiB".into()))?,
+            uncompressed_size: u32::try_from(prefix.len() + entries.len()).map_err(|_| {
+                VrsError::TooLarge {
+                    what: "index",
+                    len: prefix.len() + entries.len(),
+                }
+                .log()
+            })?,
         };
         self.write_framed(&header, &payload)?;
 
@@ -350,12 +367,15 @@ impl VrsWriter {
         let mut out = self
             .out
             .take()
-            .ok_or_else(|| VrsError::Usage("writer already finished".into()))?;
-        out.flush()?;
-        let file = out.get_mut();
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&file_header.to_bytes())?;
-        file.flush()?;
+            .ok_or_else(|| VrsError::WriterFinished.log())?;
+        out.flush()
+            .and_then(|()| {
+                let file = out.get_mut();
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(&file_header.to_bytes())?;
+                file.flush()
+            })
+            .map_err(|e| VrsError::Io(e).log())?;
         Ok(WriteSummary {
             path: self.path.clone(),
             records: self.entries.len() as u64,
@@ -378,8 +398,13 @@ impl Drop for VrsWriter {
 }
 
 fn record_size(payload_len: usize) -> Result<u32> {
-    u32::try_from(payload_len + RECORD_HEADER_SIZE)
-        .map_err(|_| VrsError::Usage("record larger than 4 GiB".into()))
+    u32::try_from(payload_len + RECORD_HEADER_SIZE).map_err(|_| {
+        VrsError::TooLarge {
+            what: "record",
+            len: payload_len,
+        }
+        .log()
+    })
 }
 
 fn creation_id() -> u64 {
