@@ -120,12 +120,15 @@ impl DenseCholeskySolver {
     fn solve_retained(
         &mut self,
         damping: Option<&Damping>,
-        context: &str,
+        context: &'static str,
     ) -> LinAlgResult<&Mat<f64>> {
         let par: Par = get_global_parallelism();
         let (Some(hessian), Some(gradient)) = (self.hessian.as_ref(), self.gradient.as_ref())
         else {
-            return Err(LinAlgError::FactorizationFailed(format!("{context}: no system")).log());
+            return Err(LinAlgError::NotInitialized {
+                component: "dense Cholesky system",
+            }
+            .log());
         };
         let n = hessian.nrows();
         let k = gradient.ncols();
@@ -191,7 +194,7 @@ impl DenseCholeskySolver {
         jacobian: &Mat<f64>,
     ) -> LinAlgResult<Mat<f64>> {
         self.form_normal_equations(residuals, jacobian);
-        self.solve_retained(None, "Dense Cholesky factorization failed")
+        self.solve_retained(None, "the dense normal equations")
             .cloned()
     }
 
@@ -207,11 +210,8 @@ impl DenseCholeskySolver {
         damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
         self.form_normal_equations(residuals, jacobian);
-        self.solve_retained(
-            Some(damping),
-            "Augmented dense Cholesky factorization failed",
-        )
-        .cloned()
+        self.solve_retained(Some(damping), "the damped dense normal equations")
+            .cloned()
     }
 
     /// [`LinearSolver::solve_augmented_equation`] that hands the step back
@@ -225,10 +225,7 @@ impl DenseCholeskySolver {
         damping: &Damping,
     ) -> LinAlgResult<&Mat<f64>> {
         self.form_normal_equations(residuals, jacobian);
-        self.solve_retained(
-            Some(damping),
-            "Augmented dense Cholesky factorization failed",
-        )
+        self.solve_retained(Some(damping), "the damped dense normal equations")
     }
 }
 
@@ -237,7 +234,11 @@ impl DenseCholeskySolver {
 /// Shared by every dense solver that reduces to one SPD system —
 /// `ExplicitDenseSchur`'s reduced camera system — so the factorization and
 /// error-mapping logic exists in one place.
-pub(crate) fn solve_spd(a: &Mat<f64>, b: &Mat<f64>, context: &str) -> LinAlgResult<Mat<f64>> {
+pub(crate) fn solve_spd(
+    a: &Mat<f64>,
+    b: &Mat<f64>,
+    context: &'static str,
+) -> LinAlgResult<Mat<f64>> {
     let llt = a
         .as_ref()
         .llt(Side::Lower)
@@ -292,8 +293,12 @@ impl LinearSolver<DenseMode> for DenseCholeskySolver {
 }
 
 /// Map faer's LLT error to our LinAlgError
-fn map_llt_error(e: LltError, context: &str) -> LinAlgError {
-    LinAlgError::FactorizationFailed(format!("{context}: {e:?}")).log()
+fn map_llt_error(e: LltError, context: &'static str) -> LinAlgError {
+    LinAlgError::Factorization {
+        context,
+        source: e.into(),
+    }
+    .log()
 }
 
 #[cfg(test)]

@@ -79,8 +79,11 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         } else {
             // Create new symbolic factorization and cache it
             let new_sym = SymbolicQr::try_new(hessian.symbolic()).map_err(|e| {
-                LinAlgError::FactorizationFailed("Symbolic QR decomposition failed".to_string())
-                    .log_with_source(e)
+                LinAlgError::Symbolic {
+                    context: "the normal equations",
+                    source: e.into(),
+                }
+                .log()
             })?;
             // Cache it (clone is cheap due to reference counting)
             self.symbolic_factorization = Some(new_sym.clone());
@@ -89,10 +92,11 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
 
         // Perform numeric factorization using the symbolic structure
         let qr = Qr::try_new_with_symbolic(sym, hessian.as_ref()).map_err(|e| {
-            LinAlgError::SingularMatrix(
-                "QR factorization failed (matrix may be singular)".to_string(),
-            )
-            .log_with_source(e)
+            LinAlgError::Factorization {
+                context: "the normal equations",
+                source: e.into(),
+            }
+            .log()
         })?;
 
         // Solve H * dx = -g (negate gradient to get descent direction)
@@ -124,10 +128,11 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         } else {
             // Create new symbolic factorization and cache it
             let new_sym = SymbolicQr::try_new(augmented_hessian.symbolic()).map_err(|e| {
-                LinAlgError::FactorizationFailed(
-                    "Symbolic QR decomposition failed for augmented system".to_string(),
-                )
-                .log_with_source(e)
+                LinAlgError::Symbolic {
+                    context: "the damped normal equations",
+                    source: e.into(),
+                }
+                .log()
             })?;
             // Cache it (clone is cheap due to reference counting)
             self.symbolic_factorization = Some(new_sym.clone());
@@ -136,10 +141,11 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
 
         // Perform numeric factorization
         let qr = Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref()).map_err(|e| {
-            LinAlgError::SingularMatrix(
-                "QR factorization failed (matrix may be singular)".to_string(),
-            )
-            .log_with_source(e)
+            LinAlgError::Factorization {
+                context: "the damped normal equations",
+                source: e.into(),
+            }
+            .log()
         })?;
 
         let dx = qr.solve(-&gradient);

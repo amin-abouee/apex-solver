@@ -111,13 +111,10 @@ impl ChunkLayout {
                         usize::MAX => row_owner[row] = block_idx,
                         owned if owned != block_idx => {
                             let other = partition.eliminated_blocks()[owned];
-                            return Err(LinAlgError::InvalidInput(format!(
-                                "variables {:?} and {:?} are both marked for elimination but \
-                                 share residual row {row}, so H_ee is not block-diagonal and \
-                                 chunk-wise elimination would give a wrong step; eliminate only \
-                                 mutually unconnected variables",
-                                block.key, other.key
-                            ))
+                            return Err(LinAlgError::ConnectedEliminated {
+                                first: block.key,
+                                second: other.key,
+                            }
                             .log());
                         }
                         _ => {}
@@ -127,12 +124,7 @@ impl ChunkLayout {
             }
 
             if count == 0 {
-                return Err(LinAlgError::InvalidInput(format!(
-                    "variable {:?} is marked for elimination but appears in no residual; \
-                     it cannot be eliminated",
-                    block.key
-                ))
-                .log());
+                return Err(LinAlgError::UnobservedEliminated { key: block.key }.log());
             }
             ranges.push((lo, hi));
         }
@@ -144,20 +136,19 @@ impl ChunkLayout {
         let mut previous_end = 0usize;
         for (idx, &(lo, hi)) in ranges.iter().enumerate() {
             if lo < previous_end {
-                return Err(LinAlgError::InvalidInput(format!(
-                    "chunk {idx} starts at row {lo}, before the previous chunk ended at \
-                     {previous_end}; chunk-wise elimination needs each eliminated variable's \
-                     rows to form a contiguous, increasing range"
-                ))
+                return Err(LinAlgError::ChunkRows {
+                    chunk: idx,
+                    start: lo,
+                    previous_end,
+                }
                 .log());
             }
             if idx > 0 && lo > previous_end {
-                return Err(LinAlgError::InvalidInput(format!(
-                    "chunk {idx} starts at row {lo}, leaving a gap of rows \
-                     {previous_end}..{lo} outside every chunk; the sweep would silently drop \
-                     them — usually a factor couples two eliminated variables, or the rows \
-                     are not grouped by eliminated variable"
-                ))
+                return Err(LinAlgError::ChunkRows {
+                    chunk: idx,
+                    start: lo,
+                    previous_end,
+                }
                 .log());
             }
             previous_end = hi;
@@ -1190,7 +1181,7 @@ mod tests {
         let Err(err) = ChunkedSchurEliminator::new(&j, &partition) else {
             panic!("a gap between chunk row ranges must be rejected");
         };
-        assert!(err.to_string().contains("gap"), "{err}");
+        assert!(matches!(err, LinAlgError::ChunkRows { .. }), "{err}");
         Ok(())
     }
 

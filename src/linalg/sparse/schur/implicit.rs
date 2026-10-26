@@ -194,9 +194,10 @@ impl RowSpans {
         let mut block_of = vec![0u32; partition.eliminated_dof()];
         for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
             let owner = u32::try_from(block_idx).map_err(|_| {
-                LinAlgError::InvalidInput(format!(
-                    "{block_idx} eliminated blocks exceed the implicit Schur operator's u32 range"
-                ))
+                LinAlgError::IndexOverflow {
+                    what: "eliminated block index",
+                    value: block_idx,
+                }
                 .log()
             })?;
             let base = partition.eliminated_offset(block_idx);
@@ -232,9 +233,10 @@ fn push_column_spans(
     let rows = symbolic.row_idx_of_col_raw(col);
     let narrow = |x: usize| {
         u32::try_from(x).map_err(|_| {
-            LinAlgError::InvalidInput(format!(
-                "Jacobian index {x} exceeds the implicit Schur operator's u32 range"
-            ))
+            LinAlgError::IndexOverflow {
+                what: "Jacobian index",
+                value: x,
+            }
             .log()
         })
     };
@@ -245,7 +247,12 @@ fn push_column_spans(
         let chunk_end = (chunk + 1) * chunk_rows;
         let hi = k + rows[k..].partition_point(|&r| r < chunk_end);
         let slot = spans.get_mut(chunk).ok_or_else(|| {
-            LinAlgError::InvalidInput(format!("row {first_row} outside the Jacobian")).log()
+            LinAlgError::IndexOutOfRange {
+                what: "Jacobian row",
+                index: first_row,
+                len: jacobian.nrows(),
+            }
+            .log()
         })?;
         slot.push(ColumnSpan {
             lo: narrow(start + k)?,
@@ -381,9 +388,9 @@ impl ImplicitSparseSchur {
 
     fn require_partition(&self) -> LinAlgResult<&SchurPartition> {
         self.partition.as_ref().ok_or_else(|| {
-            LinAlgError::InvalidInput(
-                "Schur solver used before initialize_structure; the partition is unknown".into(),
-            )
+            LinAlgError::NotInitialized {
+                component: "Schur solver partition",
+            }
             .log()
         })
     }
@@ -418,13 +425,10 @@ impl ImplicitSparseSchur {
                         owned if owned == block_idx => {}
                         owned => {
                             let other = partition.eliminated_blocks()[owned];
-                            return Err(LinAlgError::InvalidInput(format!(
-                                "variables {:?} and {:?} are both marked for elimination but \
-                                 share residual row {row}, so EᵀE is not block-diagonal and \
-                                 the elimination would give a wrong step; eliminate only \
-                                 mutually unconnected variables",
-                                block.key, other.key
-                            ))
+                            return Err(LinAlgError::ConnectedEliminated {
+                                first: block.key,
+                                second: other.key,
+                            }
                             .log());
                         }
                     }
@@ -696,7 +700,8 @@ impl ImplicitSparseSchur {
                     }
                 }
 
-                invert_with_retry_dyn(&s_ii).unwrap_or_else(|| DMatrix::identity(dof, dof))
+                invert_with_retry_dyn(&s_ii)
+                    .unwrap_or_else(|| crate::linalg::identity_preconditioner_block(dof))
             })
             .collect();
         Some(blocks)
@@ -735,11 +740,11 @@ impl ImplicitSparseSchur {
         let partition = self.require_partition()?.clone();
 
         if jacobian.ncols() != partition.total_dof() {
-            return Err(LinAlgError::InvalidInput(format!(
-                "Jacobian has {} columns but the partition covers {}",
-                jacobian.ncols(),
-                partition.total_dof()
-            ))
+            return Err(LinAlgError::DimensionMismatch {
+                what: "Jacobian columns",
+                expected: partition.total_dof(),
+                actual: jacobian.ncols(),
+            }
             .log());
         }
 
@@ -1096,9 +1101,9 @@ impl StructureAware for ImplicitSparseSchur {
         let mut eliminated = Vec::new();
 
         for (key, variable) in variables {
-            let col_start = *variable_index_map.get(key).ok_or_else(|| {
-                LinAlgError::InvalidInput(format!("VarKey {:?} not in index map", key))
-            })?;
+            let col_start = *variable_index_map
+                .get(key)
+                .ok_or_else(|| LinAlgError::UnknownVariable { key }.log())?;
             let span = BlockSpan {
                 key,
                 col_start,

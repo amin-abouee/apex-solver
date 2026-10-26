@@ -480,9 +480,9 @@ impl ExplicitSparseSchur {
     /// Borrow the partition, or report that `initialize_structure` was skipped.
     fn require_partition(&self) -> LinAlgResult<&SchurPartition> {
         self.partition.as_ref().ok_or_else(|| {
-            LinAlgError::InvalidInput(
-                "Block structure not built. Call initialize_structure() first.".to_string(),
-            )
+            LinAlgError::NotInitialized {
+                component: "Schur solver partition",
+            }
             .log()
         })
     }
@@ -502,9 +502,9 @@ impl ExplicitSparseSchur {
         let mut eliminated = Vec::new();
 
         for (key, variable) in variables {
-            let col_start = *variable_index_map.get(key).ok_or_else(|| {
-                LinAlgError::InvalidInput(format!("VarKey {:?} not found in index map", key)).log()
-            })?;
+            let col_start = *variable_index_map
+                .get(key)
+                .ok_or_else(|| LinAlgError::UnknownVariable { key }.log())?;
             let span = BlockSpan {
                 key,
                 col_start,
@@ -583,8 +583,15 @@ impl ExplicitSparseSchur {
             }
         }
 
-        SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &triplets)
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("H_kk: {:?}", e)))
+        SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &triplets).map_err(|e| {
+            LinAlgError::SparseMatrix {
+                context: "H_kk block",
+                rows: kept_dof,
+                cols: kept_dof,
+                source: e.into(),
+            }
+            .log()
+        })
     }
     /// Extract `H_ke`, the coupling between retained and eliminated variables.
     ///
@@ -621,7 +628,15 @@ impl ExplicitSparseSchur {
             partition.eliminated_dof(),
             &triplets,
         )
-        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("H_ke: {:?}", e)))
+        .map_err(|e| {
+            LinAlgError::SparseMatrix {
+                context: "H_ke block",
+                rows: partition.kept_dof(),
+                cols: partition.eliminated_dof(),
+                source: e.into(),
+            }
+            .log()
+        })
     }
     /// Split the gradient into its retained and eliminated parts.
     fn extract_gradient_blocks(&self, gradient: &Mat<f64>) -> LinAlgResult<(Mat<f64>, Mat<f64>)> {
@@ -676,7 +691,11 @@ impl ExplicitSparseSchur {
         }
 
         let sym = SymbolicLlt::try_new(a.symbolic(), Side::Lower).map_err(|e| {
-            LinAlgError::FactorizationFailed(format!("Symbolic Cholesky failed: {:?}", e))
+            LinAlgError::Symbolic {
+                context: "the Schur complement",
+                source: e.into(),
+            }
+            .log()
         })?;
         // Cache only a first-attempt symbolic built from `a` itself: the
         // regularization retries below widen the pattern with synthetic
@@ -765,10 +784,12 @@ impl ExplicitSparseSchur {
             }
         }
 
-        Err(LinAlgError::SingularMatrix(format!(
-            "Schur complement singular after 5 regularization attempts (max reg = {:.2e})",
-            base_reg
-        )))
+        Err(LinAlgError::SingularAfterRegularization {
+            context: "the Schur complement",
+            attempts: 5,
+            max_shift: base_reg,
+        }
+        .log())
     }
 
     /// Solve using Preconditioned Conjugate Gradients (PCG).
@@ -841,7 +862,7 @@ impl ExplicitSparseSchur {
                 let offset = partition.kept_offset(idx);
                 let dense = diagonal_block(source, offset, block.dof);
                 invert_with_retry_dyn(&dense)
-                    .unwrap_or_else(|| DMatrix::identity(block.dof, block.dof))
+                    .unwrap_or_else(|| crate::linalg::identity_preconditioner_block(block.dof))
             })
             .collect();
         Ok(Some(blocks))
@@ -1090,8 +1111,15 @@ impl ExplicitSparseSchur {
                     }
                 }
             }
-            SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &s_triplets)
-                .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Schur S: {:?}", e)))?
+            SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &s_triplets).map_err(|e| {
+                LinAlgError::SparseMatrix {
+                    context: "Schur complement",
+                    rows: kept_dof,
+                    cols: kept_dof,
+                    source: e.into(),
+                }
+                .log()
+            })?
         };
 
         self.s_bitmap = Some((extraction_fp.unwrap_or_default(), bits));
@@ -1400,9 +1428,9 @@ impl ExplicitSparseSchur {
         let mut eliminator = match self.chunked.take() {
             Some(e) => e,
             None => {
-                return Err(LinAlgError::InvalidState(
-                    "chunk eliminator not initialized".to_string(),
-                )
+                return Err(LinAlgError::NotInitialized {
+                    component: "chunk eliminator",
+                }
                 .log());
             }
         };
@@ -1429,8 +1457,17 @@ impl ExplicitSparseSchur {
                     }
                 }
             }
-            let s = SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &triplets)
-                .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Schur S: {e:?}")))?;
+            let s = SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &triplets).map_err(
+                |e| {
+                    LinAlgError::SparseMatrix {
+                        context: "Schur complement",
+                        rows: kept_dof,
+                        cols: kept_dof,
+                        source: e.into(),
+                    }
+                    .log()
+                },
+            )?;
 
             // The eliminator returns +g; the reduced system solves S·δ = −g_red.
             let mut rhs = Mat::<f64>::zeros(kept_dof, 1);
@@ -1685,7 +1722,13 @@ fn damp_camera_block(
 
     if diag_pos.iter().all(Option::is_some) {
         let owned = symbolic.to_owned().map_err(|e| {
-            LinAlgError::SparseMatrixCreation(format!("Damped H_cc symbolic: {e:?}"))
+            LinAlgError::SparseMatrix {
+                context: "damped H_cc pattern",
+                rows: cam_size,
+                cols: cam_size,
+                source: e.into(),
+            }
+            .log()
         })?;
         let mut values = h_cc.as_ref().val().to_vec();
         for pos in diag_pos.iter().flatten() {
@@ -1716,8 +1759,15 @@ fn damp_camera_block(
             triplets.push(Triplet::new(i, i, damping.diagonal_term(0.0)));
         }
     }
-    SparseColMat::try_new_from_triplets(cam_size, cam_size, &triplets)
-        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Damped H_cc: {e:?}")))
+    SparseColMat::try_new_from_triplets(cam_size, cam_size, &triplets).map_err(|e| {
+        LinAlgError::SparseMatrix {
+            context: "damped H_cc",
+            rows: cam_size,
+            cols: cam_size,
+            source: e.into(),
+        }
+        .log()
+    })
 }
 
 #[cfg(test)]
@@ -2266,7 +2316,7 @@ mod tests {
     /// `BlockDiagonal` reads `H_kk`'s, so on a system where the
     /// `H_ke·H_ee⁻¹·H_keᵀ` correction is non-zero the two must differ.
     #[test]
-    fn preconditioner_selection_reaches_pcg() -> Result<(), LinAlgError> {
+    fn preconditioner_selection_reaches_pcg() -> TestResult {
         use faer::sparse::Triplet;
 
         // One 2-DOF retained block so the preconditioner is a real 2x2 inverse
@@ -2285,7 +2335,7 @@ mod tests {
         let mut solver = ExplicitSparseSchur::new();
         solver.partition = Some(partition);
 
-        let mk = |vals: [f64; 4]| -> Result<SparseColMat<usize, f64>, LinAlgError> {
+        let mk = |vals: [f64; 4]| -> Result<SparseColMat<usize, f64>, faer::sparse::CreationError> {
             SparseColMat::try_new_from_triplets(
                 2,
                 2,
@@ -2296,7 +2346,6 @@ mod tests {
                     Triplet::new(1, 1, vals[3]),
                 ],
             )
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))
         };
         let h_kk = mk([4.0, 1.0, 1.0, 5.0])?;
         // S differs from H_kk by the elimination correction.
@@ -2309,7 +2358,7 @@ mod tests {
         );
 
         solver.preconditioner = SchurPreconditioner::SchurJacobi;
-        let blocks_missing = || LinAlgError::InvalidInput("expected blocks".into());
+        let blocks_missing = || "expected blocks";
         let schur = solver
             .build_preconditioner(&s, &h_kk)?
             .ok_or_else(blocks_missing)?;
@@ -2321,7 +2370,7 @@ mod tests {
         // SchurJacobi inverts S's block; BlockDiagonal inverts H_kk's.
         let expect_schur = DMatrix::from_row_slice(2, 2, &[2.0, 0.5, 0.5, 3.0])
             .try_inverse()
-            .ok_or_else(|| LinAlgError::InvalidInput("S block must invert".into()))?;
+            .ok_or("S block must invert")?;
         for r in 0..2 {
             for c in 0..2 {
                 assert!(
@@ -2366,7 +2415,7 @@ mod tests {
     /// S = H_kk − H_ke·H_ee⁻¹·H_keᵀ against hand-computed values, unchanged
     /// from before the generalization.
     #[test]
-    fn test_compute_schur_complement_known_matrix() -> Result<(), LinAlgError> {
+    fn test_compute_schur_complement_known_matrix() -> TestResult {
         use faer::sparse::Triplet;
 
         // H_ee⁻¹ = 0.5·I₃
@@ -2377,14 +2426,12 @@ mod tests {
             2,
             2,
             &[Triplet::new(0, 0, 4.0), Triplet::new(1, 1, 5.0)],
-        )
-        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
+        )?;
         let h_ke = SparseColMat::try_new_from_triplets(
             2,
             3,
             &[Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 2.0)],
-        )
-        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
+        )?;
 
         let (s, _) = solver.compute_schur_complement(&h_kk, &h_ke, &blocks)?;
 
@@ -2399,7 +2446,7 @@ mod tests {
     }
 
     #[test]
-    fn test_back_substitute() -> Result<(), LinAlgError> {
+    fn test_back_substitute() -> TestResult {
         use faer::sparse::Triplet;
 
         // H_ee⁻¹ = I₃
@@ -2413,8 +2460,7 @@ mod tests {
             2,
             3,
             &[Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
-        )
-        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
+        )?;
 
         // Compute δp = H_pp^{-1} * (g_p - H_cp^T * δc)
         // H_cp^T * δc = [1*1; 1*2; 0] = [1; 2; 0]
@@ -2430,7 +2476,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_reduced_gradient() -> Result<(), LinAlgError> {
+    fn test_compute_reduced_gradient() -> TestResult {
         use faer::sparse::Triplet;
 
         // H_ee⁻¹ = 2·I₃
@@ -2444,8 +2490,7 @@ mod tests {
             2,
             3,
             &[Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
-        )
-        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
+        )?;
 
         // Compute g_reduced = g_c - H_cp * H_pp^{-1} * g_p
         // H_pp^{-1} * g_p = 2*[1; 2; 3] = [2; 4; 6]

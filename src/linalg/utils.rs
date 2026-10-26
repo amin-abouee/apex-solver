@@ -63,7 +63,13 @@ pub fn dense_to_sparse(dense: &Mat<f64>, threshold: f64) -> LinAlgResult<SparseC
 
     // Build sparse CSC matrix from triplets
     SparseColMat::try_new_from_triplets(nrows, ncols, &triplets).map_err(|e| {
-        LinAlgError::SparseMatrixCreation(format!("dense_to_sparse failed: {e:?}")).log()
+        LinAlgError::SparseMatrix {
+            context: "matrix from dense",
+            rows: nrows,
+            cols: ncols,
+            source: e.into(),
+        }
+        .log()
     })
 }
 

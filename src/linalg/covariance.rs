@@ -59,6 +59,8 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::core::{VarKey, problem::Problem, variable::ManifoldVariable};
+use crate::error::ErrorLogging;
+use crate::linalg::{FaerFailure, LinAlgError};
 use crate::linearizer::LinearizerError;
 
 // ============================================================================
@@ -150,36 +152,41 @@ impl CovarianceOptions {
 /// Why covariance estimation failed.
 ///
 /// Covariance never fails silently: a caller that asked for it either gets a
-/// matrix or a reason.
-#[derive(Debug, Error)]
+/// matrix or a reason. Each reason is logged once where it is found.
+#[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum CovarianceError {
     /// `H = JᵀJ` is singular or not positive definite.
     #[error(
-        "Hessian is singular or not positive definite ({context}). This usually means \
-         unconstrained gauge freedom (e.g. a pose graph with no prior anchoring the first \
-         pose) or a variable that no residual observes. Add a PriorFactor to fix the gauge, \
-         or use CovarianceAlgorithm::DenseSvd to obtain the pseudo-inverse."
+        "Hessian is singular or not positive definite. This usually means unconstrained gauge \
+         freedom (e.g. a pose graph with no prior anchoring the first pose) or a variable that \
+         no residual observes. Add a PriorFactor to fix the gauge, or use \
+         CovarianceAlgorithm::DenseSvd to obtain the pseudo-inverse."
     )]
     RankDeficient {
-        /// What the chosen algorithm was able to determine about the deficiency.
-        context: String,
+        #[source]
+        source: FaerFailure,
     },
 
-    /// The problem could not be linearized at the given variables.
-    #[error("Failed to linearize the problem for covariance estimation: {0}")]
-    Linearization(#[from] LinearizerError),
+    /// `H` is entirely zero, so even the pseudo-inverse says nothing.
+    #[error("Hessian is entirely zero (rank 0); no residual constrains any variable")]
+    ZeroHessian,
+
+    /// The dense SVD did not converge.
+    #[error("SVD of the {dim}×{dim} Hessian did not converge")]
+    SvdFailed { dim: usize },
 
     /// Covariance is undefined without variables or residuals.
     #[error("Covariance requires at least one variable and one residual block")]
     EmptyProblem,
 
-    /// A matrix operation during Hessian assembly failed.
-    #[error("Failed to assemble the Hessian for covariance estimation: {0}")]
-    Assembly(String),
+    /// The problem could not be linearized at the given variables.
+    #[error("failed to linearize the problem for covariance estimation")]
+    Linearization(#[from] LinearizerError),
 
-    /// The dense SVD itself failed to converge.
-    #[error("SVD failed during covariance estimation: {0}")]
-    SvdFailed(String),
+    /// Forming `H = JᵀJ` failed.
+    #[error("failed to assemble the Hessian for covariance estimation")]
+    LinAlg(#[from] LinAlgError),
 }
 
 /// Result type for covariance estimation.
@@ -237,7 +244,7 @@ impl Covariance {
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     ) -> CovarianceResult<Self> {
         if variables.is_empty() || problem.num_residual_blocks() == 0 {
-            return Err(CovarianceError::EmptyProblem);
+            return Err(CovarianceError::EmptyProblem.log());
         }
 
         // Free-column space: fixed tangent coordinates own no column here, so
@@ -271,10 +278,7 @@ impl Covariance {
         // No damping term, no column scaling.
         let hessian = {
             let mut ne_cache = crate::linalg::sparse::normal_eq::LazyNormalEquations::default();
-            ne_cache
-                .compute(&residuals, &jacobian)
-                .map_err(|e| CovarianceError::Assembly(format!("failed to form H = JᵀJ: {e}")))?
-                .hessian
+            ne_cache.compute(&residuals, &jacobian)?.hessian
         };
 
         let mut matrix = match options.algorithm {
@@ -362,16 +366,11 @@ fn invert_via_cholesky(
     hessian: &faer::sparse::SparseColMat<usize, f64>,
     n: usize,
 ) -> CovarianceResult<Mat<f64>> {
-    let symbolic = SymbolicLlt::try_new(hessian.symbolic(), Side::Lower).map_err(|e| {
-        CovarianceError::RankDeficient {
-            context: format!("symbolic Cholesky analysis failed: {e:?}"),
-        }
-    })?;
-    let llt = Llt::try_new_with_symbolic(symbolic, hessian.as_ref(), Side::Lower).map_err(|e| {
-        CovarianceError::RankDeficient {
-            context: format!("numeric Cholesky factorization failed: {e:?}"),
-        }
-    })?;
+    let rank_deficient = |source: FaerFailure| CovarianceError::RankDeficient { source }.log();
+    let symbolic = SymbolicLlt::try_new(hessian.symbolic(), Side::Lower)
+        .map_err(|e| rank_deficient(e.into()))?;
+    let llt = Llt::try_new_with_symbolic(symbolic, hessian.as_ref(), Side::Lower)
+        .map_err(|e| rank_deficient(e.into()))?;
 
     Ok(llt.solve(Mat::<f64>::identity(n, n)))
 }
@@ -391,14 +390,12 @@ fn invert_via_svd(
     let svd = dense
         .as_ref()
         .svd()
-        .map_err(|e| CovarianceError::SvdFailed(format!("{e:?}")))?;
+        .map_err(|e| CovarianceError::SvdFailed { dim: n }.log_with_source(e))?;
 
     let singular = svd.S();
     let sigma_max = (0..n).map(|i| singular[i]).fold(0.0_f64, f64::max);
     if sigma_max <= 0.0 {
-        return Err(CovarianceError::RankDeficient {
-            context: "Hessian is entirely zero (rank 0)".to_string(),
-        });
+        return Err(CovarianceError::ZeroHessian.log());
     }
 
     let threshold = sigma_max * rcond;

@@ -38,13 +38,10 @@ pub fn verify_block_diagonal_dense(
                     && other_block != this_block
                 {
                     let other = partition.eliminated_blocks()[other_block];
-                    return Err(LinAlgError::InvalidInput(format!(
-                        "variables {:?} and {:?} are both marked for elimination but are \
-                         connected by a factor, so H_ee is not block-diagonal and Schur \
-                         elimination would give a wrong step; eliminate only mutually \
-                         unconnected variables",
-                        block.key, other.key
-                    ))
+                    return Err(LinAlgError::ConnectedEliminated {
+                        first: block.key,
+                        second: other.key,
+                    }
                     .log());
                 }
             }
