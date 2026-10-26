@@ -197,7 +197,7 @@ fn build_se3_problem(
                 &[k0, k1],
                 Box::new(BetweenFactor::new(edge.measurement.clone())),
                 loss,
-            );
+            )?;
         }
     }
 
@@ -231,7 +231,7 @@ fn build_se2_problem(
                 &[k0, k1],
                 Box::new(BetweenFactor::new(edge.measurement.clone())),
                 loss,
-            );
+            )?;
         }
     }
 

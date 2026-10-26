@@ -39,6 +39,7 @@ use std::time::Duration;
 
 use apex_io::{G2oLoader, GraphLoader};
 use apex_solver::ManifoldType;
+use apex_solver::core::CoreResult;
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::pose::BetweenFactor;
@@ -118,7 +119,7 @@ fn load_cases() -> Vec<OdometryCase> {
 ///
 /// Mirrors `tests/golden_values.rs` exactly — the goldens are only valid for
 /// this problem construction.
-fn build_problem(case: &OdometryCase) -> Problem {
+fn build_problem(case: &OdometryCase) -> CoreResult<Problem> {
     let graph = &case.graph;
     let mut problem = Problem::new(JacobianMode::Sparse);
     let mut var_keys: HashMap<usize, apex_solver::core::VarKey> = HashMap::new();
@@ -142,7 +143,7 @@ fn build_problem(case: &OdometryCase) -> Problem {
                     &[kf, kt],
                     Box::new(BetweenFactor::new(edge.measurement.clone())),
                     Some(Box::new(L2Loss)),
-                );
+                )?;
             }
         }
     } else {
@@ -162,11 +163,11 @@ fn build_problem(case: &OdometryCase) -> Problem {
                     &[kf, kt],
                     Box::new(BetweenFactor::new(edge.measurement.clone())),
                     Some(Box::new(L2Loss)),
-                );
+                )?;
             }
         }
     }
-    problem
+    Ok(problem)
 }
 
 /// The exact configs the goldens were pinned with: default SparseCholesky
@@ -212,7 +213,10 @@ fn bench_odometry(c: &mut Criterion) {
     for case in &cases {
         group.bench_with_input(BenchmarkId::new("solve", case.name), case, |b, case| {
             b.iter_batched(
-                || build_problem(case),
+                || {
+                    build_problem(case)
+                        .unwrap_or_else(|e| panic!("invalid problem for {}: {e}", case.name))
+                },
                 |mut problem| {
                     let mut solver = LevenbergMarquardt::with_config(config_for(case.is_3d));
                     let result = solver

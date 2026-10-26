@@ -24,6 +24,7 @@ use nalgebra::Vector3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 
 /// Raw pseudorange factor over `[receiver position (3), clock bias (1)]`.
 #[derive(Clone)]
@@ -94,14 +95,12 @@ impl Factor for PseudorangeFactor {
         (1, 4)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2
-            || variables[0].as_param_slice().len() != 3
-            || variables[1].as_param_slice().len() != 1
-        {
-            return Err("PseudorangeFactor expects [R³ position, R¹ clock bias]".into());
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_block_sizes(
+            variables,
+            &[3, 1],
+            "PseudorangeFactor",
+        )
     }
 }
 
@@ -190,21 +189,14 @@ impl Factor for DopplerFactor {
         (1, 6)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2
-            || variables[0].as_param_slice().len() != 3
-            || variables[1].as_param_slice().len() != 3
-        {
-            return Err("DopplerFactor expects [R³ position, R³ velocity]".into());
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_block_sizes(variables, &[3, 3], "DopplerFactor")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::CoreError;
 
     fn fd_check<F>(
         f: &F,
@@ -212,7 +204,7 @@ mod tests {
         rows: usize,
         cols: usize,
         tol: f64,
-    ) -> Result<(), CoreError>
+    ) -> Result<(), Box<dyn std::error::Error>>
     where
         F: Fn(&[&[f64]], &mut [f64], Option<faer::mat::MatMut<'_, f64>>),
     {
@@ -240,10 +232,11 @@ mod tests {
                     let fd = (r_plus[row] - r_minus[row]) / (2.0 * EPS);
                     let ana = jac_buf[(col_offset + col) * rows + row];
                     if (fd - ana).abs() > tol {
-                        return Err(CoreError::InvalidInput(format!(
+                        return Err(format!(
                             "J[{row},{}]: analytical={ana:.6} fd={fd:.6}",
                             col_offset + col
-                        )));
+                        )
+                        .into());
                     }
                 }
             }
@@ -253,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn pseudorange_zero_residual_and_fd() -> Result<(), CoreError> {
+    fn pseudorange_zero_residual_and_fd() -> Result<(), Box<dyn std::error::Error>> {
         let sat = Vector3::new(1.9e7, 0.0, 1.2e7);
         let pos = Vector3::new(0.0, 0.0, 0.0);
         let geo_range = (sat - pos).norm();
@@ -289,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn doppler_zero_residual_and_fd() -> Result<(), CoreError> {
+    fn doppler_zero_residual_and_fd() -> Result<(), Box<dyn std::error::Error>> {
         let sat_pos = Vector3::new(2.0e7, 1.0e6, 1.5e7);
         let sat_vel = Vector3::new(100.0, -500.0, 800.0);
         let pos = Vector3::new(0.0, 0.0, 0.0);

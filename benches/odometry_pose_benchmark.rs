@@ -657,12 +657,22 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
                 strategy,
                 &mut repair_summary,
             );
-            problem.add_residual_block_with_noise(
-                &[k0, k1],
-                Box::new(between_factor),
-                Some(Box::new(L2Loss)),
-                noise,
-            );
+            if let Some(e) = problem
+                .add_residual_block_with_noise(
+                    &[k0, k1],
+                    Box::new(between_factor),
+                    Some(Box::new(L2Loss)),
+                    noise,
+                )
+                .err()
+            {
+                return BenchmarkResult::failed(
+                    dataset.name,
+                    "apex-solver",
+                    "Rust",
+                    &e.to_string(),
+                );
+            }
         }
     }
     report_unusable_information(dataset.name, &repair_summary, graph.edges_se2.len());
@@ -740,12 +750,22 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
                 strategy,
                 &mut repair_summary,
             );
-            problem.add_residual_block_with_noise(
-                &[k0, k1],
-                Box::new(between_factor),
-                Some(Box::new(L2Loss)),
-                noise,
-            );
+            if let Some(e) = problem
+                .add_residual_block_with_noise(
+                    &[k0, k1],
+                    Box::new(between_factor),
+                    Some(Box::new(L2Loss)),
+                    noise,
+                )
+                .err()
+            {
+                return BenchmarkResult::failed(
+                    dataset.name,
+                    "apex-solver",
+                    "Rust",
+                    &e.to_string(),
+                );
+            }
         }
     }
     report_unusable_information(dataset.name, &repair_summary, graph.edges_se3.len());

@@ -157,15 +157,20 @@ pub fn velocity_dvector(v: &Vector3<f64>) -> DVector<f64> {
 /// Tight prior anchoring a variable — used instead of `fix_variable` (whose
 /// discarded-step semantics under-correct free variables that share factors
 /// with the fixed one).
-pub fn anchor_rn(problem: &mut Problem, key: VarKey, params: &[f64]) {
+pub fn anchor_rn(
+    problem: &mut Problem,
+    key: VarKey,
+    params: &[f64],
+) -> Result<(), Box<dyn std::error::Error>> {
     problem.add_residual_block_with_noise(
         &[key],
         Box::new(apex_solver::factors::pose::EuclideanPriorFactor::new(
             DVector::from_vec(params.to_vec()),
         )),
         None,
-        NoiseModel::from_sigmas(&vec![1e-6; params.len()]).unwrap_or_else(|e| panic!("{e}")),
-    );
+        NoiseModel::from_sigmas(&vec![1e-6; params.len()])?,
+    )?;
+    Ok(())
 }
 
 /// Tight tangent-space prior anchoring an SE23 navigation state.
@@ -173,21 +178,27 @@ pub fn anchor_se23(
     problem: &mut Problem,
     key: VarKey,
     state: &apex_solver::apex_manifolds::se23::SE23,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     problem.add_residual_block_with_noise(
         &[key],
         Box::new(PriorFactor::new(state.clone())),
         None,
-        NoiseModel::from_sigmas(&[1e-6; 9]).unwrap_or_else(|e| panic!("{e}")),
-    );
+        NoiseModel::from_sigmas(&[1e-6; 9])?,
+    )?;
+    Ok(())
 }
 
 /// Tight tangent-space prior anchoring an SE3 pose.
-pub fn anchor_se3(problem: &mut Problem, key: VarKey, pose: &SE3) {
+pub fn anchor_se3(
+    problem: &mut Problem,
+    key: VarKey,
+    pose: &SE3,
+) -> Result<(), Box<dyn std::error::Error>> {
     problem.add_residual_block_with_noise(
         &[key],
         Box::new(PriorFactor::new(pose.clone())),
         None,
-        NoiseModel::from_sigmas(&[1e-6; 6]).unwrap_or_else(|e| panic!("{e}")),
-    );
+        NoiseModel::from_sigmas(&[1e-6; 6])?,
+    )?;
+    Ok(())
 }

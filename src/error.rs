@@ -125,438 +125,55 @@ pub enum ApexSolverError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factors::FactorError;
     use apex_camera_models::{
         CameraModelResult, ConversionError, ConversionResult, EstimationError, ParamError,
         ParamResult, ProjectionError, UnprojectionError,
     };
     use apex_manifolds::RnError;
-    use faer::Mat;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    // ========================================================================
-    // Layer C (Deep/Math): Simulates failures at the deepest layer
-    // ========================================================================
-
-    /// Layer C: Simulates a singular matrix failure at the deepest module layer.
-    /// Returns `Result<T, LinAlgError>` — the module-specific error type.
-    fn solve_linear_system() -> Result<Mat<f64>, LinAlgError> {
-        Err(LinAlgError::SingularMatrix(
-            "Simulated singular matrix in solve_linear_system".to_string(),
-        ))
+    #[test]
+    fn a_factor_error_reaches_the_root_through_core_with_its_context() -> TestResult {
+        fn validate() -> crate::factors::FactorResult<()> {
+            Err(FactorError::VariableCount {
+                factor: "GpsFactor",
+                expected: 2,
+                actual: 3,
+            })
+        }
+        fn register() -> crate::core::CoreResult<()> {
+            validate()?;
+            Ok(())
+        }
+        fn api() -> ApexSolverResult<()> {
+            register()?;
+            Ok(())
+        }
+        let error = api().err().ok_or("expected an error")?;
+        assert!(matches!(
+            error,
+            ApexSolverError::Core(CoreError::Factor(FactorError::VariableCount { .. }))
+        ));
+        assert_eq!(
+            error.chain(),
+            "residual block registration rejected\n  → GpsFactor expects 2 variables, got 3"
+        );
+        Ok(())
     }
 
-    /// Layer C: Simulates a symbolic structure failure in the core module.
-    /// Returns `Result<T, CoreError>` — the module-specific error type.
-    fn build_structure() -> Result<(), CoreError> {
-        Err(CoreError::SymbolicStructure(
-            "Simulated duplicate variable index".to_string(),
-        ))
-    }
-
-    /// Layer C: Simulates a factor dimension mismatch.
-    /// Returns `Result<T, FactorError>` — the module-specific error type.
-    fn compute_projection() -> Result<(), FactorError> {
-        Err(FactorError::InvalidDimension {
+    #[test]
+    fn a_manifold_error_converts_transparently() {
+        let leaf = RnError::DimensionMismatch {
             expected: 3,
             actual: 2,
-        })
-    }
-
-    // ========================================================================
-    // Layer B (Logic/Optimization): Calls Layer C using `?` operator
-    // ========================================================================
-
-    /// Layer B: Calls the linear solver using `?`.
-    /// The `?` operator auto-converts `LinAlgError` → `OptimizerError::LinAlg`
-    /// because `OptimizerError` implements `#[from] LinAlgError`.
-    fn run_optimization_step() -> Result<Mat<f64>, OptimizerError> {
-        let result = solve_linear_system()?;
-        Ok(result)
-    }
-
-    /// Layer B: Calls the core structure builder using `?`.
-    /// The `?` operator auto-converts `CoreError` → `OptimizerError::Core`
-    /// because `OptimizerError` implements `#[from] CoreError`.
-    fn initialize_optimization() -> Result<(), OptimizerError> {
-        build_structure()?;
-        Ok(())
-    }
-
-    // ========================================================================
-    // Layer A (Top/API): The public API function returning `ApexSolverResult`.
-    // The `?` operator auto-converts module errors → `ApexSolverError`.
-    // ========================================================================
-
-    /// Layer A: Public API function. The `?` operator auto-converts
-    /// `OptimizerError` → `ApexSolverError::Optimizer(...)` via `#[from]`.
-    fn solver_optimize() -> ApexSolverResult<()> {
-        let _ = run_optimization_step()?;
-        Ok(())
-    }
-
-    /// Layer A: Public API function with core error propagation.
-    fn solver_optimize_with_core_error() -> ApexSolverResult<()> {
-        initialize_optimization()?;
-        Ok(())
-    }
-
-    /// Layer A: Public API function with factor error propagation.
-    fn solver_optimize_with_factor_error() -> ApexSolverResult<()> {
-        compute_projection()?;
-        Ok(())
-    }
-
-    // ========================================================================
-    // Existing tests
-    // ========================================================================
-
-    #[test]
-    fn test_apex_solver_error_display() {
-        let linalg_error = LinAlgError::SingularMatrix("test singular matrix".to_string());
-        let error = ApexSolverError::from(linalg_error);
-        assert!(error.to_string().contains("Singular matrix"));
-    }
-
-    #[test]
-    fn test_apex_solver_error_chain() {
-        let linalg_error =
-            LinAlgError::FactorizationFailed("Cholesky factorization failed".to_string());
-        let error = ApexSolverError::from(linalg_error);
-
-        let chain = error.chain();
-        assert!(chain.contains("factorization"));
-        assert!(chain.contains("Cholesky"));
-    }
-
-    #[test]
-    fn test_apex_solver_error_chain_compact() {
-        let core_error = CoreError::Variable("Invalid variable index".to_string());
-        let error = ApexSolverError::from(core_error);
-
-        let chain_compact = error.chain_compact();
-        assert!(chain_compact.contains("Invalid variable index"));
-    }
-
-    #[test]
-    fn test_apex_solver_result_ok() {
-        let result: ApexSolverResult<i32> = Ok(42);
-        assert!(result.is_ok());
-        if let Ok(value) = result {
-            assert_eq!(value, 42);
-        }
-    }
-
-    #[test]
-    fn test_apex_solver_result_err() {
-        let core_error = CoreError::ResidualBlock("Test error".to_string());
-        let result: ApexSolverResult<i32> = Err(ApexSolverError::from(core_error));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_transparent_error_conversion() {
-        let manifold_error = ManifoldError::from(RnError::DimensionMismatch {
-            expected: 3,
-            actual: 2,
-        });
-
-        let apex_error: ApexSolverError = manifold_error.into();
-        assert!(
-            matches!(apex_error, ApexSolverError::Manifold(_)),
-            "Expected Manifold variant"
-        );
-    }
-
-    // ========================================================================
-    // New tests: Bubble-up error propagation (A → B → C)
-    // ========================================================================
-
-    #[test]
-    fn test_error_chain_linalg_through_optimizer() -> TestResult {
-        let result = solver_optimize();
-        let Err(err) = result else {
-            return Err("solver_optimize should fail with LinAlgError".into());
         };
-
-        assert!(
-            matches!(err, ApexSolverError::Optimizer(OptimizerError::LinAlg(_))),
-            "Expected Optimizer::LinAlg, got {:?}",
-            err
+        let error = ApexSolverError::from(ManifoldError::from(leaf));
+        assert!(matches!(error, ApexSolverError::Manifold(_)));
+        assert_eq!(
+            error.to_string(),
+            "Rn dimension mismatch, expected 3 but got 2"
         );
-
-        let chain = err.chain();
-        assert!(
-            chain.contains("Linear algebra error") || chain.contains("Singular matrix"),
-            "chain should contain error details: {}",
-            chain
-        );
-
-        let compact = err.chain_compact();
-        assert!(
-            compact.contains("→"),
-            "compact chain should contain →: {}",
-            compact
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_error_chain_core_through_optimizer() -> TestResult {
-        let result = solver_optimize_with_core_error();
-        let Err(err) = result else {
-            return Err("should fail with CoreError".into());
-        };
-
-        assert!(
-            matches!(err, ApexSolverError::Optimizer(OptimizerError::Core(_))),
-            "Expected Optimizer::Core, got {:?}",
-            err
-        );
-
-        let chain = err.chain();
-        assert!(
-            chain.contains("Symbolic structure") || chain.contains("duplicate"),
-            "chain should contain error details: {}",
-            chain
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_error_chain_factor_direct() -> TestResult {
-        let result = solver_optimize_with_factor_error();
-        let Err(err) = result else {
-            return Err("should fail with FactorError".into());
-        };
-
-        assert!(
-            matches!(
-                err,
-                ApexSolverError::Factor(FactorError::InvalidDimension { .. })
-            ),
-            "Expected Factor::InvalidDimension, got {:?}",
-            err
-        );
-
-        let compact = err.chain_compact();
-        assert!(compact.contains("expected 3"), "compact: {}", compact);
-        assert!(compact.contains("got 2"), "compact: {}", compact);
-        Ok(())
-    }
-
-    #[test]
-    fn test_linalg_error_direct_to_apex() -> TestResult {
-        let linalg_err = LinAlgError::SingularMatrix("test_direct".to_string());
-        let apex_err: ApexSolverError = linalg_err.into();
-        assert!(
-            matches!(apex_err, ApexSolverError::LinearAlgebra(_)),
-            "Expected LinearAlgebra variant for direct LinAlgError conversion"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_core_error_direct_to_apex() -> TestResult {
-        let core_err = CoreError::SymbolicStructure("test_direct".to_string());
-        let apex_err: ApexSolverError = core_err.into();
-        assert!(
-            matches!(apex_err, ApexSolverError::Core(_)),
-            "Expected Core variant for direct CoreError conversion"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_core_error_through_optimizer_to_apex() -> TestResult {
-        let core_err = CoreError::InvalidInput("bad input".to_string());
-        let opt_err: OptimizerError = core_err.into();
-        let apex_err: ApexSolverError = opt_err.into();
-        assert!(
-            matches!(
-                apex_err,
-                ApexSolverError::Optimizer(OptimizerError::Core(_))
-            ),
-            "Expected Optimizer::Core variant for CoreError through OptimizerError"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_linalg_error_through_optimizer_preserves_context() -> TestResult {
-        let linalg_err = LinAlgError::FactorizationFailed("LU decomposition failed".to_string());
-        let opt_err: OptimizerError = linalg_err.into();
-        let apex_err: ApexSolverError = opt_err.into();
-
-        let chain = apex_err.chain();
-        assert!(chain.contains("Linear algebra error"), "chain: {}", chain);
-        assert!(chain.contains("LU decomposition"), "chain: {}", chain);
-        Ok(())
-    }
-
-    #[test]
-    fn test_observer_error_to_apex() -> TestResult {
-        let obs_err = ObserverError::RerunInitialization("connect failed".to_string());
-        let apex_err: ApexSolverError = obs_err.into();
-        assert!(
-            matches!(apex_err, ApexSolverError::Observer(_)),
-            "Expected Observer variant"
-        );
-
-        let compact = apex_err.chain_compact();
-        assert!(
-            compact.contains("Rerun") || compact.contains("connect failed"),
-            "compact: {}",
-            compact
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_factor_error_to_apex() -> TestResult {
-        let factor_err = FactorError::InvalidProjection("point behind camera".to_string());
-        let apex_err: ApexSolverError = factor_err.into();
-        assert!(
-            matches!(apex_err, ApexSolverError::Factor(_)),
-            "Expected Factor variant"
-        );
-
-        let compact = apex_err.chain_compact();
-        assert!(compact.contains("behind camera"), "compact: {}", compact);
-        Ok(())
-    }
-
-    #[test]
-    fn test_all_error_variants_are_accessible() -> TestResult {
-        let errors: Vec<ApexSolverError> = vec![
-            CoreError::Variable("var".into()).into(),
-            OptimizerError::EmptyProblem.into(),
-            LinAlgError::SingularMatrix("sing".into()).into(),
-            ManifoldError::from(RnError::DimensionMismatch {
-                expected: 1,
-                actual: 2,
-            })
-            .into(),
-            ObserverError::InvalidState("bad".into()).into(),
-            FactorError::InvalidDimension {
-                expected: 3,
-                actual: 2,
-            }
-            .into(),
-            LinearizerError::SymbolicStructure("sym_err".into()).into(),
-            CameraModelError::from(ProjectionError::PointBehindCamera {
-                z: -0.5,
-                min_z: 1e-6,
-            })
-            .into(),
-        ];
-
-        for err in &errors {
-            assert!(
-                !err.to_string().is_empty(),
-                "Error Display should not be empty"
-            );
-            assert!(
-                !err.chain_compact().is_empty(),
-                "chain_compact should not be empty"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_linearizer_error_direct_to_apex() -> TestResult {
-        let lin_err = LinearizerError::SymbolicStructure("sparse build failed".to_string());
-        let apex_err: ApexSolverError = lin_err.into();
-        assert!(
-            matches!(apex_err, ApexSolverError::Linearizer(_)),
-            "Expected Linearizer variant for direct LinearizerError conversion"
-        );
-
-        let compact = apex_err.chain_compact();
-        assert!(
-            compact.contains("sparse build failed"),
-            "compact: {}",
-            compact
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_linearizer_error_through_core_to_apex() -> TestResult {
-        let lin_err = LinearizerError::ParallelComputation("lock failure".to_string());
-        let core_err: CoreError = lin_err.into();
-        let apex_err: ApexSolverError = core_err.into();
-        assert!(
-            matches!(
-                apex_err,
-                ApexSolverError::Core(CoreError::ParallelComputation(_))
-            ),
-            "Expected Core::ParallelComputation variant for LinearizerError through CoreError, got {:?}",
-            apex_err
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_linearizer_error_through_optimizer_to_apex() -> TestResult {
-        let lin_err = LinearizerError::Variable("missing key".to_string());
-        let opt_err: OptimizerError = lin_err.into();
-        let apex_err: ApexSolverError = opt_err.into();
-        assert!(
-            matches!(
-                apex_err,
-                ApexSolverError::Optimizer(OptimizerError::Linearizer(_))
-            ),
-            "Expected Optimizer::Linearizer variant for LinearizerError through OptimizerError, got {:?}",
-            apex_err
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_bubble_up_from_linalg_to_optimizer_to_api() -> TestResult {
-        let result = solver_optimize();
-        let Err(err) = result else {
-            return Err("should propagate LinAlgError through OptimizerError".into());
-        };
-
-        assert!(
-            matches!(err, ApexSolverError::Optimizer(OptimizerError::LinAlg(_))),
-            "Expected LinAlgError wrapped in OptimizerError, got {:?}",
-            err
-        );
-
-        let source_chain = err.chain();
-        assert!(
-            source_chain.contains("Singular matrix"),
-            "Chain should contain root cause: {}",
-            source_chain
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_bubble_up_from_core_to_optimizer_to_api() -> TestResult {
-        let result = solver_optimize_with_core_error();
-        let Err(err) = result else {
-            return Err("should propagate CoreError through OptimizerError".into());
-        };
-
-        assert!(
-            matches!(err, ApexSolverError::Optimizer(OptimizerError::Core(_))),
-            "Expected CoreError wrapped in OptimizerError, got {:?}",
-            err
-        );
-
-        let source_chain = err.chain();
-        assert!(
-            source_chain.contains("Symbolic structure"),
-            "Chain should contain root cause: {}",
-            source_chain
-        );
-        Ok(())
     }
 
     // ========================================================================

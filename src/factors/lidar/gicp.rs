@@ -30,9 +30,9 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::Factor;
+use crate::error::ErrorLogging;
 use crate::factors::common::group_point::{act_point, expect_state_and_point};
+use crate::factors::{Factor, FactorError, FactorResult};
 
 /// Minimum eigenvalue clamp used when whitening the combined covariance, so
 /// near-flat tangential directions do not blow the inverse up.
@@ -62,12 +62,14 @@ impl<G: ActsOnPoints3> GicpFactor<G> {
         target_covariance: Matrix3<f64>,
         body_covariance: Matrix3<f64>,
         rotation_hint: Matrix3<f64>,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
         for c in [&target_covariance, &body_covariance] {
             if c.iter().any(|v| !v.is_finite()) {
-                return Err(CoreError::InvalidInput(
-                    "GICP covariances must be finite".into(),
-                ));
+                return Err(FactorError::NonFinite {
+                    factor: "GicpFactor",
+                    what: "point covariance",
+                }
+                .log());
             }
         }
         let rotated = rotation_hint * body_covariance * rotation_hint.transpose();
@@ -140,7 +142,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for GicpFactor<G> {
         (3, G::DOF + 3)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_state_and_point::<G>(variables, "GicpFactor")
     }
 

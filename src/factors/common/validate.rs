@@ -1,6 +1,8 @@
 //! Shared parameter-block validation for factors.
 
 use crate::core::variable::ManifoldVariable;
+use crate::error::ErrorLogging;
+use crate::factors::{FactorError, FactorResult};
 
 /// Check that a factor is being registered with the variables it expects.
 ///
@@ -14,21 +16,19 @@ use crate::core::variable::ManifoldVariable;
 pub(crate) fn expect_block_sizes(
     variables: &[&dyn ManifoldVariable],
     expected: &[usize],
-    message: &str,
-) -> Result<(), String> {
-    if variables.len() != expected.len() {
-        return Err(format!(
-            "{message} — got {} blocks, expected {}",
-            variables.len(),
-            expected.len()
-        ));
-    }
-    for (index, (variable, &want)) in variables.iter().zip(expected).enumerate() {
-        let got = variable.as_param_slice().len();
-        if got != want {
-            return Err(format!(
-                "{message} — block {index} has {got} parameters, expected {want}"
-            ));
+    factor: &'static str,
+) -> FactorResult<()> {
+    expect_count(variables, expected.len(), factor)?;
+    for (block, (variable, &want)) in variables.iter().zip(expected).enumerate() {
+        let actual = variable.as_param_slice().len();
+        if actual != want {
+            return Err(FactorError::VariableSize {
+                factor,
+                block,
+                expected: want,
+                actual,
+            }
+            .log());
         }
     }
     Ok(())
@@ -39,9 +39,9 @@ pub(crate) fn expect_uniform_blocks(
     variables: &[&dyn ManifoldVariable],
     count: usize,
     size: usize,
-    message: &str,
-) -> Result<(), String> {
-    expect_block_sizes(variables, &vec![size; count], message)
+    factor: &'static str,
+) -> FactorResult<()> {
+    expect_block_sizes(variables, &vec![size; count], factor)
 }
 
 /// Check that a factor is registered with variables of the given manifolds,
@@ -49,24 +49,191 @@ pub(crate) fn expect_uniform_blocks(
 /// group, where a parameter count alone is ambiguous (`SE3` and a 7-D `Rn`).
 pub(crate) fn expect_manifolds(
     variables: &[&dyn ManifoldVariable],
-    expected: &[&str],
-    message: &str,
-) -> Result<(), String> {
-    if variables.len() != expected.len() {
-        return Err(format!(
-            "{message} — got {} blocks, expected {}",
-            variables.len(),
-            expected.len()
-        ));
+    expected: &[&'static str],
+    factor: &'static str,
+) -> FactorResult<()> {
+    expect_count(variables, expected.len(), factor)?;
+    for (block, (variable, &want)) in variables.iter().zip(expected).enumerate() {
+        expect_manifold(*variable, block, want, factor)?;
     }
-    for (index, (variable, &want)) in variables.iter().zip(expected).enumerate() {
-        let got = variable.manifold_type_name();
-        if got != want {
-            return Err(format!(
-                "{message} — block {index} is {got}, expected {want}"
-            ));
+    Ok(())
+}
+
+/// Check the number of variables a factor is registered with.
+pub(crate) fn expect_count(
+    variables: &[&dyn ManifoldVariable],
+    expected: usize,
+    factor: &'static str,
+) -> FactorResult<()> {
+    if variables.len() != expected {
+        return Err(FactorError::VariableCount {
+            factor,
+            expected,
+            actual: variables.len(),
         }
+        .log());
     }
+    Ok(())
+}
+
+/// Check that block `block` lives on the manifold named `expected`.
+pub(crate) fn expect_manifold(
+    variable: &dyn ManifoldVariable,
+    block: usize,
+    expected: &'static str,
+    factor: &'static str,
+) -> FactorResult<()> {
+    let actual = variable.manifold_type_name();
+    if actual != expected {
+        return Err(FactorError::VariableManifold {
+            factor,
+            block,
+            expected,
+            actual,
+        }
+        .log());
+    }
+    Ok(())
+}
+
+/// Check that block `block` has `expected` parameters.
+pub(crate) fn expect_size(
+    variable: &dyn ManifoldVariable,
+    block: usize,
+    expected: usize,
+    factor: &'static str,
+) -> FactorResult<()> {
+    let actual = variable.as_param_slice().len();
+    if actual != expected {
+        return Err(FactorError::VariableSize {
+            factor,
+            block,
+            expected,
+            actual,
+        }
+        .log());
+    }
+    Ok(())
+}
+
+/// Check that block `block` has `expected` degrees of freedom.
+pub(crate) fn expect_dof(
+    variable: &dyn ManifoldVariable,
+    block: usize,
+    expected: usize,
+    factor: &'static str,
+) -> FactorResult<()> {
+    let actual = variable.dof();
+    if actual != expected {
+        return Err(FactorError::VariableDof {
+            factor,
+            block,
+            expected,
+            actual,
+        }
+        .log());
+    }
+    Ok(())
+}
+
+/// A finite, strictly positive scalar, returned unchanged.
+pub(crate) fn expect_positive(
+    factor: &'static str,
+    what: &'static str,
+    value: f64,
+) -> FactorResult<f64> {
+    if value.is_finite() && value > 0.0 {
+        return Ok(value);
+    }
+    Err(FactorError::InvalidValue {
+        factor,
+        what,
+        requirement: "finite and positive",
+        value,
+    }
+    .log())
+}
+
+/// Every value finite.
+pub(crate) fn expect_finite<'a>(
+    factor: &'static str,
+    what: &'static str,
+    values: impl IntoIterator<Item = &'a f64>,
+) -> FactorResult<()> {
+    if values.into_iter().all(|value| value.is_finite()) {
+        return Ok(());
+    }
+    Err(FactorError::NonFinite { factor, what }.log())
+}
+
+/// At least `min` items.
+pub(crate) fn expect_at_least(
+    factor: &'static str,
+    what: &'static str,
+    actual: usize,
+    min: usize,
+) -> FactorResult<()> {
+    if actual >= min {
+        return Ok(());
+    }
+    Err(FactorError::TooFew {
+        factor,
+        what,
+        min,
+        actual,
+    }
+    .log())
+}
+
+/// A group whose tangent dimension fits the factor's fixed-size buffers.
+pub(crate) fn expect_group_dof(
+    factor: &'static str,
+    group: &'static str,
+    dof: usize,
+    max: usize,
+) -> FactorResult<()> {
+    if dof <= max {
+        return Ok(());
+    }
+    Err(FactorError::UnsupportedGroup {
+        factor,
+        group,
+        dof,
+        max,
+    }
+    .log())
+}
+
+/// An image of at least `2 × 2` pixels whose buffer holds `width · height`
+/// values, so bilinear interpolation always has a full neighbourhood.
+pub(crate) fn expect_image(
+    image: &'static str,
+    width: usize,
+    height: usize,
+    values: usize,
+) -> FactorResult<()> {
+    expect_at_least(image, "width", width, 2)?;
+    expect_at_least(image, "height", height, 2)?;
+    if values != width * height {
+        return Err(FactorError::DimensionMismatch {
+            factor: image,
+            what: "pixel buffer",
+            expected: width * height,
+            actual: values,
+        }
+        .log());
+    }
+    Ok(())
+}
+
+/// A finite point and a finite, positive residual sigma.
+pub(crate) fn expect_point_and_sigma(
+    factor: &'static str,
+    point: &nalgebra::Vector3<f64>,
+    sigma: f64,
+) -> FactorResult<()> {
+    expect_finite(factor, "point", point.iter())?;
+    expect_positive(factor, "sigma", sigma)?;
     Ok(())
 }
 

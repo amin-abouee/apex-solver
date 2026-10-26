@@ -34,6 +34,7 @@ use std::marker::PhantomData;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::group_point::{expect_two_states, relative_point};
 
 /// Point-to-edge (point-to-line) LOAM factor.
@@ -139,7 +140,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for LidarEdgeFactor<G> {
         (3, 2 * G::DOF)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_two_states::<G>(variables, "LidarEdgeFactor")
     }
 

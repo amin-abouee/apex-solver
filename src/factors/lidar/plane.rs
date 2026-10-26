@@ -27,10 +27,10 @@ use faer::prelude::ReborrowMut;
 use nalgebra::Vector3;
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::Factor;
+use crate::error::ErrorLogging;
 use crate::factors::common::group_point::{act_point, expect_state_and_point};
 use crate::factors::lidar::distance_field::{DistanceField, IcpFactor};
+use crate::factors::{Factor, FactorError, FactorResult};
 
 /// A plane `nᵀ·x + d = 0` with a unit normal.
 #[derive(Clone, Debug)]
@@ -46,13 +46,15 @@ impl Plane {
     ///
     /// # Errors
     ///
-    /// A near-zero or non-finite normal, as [`CoreError::InvalidInput`].
-    pub fn new(normal: Vector3<f64>, offset: f64) -> CoreResult<Self> {
+    /// A near-zero or non-finite normal.
+    pub fn new(normal: Vector3<f64>, offset: f64) -> FactorResult<Self> {
         let norm = normal.norm();
         if !(norm.is_finite() && norm > 1e-12) {
-            return Err(CoreError::InvalidInput(
-                "plane normal must be non-zero and finite".into(),
-            ));
+            return Err(FactorError::Degenerate {
+                factor: "Plane",
+                what: "normal",
+            }
+            .log());
         }
         Ok(Self {
             normal: normal / norm,
@@ -120,7 +122,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for PointToPlaneFactor<G> 
         (1, G::DOF + 3)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_state_and_point::<G>(variables, "PointToPlaneFactor")
     }
 }

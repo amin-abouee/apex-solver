@@ -39,11 +39,12 @@ use apex_manifolds::se3::SE3;
 use apex_manifolds::{LieGroup, Tangent};
 
 use super::photometric_patch::IntensityImage;
-use crate::core::CoreError;
-use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
-use crate::factors::common::validate::expect_manifolds;
+use crate::error::ErrorLogging;
+use crate::factors::common::validate::{
+    expect_at_least, expect_finite, expect_manifolds, expect_positive,
+};
+use crate::factors::{Factor, FactorError, FactorResult};
 
 /// Finite-difference step on the tangent.
 const STEP: f64 = 1e-6;
@@ -102,27 +103,25 @@ impl<G: ActsOnPoints3, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
         offsets: impl Into<Arc<[Vector2<f64>]>>,
         gain: f64,
         sigma: f64,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
         let PlanePoint { point, normal } = plane;
         let name = "PhotometricTwoViewFactor";
         let offsets = offsets.into();
-        if offsets.len() < 2 {
-            return Err(CoreError::InvalidInput(format!(
-                "{name}: need at least two patch offsets"
-            )));
+        expect_at_least(name, "patch offsets", offsets.len(), 2)?;
+        expect_finite(name, "plane point", point.iter())?;
+        expect_finite(name, "plane normal", normal.iter())?;
+        expect_finite(name, "patch offsets", offsets.iter().flat_map(|o| o.iter()))?;
+        if (normal.norm() - 1.0).abs() > 1e-6 {
+            return Err(FactorError::InvalidValue {
+                factor: name,
+                what: "plane normal length",
+                requirement: "1",
+                value: normal.norm(),
+            }
+            .log());
         }
-        let finite = point.iter().chain(normal.iter()).all(|v| v.is_finite())
-            && offsets.iter().all(|o| o.iter().all(|v| v.is_finite()));
-        if !finite || (normal.norm() - 1.0).abs() > 1e-6 {
-            return Err(CoreError::InvalidInput(format!(
-                "{name}: non-finite input or non-unit normal"
-            )));
-        }
-        if !(gain.is_finite() && gain > 0.0 && sigma.is_finite() && sigma > 0.0) {
-            return Err(CoreError::InvalidInput(format!(
-                "{name}: gain and sigma must be finite and positive"
-            )));
-        }
+        expect_positive(name, "gain", gain)?;
+        expect_positive(name, "sigma", sigma)?;
         Ok(Self {
             camera,
             current,
@@ -298,7 +297,7 @@ where
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         match self.free_reference {
             true => expect_manifolds(
                 variables,
@@ -321,6 +320,8 @@ mod tests {
     use apex_manifolds::se23::SE23;
     use nalgebra::UnitQuaternion;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     fn texture(x: f64, y: f64) -> f64 {
         128.0 + 50.0 * (40.0 * x).sin() * (35.0 * y).cos() + 30.0 * (70.0 * x + 50.0 * y).sin()
     }
@@ -330,10 +331,10 @@ mod tests {
     }
 
     /// The wall `z = 3` seen through extrinsic `t_sc` from body `body`.
-    fn render(body: &SE23, t_sc: &SE3) -> Result<Arc<IntensityImage>, CoreError> {
+    fn render(body: &SE23, t_sc: &SE3) -> Result<Arc<IntensityImage>, Box<dyn std::error::Error>> {
         let (origin, rotation) =
             PhotometricTwoViewFactor::<SE23, PinholeCamera>::camera_pose(body, t_sc)
-                .ok_or_else(|| CoreError::InvalidInput("no camera pose".to_string()))?;
+                .ok_or("no camera pose")?;
         let cam = camera();
         let image = IntensityImage::from_fn(640, 480, |x, y| {
             let Ok(ray) = cam.unproject(&Vector2::new(x as f64, y as f64)) else {
@@ -361,9 +362,11 @@ mod tests {
         )
     }
 
-    fn factor(t_sc: &SE3) -> Result<PhotometricTwoViewFactor<SE23, PinholeCamera>, CoreError> {
+    fn factor(
+        t_sc: &SE3,
+    ) -> Result<PhotometricTwoViewFactor<SE23, PinholeCamera>, Box<dyn std::error::Error>> {
         let (a, b) = (body(0.0, 0.0), body(0.12, 0.05));
-        PhotometricTwoViewFactor::new(
+        Ok(PhotometricTwoViewFactor::new(
             camera(),
             render(&b, t_sc)?,
             ReferenceView {
@@ -377,7 +380,7 @@ mod tests {
             PhotometricTwoViewFactor::<SE23, PinholeCamera>::offsets_square(8),
             1.0,
             10.0,
-        )
+        )?)
     }
 
     fn cost(f: &PhotometricTwoViewFactor<SE23, PinholeCamera>, body: &SE23, t_sc: &SE3) -> f64 {
@@ -394,7 +397,7 @@ mod tests {
     /// the true pose; moving the body breaks that, and the Jacobian matches
     /// a coarser finite difference of the residual.
     #[test]
-    fn two_views_agree_at_the_truth() -> Result<(), CoreError> {
+    fn two_views_agree_at_the_truth() -> TestResult {
         let t_sc = extrinsic();
         let f = factor(&t_sc)?;
         let truth = body(0.12, 0.05);
@@ -466,7 +469,7 @@ mod tests {
     /// A common extrinsic error is mostly invisible between two nearby views
     /// — the reason the extrinsic must enter both.
     #[test]
-    fn a_shared_extrinsic_error_largely_cancels() -> Result<(), CoreError> {
+    fn a_shared_extrinsic_error_largely_cancels() -> TestResult {
         let t_sc = extrinsic();
         let f = factor(&t_sc)?;
         let truth = body(0.12, 0.05);
@@ -490,7 +493,7 @@ mod tests {
     /// extrinsic: zero residual at the truth, and a nudged reference shows in
     /// the residual and in its own Jacobian columns.
     #[test]
-    fn a_free_reference_is_a_third_block() -> Result<(), CoreError> {
+    fn a_free_reference_is_a_third_block() -> TestResult {
         let t_sc = extrinsic();
         let f = factor(&t_sc)?.with_free_reference();
         let (reference, current) = (body(0.0, 0.0), body(0.12, 0.05));
@@ -542,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn construction_rejects_bad_input() -> Result<(), CoreError> {
+    fn construction_rejects_bad_input() -> TestResult {
         let t_sc = extrinsic();
         let image = render(&body(0.0, 0.0), &t_sc)?;
         let make = |normal: Vector3<f64>, gain: f64| {

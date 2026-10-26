@@ -1090,8 +1090,8 @@ mod tests {
         let x2 = problem.add_variable(manifold::ManifoldType::RN, dvector![1.0]);
 
         // Add custom factors (demonstrates extensibility!)
-        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None)?;
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None)?;
 
         // Configure Gauss-Newton optimizer
         let config = GaussNewtonConfig::new()
@@ -1161,20 +1161,20 @@ mod tests {
         }
     }
 
-    fn rosenbrock_problem() -> problem::Problem {
+    fn rosenbrock_problem() -> Result<problem::Problem, Box<dyn std::error::Error>> {
         let mut prob = problem::Problem::new(JacobianMode::Sparse);
         let x1 = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![-1.2]);
         let x2 = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![1.0]);
-        prob.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
-        prob.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
-        prob
+        prob.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None)?;
+        prob.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None)?;
+        Ok(prob)
     }
 
-    fn linear_problem(start: f64) -> problem::Problem {
+    fn linear_problem(start: f64) -> Result<problem::Problem, Box<dyn std::error::Error>> {
         let mut prob = problem::Problem::new(JacobianMode::Sparse);
         let x = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![start]);
-        prob.add_residual_block(&[x], Box::new(LinearFactor { target: 0.0 }), None);
-        prob
+        prob.add_residual_block(&[x], Box::new(LinearFactor { target: 0.0 }), None)?;
+        Ok(prob)
     }
 
     // -------------------------------------------------------------------------
@@ -1218,11 +1218,11 @@ mod tests {
             let mut prob = problem::Problem::new(JacobianMode::Sparse);
             let x = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
             let y = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
-            prob.add_residual_block(&[x, y], Box::new(SumFactor), None);
-            prob
+            prob.add_residual_block(&[x, y], Box::new(SumFactor), None)?;
+            Ok::<_, crate::core::CoreError>(prob)
         };
 
-        let mut regularized_problem = build();
+        let mut regularized_problem = build()?;
         let regularized = GaussNewton::with_config(
             GaussNewtonConfig::new()
                 .with_max_iterations(20)
@@ -1236,7 +1236,7 @@ mod tests {
             regularized.final_cost
         );
 
-        let mut unregularized_problem = build();
+        let mut unregularized_problem = build()?;
         let unregularized = GaussNewton::with_config(
             GaussNewtonConfig::new()
                 .with_max_iterations(20)
@@ -1254,7 +1254,7 @@ mod tests {
     /// `max_condition_number` detects a variable no residual constrains.
     #[test]
     fn gauss_newton_max_condition_number_detects_an_unconstrained_variable() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let _orphan = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
 
         let result = GaussNewton::with_config(
@@ -1328,7 +1328,7 @@ mod tests {
 
     #[test]
     fn test_gn_max_iterations_termination() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = GaussNewtonConfig::new().with_max_iterations(2);
         let mut solver = GaussNewton::with_config(cfg);
         let result = solver.optimize(&mut problem)?;
@@ -1341,7 +1341,7 @@ mod tests {
 
     #[test]
     fn test_gn_gradient_tolerance_convergence() -> TestResult {
-        let mut problem = linear_problem(1.0);
+        let mut problem = linear_problem(1.0)?;
         let cfg = GaussNewtonConfig::new()
             .with_gradient_tolerance(1e3)
             .with_cost_tolerance(1e-20)
@@ -1357,7 +1357,7 @@ mod tests {
 
     #[test]
     fn test_gn_cost_tolerance_convergence() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = GaussNewtonConfig::new()
             .with_cost_tolerance(1e2) // very loose
             .with_gradient_tolerance(1e-20)
@@ -1377,7 +1377,7 @@ mod tests {
     #[test]
     fn test_gn_qr_solver() -> TestResult {
         use crate::linalg::LinearSolverType;
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = GaussNewtonConfig::new()
             .with_linear_solver_type(LinearSolverType::SparseQR)
             .with_max_iterations(100);
@@ -1389,7 +1389,7 @@ mod tests {
 
     #[test]
     fn test_gn_jacobi_scaling_enabled() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = GaussNewtonConfig::new()
             .with_jacobi_scaling(true)
             .with_max_iterations(100);
@@ -1401,7 +1401,7 @@ mod tests {
 
     #[test]
     fn test_gn_min_cost_threshold() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = GaussNewtonConfig::new()
             .with_min_cost_threshold(1e10)
             .with_cost_tolerance(1e-20)
@@ -1418,7 +1418,7 @@ mod tests {
 
     #[test]
     fn test_gn_result_fields() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let mut solver = optimizer::GaussNewton::new();
         let result = solver.optimize(&mut problem)?;
         assert!(result.initial_cost > result.final_cost);
@@ -1428,7 +1428,7 @@ mod tests {
 
     #[test]
     fn test_gn_convergence_info_populated() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let mut solver = optimizer::GaussNewton::new();
         let result = solver.optimize(&mut problem)?;
         assert!(result.convergence_info.is_some());

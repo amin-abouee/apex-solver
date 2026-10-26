@@ -45,6 +45,9 @@
 //! This information is used by the optimizer to compute parameter updates via Newton-type methods.
 
 use crate::core::variable::ManifoldVariable;
+use crate::factors::imu::PreintegrationError;
+use apex_camera_models::CameraModelError;
+use apex_manifolds::ManifoldError;
 use thiserror::Error;
 
 pub mod aggregate;
@@ -111,28 +114,131 @@ pub mod camera {
     pub use apex_camera_models::*;
 }
 
-/// Factor-specific error types for apex-solver
+/// Errors of factor construction and registration.
+///
+/// Constructors reject bad measurements and parameters; registration
+/// ([`Factor::validate_variables`]) rejects variables of the wrong number,
+/// size or manifold. Both are logged once where they are built.
+/// [`Factor::linearize`] stays infallible and never produces these.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum FactorError {
-    /// Invalid dimension mismatch between expected and actual
-    #[error("Invalid dimension: expected {expected}, got {actual}")]
-    InvalidDimension { expected: usize, actual: usize },
+    /// Registered with the wrong number of variables.
+    #[error("{factor} expects {expected} variables, got {actual}")]
+    VariableCount {
+        factor: &'static str,
+        expected: usize,
+        actual: usize,
+    },
 
-    /// Invalid projection (point behind camera or outside valid range)
-    #[error("Invalid projection: {0}")]
-    InvalidProjection(String),
+    /// A variable whose parameter block has the wrong length.
+    #[error("{factor} block {block} has {actual} parameters, expected {expected}")]
+    VariableSize {
+        factor: &'static str,
+        block: usize,
+        expected: usize,
+        actual: usize,
+    },
 
-    /// Jacobian computation failed
-    #[error("Jacobian computation failed: {0}")]
-    JacobianFailed(String),
+    /// A variable whose tangent space has the wrong dimension.
+    #[error("{factor} block {block} has {actual} degrees of freedom, expected {expected}")]
+    VariableDof {
+        factor: &'static str,
+        block: usize,
+        expected: usize,
+        actual: usize,
+    },
 
-    /// Invalid parameter values
-    #[error("Invalid parameter values: {0}")]
-    InvalidParameters(String),
+    /// A variable on the wrong manifold.
+    #[error("{factor} block {block} is {actual}, expected {expected}")]
+    VariableManifold {
+        factor: &'static str,
+        block: usize,
+        expected: &'static str,
+        actual: &'static str,
+    },
 
-    /// Numerical instability detected
-    #[error("Numerical instability: {0}")]
-    NumericalInstability(String),
+    /// A measurement or parameter of the wrong length.
+    #[error("{factor}: {what} has {actual} entries, expected {expected}")]
+    DimensionMismatch {
+        factor: &'static str,
+        what: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+
+    /// Fewer items than the factor needs.
+    #[error("{factor}: {what} has {actual}, at least {min} needed")]
+    TooFew {
+        factor: &'static str,
+        what: &'static str,
+        min: usize,
+        actual: usize,
+    },
+
+    /// An index past the end of what it indexes.
+    #[error("{factor}: {what} {index} is out of range for {len}")]
+    IndexOutOfRange {
+        factor: &'static str,
+        what: &'static str,
+        index: usize,
+        len: usize,
+    },
+
+    /// A measurement or parameter with a NaN or infinite entry.
+    #[error("{factor}: {what} is not finite")]
+    NonFinite {
+        factor: &'static str,
+        what: &'static str,
+    },
+
+    /// A scalar outside its admissible range.
+    #[error("{factor}: {what} must be {requirement}, got {value}")]
+    InvalidValue {
+        factor: &'static str,
+        what: &'static str,
+        requirement: &'static str,
+        value: f64,
+    },
+
+    /// A direction, normal or weighting with no usable magnitude.
+    ///
+    /// Logged where it is built, except for the per-point weightings of scan
+    /// factors (`with_uncertainty`, `with_occupancy_weighting`), where it is
+    /// an expected outcome the caller handles by dropping the point.
+    #[error("{factor}: {what} is degenerate")]
+    Degenerate {
+        factor: &'static str,
+        what: &'static str,
+    },
+
+    /// A predicted point outside the distance field it is weighted against.
+    ///
+    /// An expected per-point outcome when building scan factors: it is not
+    /// logged where it is built, the caller drops the point.
+    #[error("{factor}: the predicted point lies outside the field")]
+    OutsideField { factor: &'static str },
+
+    /// A group with more degrees of freedom than the factor supports.
+    #[error("{factor}: {group} has {dof} degrees of freedom, at most {max} are supported")]
+    UnsupportedGroup {
+        factor: &'static str,
+        group: &'static str,
+        dof: usize,
+        max: usize,
+    },
+
+    /// A camera model that rejected the factor's input.
+    #[error("camera model rejected the factor input")]
+    Camera(#[from] CameraModelError),
+
+    /// A measurement that is not a valid element of its manifold.
+    #[error("invalid manifold measurement")]
+    Manifold(#[from] ManifoldError),
+
+    /// A preintegration that could not be built over its interval.
+    #[error("IMU preintegration failed")]
+    Preintegration(#[from] PreintegrationError),
 }
 
 /// Result type for factor operations
@@ -213,7 +319,7 @@ pub trait Factor: Send + Sync {
     /// Pairing an internally-whitened factor with a non-null noise model
     /// whitens twice and silently over-weights the block; the two conventions
     /// are indistinguishable by inspecting a residual. Overriding this lets
-    /// [`Problem::try_add_residual_block_with_noise`](crate::core::problem::Problem::try_add_residual_block_with_noise)
+    /// [`Problem::add_residual_block_with_noise`](crate::core::problem::Problem::add_residual_block_with_noise)
     /// reject the mistake at registration instead.
     fn whitens_internally(&self) -> bool {
         false
@@ -221,12 +327,12 @@ pub trait Factor: Send + Sync {
 
     /// Validate this factor against the variables it is being registered with.
     ///
-    /// Called once by [`Problem::try_add_residual_block`](crate::core::problem::Problem::try_add_residual_block)
+    /// Called once by [`Problem::add_residual_block`](crate::core::problem::Problem::add_residual_block)
     /// before the block is stored, so mismatched variable shapes surface as a
     /// typed registration error instead of a mid-evaluation panic inside the
     /// parallel assembly. `variables` is parallel to the `variable_keys`
     /// passed to registration.
-    fn validate_variables(&self, _variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, _variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         Ok(())
     }
 
@@ -470,7 +576,6 @@ pub(crate) fn assert_normal_equations_match(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ErrorLogging;
     use faer::prelude::ReborrowMut;
     use nalgebra::dvector;
 
@@ -528,61 +633,54 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // FactorError Display — one per variant
+    // FactorError Display
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_factor_error_invalid_dimension_display() {
-        let e = FactorError::InvalidDimension {
-            expected: 3,
+    fn factor_errors_name_the_factor_and_values() {
+        let count = FactorError::VariableCount {
+            factor: "BetweenFactor",
+            expected: 2,
+            actual: 3,
+        };
+        assert_eq!(
+            count.to_string(),
+            "BetweenFactor expects 2 variables, got 3"
+        );
+        let size = FactorError::VariableSize {
+            factor: "GpsFactor",
+            block: 1,
+            expected: 9,
             actual: 6,
         };
-        let s = e.to_string();
-        assert!(s.contains("3"), "{s}");
-        assert!(s.contains("6"), "{s}");
+        assert_eq!(
+            size.to_string(),
+            "GpsFactor block 1 has 6 parameters, expected 9"
+        );
+        let value = FactorError::InvalidValue {
+            factor: "PlaneFactor",
+            what: "sigma",
+            requirement: "finite and positive",
+            value: 0.0,
+        };
+        assert_eq!(
+            value.to_string(),
+            "PlaneFactor: sigma must be finite and positive, got 0"
+        );
     }
 
     #[test]
-    fn test_factor_error_invalid_projection_display() {
-        let e = FactorError::InvalidProjection("behind camera".into());
-        assert!(e.to_string().contains("behind camera"));
-    }
-
-    #[test]
-    fn test_factor_error_jacobian_failed_display() {
-        let e = FactorError::JacobianFailed("singular".into());
-        assert!(e.to_string().contains("singular"));
-    }
-
-    #[test]
-    fn test_factor_error_invalid_parameters_display() {
-        let e = FactorError::InvalidParameters("nan detected".into());
-        assert!(e.to_string().contains("nan detected"));
-    }
-
-    #[test]
-    fn test_factor_error_numerical_instability_display() {
-        let e = FactorError::NumericalInstability("overflow".into());
-        assert!(e.to_string().contains("overflow"));
-    }
-
-    // -------------------------------------------------------------------------
-    // log() / log_with_source() return self
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_factor_error_log_returns_self() {
-        let e = FactorError::JacobianFailed("test_log".into());
-        let returned = e.log();
-        assert!(returned.to_string().contains("test_log"));
-    }
-
-    #[test]
-    fn test_factor_error_log_with_source_returns_self() {
-        let e = FactorError::InvalidProjection("proj_log".into());
-        let source = std::io::Error::other("src");
-        let returned = e.log_with_source(source);
-        assert!(returned.to_string().contains("proj_log"));
+    fn a_camera_error_keeps_its_leaf_as_the_source() {
+        use crate::error::ErrorChainExt;
+        use apex_camera_models::ParamError;
+        let error = FactorError::from(CameraModelError::from(ParamError::FocalLengthNotPositive {
+            fx: 0.0,
+            fy: 1.0,
+        }));
+        assert_eq!(
+            error.chain_compact(),
+            "camera model rejected the factor input → focal length must be positive: fx=0, fy=1"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -656,7 +754,10 @@ mod tests {
 
     #[test]
     fn test_factor_result_err() {
-        let r: FactorResult<f64> = Err(FactorError::InvalidParameters("bad".into()));
+        let r: FactorResult<f64> = Err(FactorError::Degenerate {
+            factor: "test",
+            what: "input",
+        });
         assert!(r.is_err());
     }
 }

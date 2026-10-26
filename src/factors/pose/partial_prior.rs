@@ -12,6 +12,7 @@ use nalgebra::Vector3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 
 /// Rotation-only prior on an SE3 pose.
 ///
@@ -69,11 +70,12 @@ impl Factor for PoseRotationPrior {
         (3, 6)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 1 || variables[0].as_param_slice().len() != SE3::REP_SIZE {
-            return Err("PoseRotationPrior expects a single SE3 pose variable".into());
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE],
+            "PoseRotationPrior",
+        )
     }
 }
 
@@ -131,11 +133,12 @@ impl Factor for PoseTranslationPrior {
         (3, 6)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 1 || variables[0].as_param_slice().len() != SE3::REP_SIZE {
-            return Err("PoseTranslationPrior expects a single SE3 pose variable".into());
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE],
+            "PoseTranslationPrior",
+        )
     }
 }
 

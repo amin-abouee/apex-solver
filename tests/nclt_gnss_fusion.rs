@@ -138,7 +138,7 @@ fn nclt_odometry_and_gnss_fusion_removes_drift() -> TestResult {
             Box::new(BetweenFactor::new(delta.clone())),
             None,
             odometry_noise.clone(),
-        );
+        )?;
     }
 
     // GNSS: unbiased but noisy. The z term is slack because the altitude here
@@ -151,7 +151,7 @@ fn nclt_odometry_and_gnss_fusion_removes_drift() -> TestResult {
                 Box::new(PoseTranslationPrior::new(*position)),
                 None,
                 gnss_noise.clone(),
-            );
+            )?;
         }
     }
 
@@ -162,7 +162,7 @@ fn nclt_odometry_and_gnss_fusion_removes_drift() -> TestResult {
         Box::new(PriorFactor::new(dead_reckoned[0].clone())),
         None,
         NoiseModel::from_sigmas(&[0.1, 0.1, 0.1, 0.01, 0.01, 0.01])?,
-    );
+    )?;
 
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(50)

@@ -412,7 +412,7 @@ impl Marginalizer {
         for key in marginalized {
             problem.try_remove_variable(*key)?;
         }
-        let prior_key = problem.try_add_residual_block(&keys, Box::new(prior), None)?;
+        let prior_key = problem.add_residual_block(&keys, Box::new(prior), None)?;
 
         Ok(AppliedMarginal {
             prior: prior_key,
@@ -753,6 +753,7 @@ pub type MarginalizationResult<T> = Result<T, MarginalizationError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::CoreResult;
     use crate::core::noise::NoiseModel;
     use crate::factors::Factor;
     use crate::factors::pose::{BetweenFactor, EuclideanPriorFactor};
@@ -779,7 +780,7 @@ mod tests {
     /// A three-node chain of `Rn(2)` variables. Everything is linear, so the
     /// marginal is *exact* and equivalence can be asserted to solver tolerance
     /// rather than to a fudge factor.
-    fn linear_chain(start: [f64; 3]) -> (Problem, Vec<VarKey>, Vec<FactorKey>) {
+    fn linear_chain(start: [f64; 3]) -> CoreResult<(Problem, Vec<VarKey>, Vec<FactorKey>)> {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let keys: Vec<VarKey> = start
             .iter()
@@ -790,17 +791,17 @@ mod tests {
             &[keys[0]],
             Box::new(EuclideanPriorFactor::new(rn(&[0.0, 0.0]))),
             None,
-            NoiseModel::from_sigmas(&[0.1, 0.1]).unwrap_or_else(|e| panic!("{e}")),
-        )];
+            NoiseModel::from_sigmas(&[0.1, 0.1])?,
+        )?];
         for pair in keys.windows(2) {
             blocks.push(problem.add_residual_block_with_noise(
                 &[pair[0], pair[1]],
                 Box::new(BetweenFactor::new(Rn::from_vec(vec![1.0, 0.0]))),
                 None,
-                NoiseModel::from_sigmas(&[0.05, 0.05]).unwrap_or_else(|e| panic!("{e}")),
-            ));
+                NoiseModel::from_sigmas(&[0.05, 0.05])?,
+            )?);
         }
-        (problem, keys, blocks)
+        Ok((problem, keys, blocks))
     }
 
     fn value(problem: &Problem, key: VarKey) -> Vec<f64> {
@@ -809,7 +810,7 @@ mod tests {
 
     #[test]
     fn absorbed_blocks_are_exactly_the_incident_ones() -> TestResult {
-        let (problem, keys, _blocks) = linear_chain([0.0, 1.0, 2.0]);
+        let (problem, keys, _blocks) = linear_chain([0.0, 1.0, 2.0])?;
         let marginal = Marginalizer::new().compute(&problem, &[keys[0]])?;
         // The prior on x0 and the x0-x1 edge; the x1-x2 edge stays.
         assert_eq!(marginal.absorbed.len(), 2);
@@ -820,7 +821,7 @@ mod tests {
 
     #[test]
     fn sqrt_information_squares_back_to_lambda() -> TestResult {
-        let (problem, keys, _blocks) = linear_chain([0.3, 1.4, 2.1]);
+        let (problem, keys, _blocks) = linear_chain([0.3, 1.4, 2.1])?;
         let marginal = Marginalizer::new().compute(&problem, &[keys[0]])?;
         let reconstructed = marginal.sqrt_information.transpose() * &marginal.sqrt_information;
         let error = (&reconstructed - &marginal.information).norm();
@@ -834,7 +835,7 @@ mod tests {
     #[test]
     fn offset_sign_reproduces_the_conditional_minimizer() -> TestResult {
         // Linearized away from the optimum, so b is large.
-        let (problem, keys, _blocks) = linear_chain([2.0, 5.0, 9.0]);
+        let (problem, keys, _blocks) = linear_chain([2.0, 5.0, 9.0])?;
         let marginal = Marginalizer::new().compute(&problem, &[keys[0]])?;
 
         assert!(
@@ -868,7 +869,7 @@ mod tests {
     /// the current ones and only the bookkeeping is under test.
     #[test]
     fn a_frozen_kept_variable_keeps_its_first_estimate() -> TestResult {
-        let (mut problem, keys, _blocks) = linear_chain([2.0, 5.0, 9.0]);
+        let (mut problem, keys, _blocks) = linear_chain([2.0, 5.0, 9.0])?;
         let first_estimate = [4.2, 0.3];
         problem.set_linearization_point(keys[1], &first_estimate)?;
         problem.set_jacobian_evaluation(JacobianEvaluation::FirstEstimate);
@@ -893,12 +894,12 @@ mod tests {
     /// solution. Exact, because the model is linear.
     #[test]
     fn marginalization_reproduces_the_full_solution() -> TestResult {
-        let (mut full, keys, _blocks) = linear_chain([2.0, 5.0, 9.0]);
+        let (mut full, keys, _blocks) = linear_chain([2.0, 5.0, 9.0])?;
         let expected = solver().optimize(&mut full)?;
         let x1_full = expected.parameters[keys[1]].as_param_slice()[0];
         let x2_full = expected.parameters[keys[2]].as_param_slice()[0];
 
-        let (mut reduced, keys, _blocks) = linear_chain([2.0, 5.0, 9.0]);
+        let (mut reduced, keys, _blocks) = linear_chain([2.0, 5.0, 9.0])?;
         let applied = Marginalizer::new().apply(&mut reduced, &[keys[0]])?;
         assert_eq!(applied.removed_blocks, 2);
         assert_eq!(reduced.num_variables(), 2, "x0 should be gone");
@@ -923,11 +924,11 @@ mod tests {
     /// of the boxed prior.
     #[test]
     fn the_typed_prior_matches_the_boxed_prior_and_the_full_solution() -> TestResult {
-        let (mut full, keys, _blocks) = linear_chain([2.0, 5.0, 9.0]);
+        let (mut full, keys, _blocks) = linear_chain([2.0, 5.0, 9.0])?;
         let expected = solver().optimize(&mut full)?;
         let x1_full = expected.parameters[keys[1]].as_param_slice()[0];
 
-        let (mut reduced, keys, _blocks) = linear_chain([2.0, 5.0, 9.0]);
+        let (mut reduced, keys, _blocks) = linear_chain([2.0, 5.0, 9.0])?;
         let marginal = Marginalizer::new().compute(&reduced, &[keys[0]])?;
         let (_, boxed) = marginal.to_factor()?;
         let (kept, typed) = marginal.to_typed_factor::<Rn>()?;
@@ -962,7 +963,7 @@ mod tests {
         let removed = marginal.absorbed.clone();
         reduced.remove_residual_blocks(&removed);
         reduced.try_remove_variable(keys[0])?;
-        reduced.try_add_residual_block(&kept, Box::new(typed), None)?;
+        reduced.add_residual_block(&kept, Box::new(typed), None)?;
         reduced.set_variable_params(keys[1], &[-4.0, 0.0])?;
         reduced.set_variable_params(keys[2], &[7.5, 0.0])?;
         let got = solver().optimize(&mut reduced)?;
@@ -973,7 +974,7 @@ mod tests {
 
     #[test]
     fn a_typed_prior_for_the_wrong_group_is_rejected() -> TestResult {
-        let (problem, keys, _blocks) = linear_chain([0.0, 1.0, 2.0]);
+        let (problem, keys, _blocks) = linear_chain([0.0, 1.0, 2.0])?;
         let marginal = Marginalizer::new().compute(&problem, &[keys[0]])?;
         assert!(
             marginal
@@ -1005,7 +1006,7 @@ mod tests {
                 Box::new(BetweenFactor::new(Rn::from_vec(vec![1.0, 0.0]))),
                 None,
                 NoiseModel::from_sigmas(&[0.05, 0.05]).unwrap_or_else(|e| panic!("{e}")),
-            );
+            )?;
         }
 
         let marginal = Marginalizer::new().compute(&problem, &[keys[0]])?;
@@ -1045,17 +1046,18 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_request_is_rejected() {
-        let (problem, _keys, _blocks) = linear_chain([0.0, 1.0, 2.0]);
+    fn an_empty_request_is_rejected() -> TestResult {
+        let (problem, _keys, _blocks) = linear_chain([0.0, 1.0, 2.0])?;
         let Err(MarginalizationError::EmptyRequest) = Marginalizer::new().compute(&problem, &[])
         else {
             panic!("expected EmptyRequest");
         };
+        Ok(())
     }
 
     #[test]
-    fn an_unobserved_variable_is_named() {
-        let (mut problem, _keys, _blocks) = linear_chain([0.0, 1.0, 2.0]);
+    fn an_unobserved_variable_is_named() -> TestResult {
+        let (mut problem, _keys, _blocks) = linear_chain([0.0, 1.0, 2.0])?;
         let lonely = problem.add_variable(ManifoldType::RN, rn(&[9.0, 9.0]));
         let Err(MarginalizationError::Unobserved(key)) =
             Marginalizer::new().compute(&problem, &[lonely])
@@ -1063,17 +1065,19 @@ mod tests {
             panic!("expected Unobserved");
         };
         assert_eq!(key, lonely);
+        Ok(())
     }
 
     /// Marginalizing everything the absorbed factors touch leaves nothing to
     /// summarize, and that is an error rather than an empty prior.
     #[test]
-    fn marginalizing_the_whole_blanket_is_rejected() {
-        let (problem, keys, _blocks) = linear_chain([0.0, 1.0, 2.0]);
+    fn marginalizing_the_whole_blanket_is_rejected() -> TestResult {
+        let (problem, keys, _blocks) = linear_chain([0.0, 1.0, 2.0])?;
         let Err(MarginalizationError::NoKeptVariables(_)) =
             Marginalizer::new().compute(&problem, &keys)
         else {
             panic!("expected NoKeptVariables");
         };
+        Ok(())
     }
 }

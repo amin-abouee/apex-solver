@@ -41,6 +41,7 @@ use apex_manifolds::se3::SE3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::group_point::into_anchor;
 use crate::factors::common::math::tangent_basis;
 
@@ -166,16 +167,8 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for BearingFactor<G> {
         (2, G::DOF + 3)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        let message = "BearingFactor expects [state, 3D point]";
-        match variables {
-            [state, point]
-                if state.manifold_type_name() == G::NAME && point.as_param_slice().len() == 3 =>
-            {
-                Ok(())
-            }
-            _ => Err(format!("{message} for {}", G::NAME)),
-        }
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::group_point::expect_state_and_point::<G>(variables, "BearingFactor")
     }
 
     /// This factor whitens with the 2×2 sqrt-information supplied at construction,

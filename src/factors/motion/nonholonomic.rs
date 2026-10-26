@@ -7,6 +7,7 @@ use faer::prelude::ReborrowMut;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::math::skew;
 
 /// A wheeled vehicle does not slide sideways or leave the ground: in the body
@@ -84,10 +85,11 @@ impl<G: HasVelocity + Send + Sync + 'static> Factor for NonholonomicFactor<G> {
         (2, G::DOF)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        match variables {
-            [state] if state.manifold_type_name() == G::NAME => Ok(()),
-            _ => Err(format!("NonholonomicFactor expects [{} state]", G::NAME)),
-        }
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_manifolds(
+            variables,
+            &[G::NAME],
+            "NonholonomicFactor",
+        )
     }
 }

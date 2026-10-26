@@ -1756,8 +1756,8 @@ mod tests {
         let x2 = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![1.0]);
 
         // Add custom factors (demonstrates extensibility!)
-        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None)?;
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None)?;
 
         // Configure Dog Leg optimizer with appropriate trust region
         let config = DogLegConfig::new()
@@ -1828,13 +1828,13 @@ mod tests {
         }
     }
 
-    fn rosenbrock_problem() -> problem::Problem {
+    fn rosenbrock_problem() -> Result<problem::Problem, Box<dyn std::error::Error>> {
         let mut prob = problem::Problem::new(JacobianMode::Sparse);
         let x1 = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![-1.2]);
         let x2 = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![1.0]);
-        prob.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
-        prob.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
-        prob
+        prob.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None)?;
+        prob.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None)?;
+        Ok(prob)
     }
 
     // -------------------------------------------------------------------------
@@ -1844,7 +1844,7 @@ mod tests {
     /// `min_relative_decrease` replaces the hardcoded `rho > 1e-4` gate.
     #[test]
     fn dogleg_min_relative_decrease_gates_acceptance() -> TestResult {
-        let mut permissive_problem = rosenbrock_problem();
+        let mut permissive_problem = rosenbrock_problem()?;
         let permissive = DogLeg::with_config(
             DogLegConfig::new()
                 .with_max_iterations(100)
@@ -1852,7 +1852,7 @@ mod tests {
         )
         .optimize(&mut permissive_problem)?;
 
-        let mut strict_problem = rosenbrock_problem();
+        let mut strict_problem = rosenbrock_problem()?;
         let strict = DogLeg::with_config(
             DogLegConfig::new()
                 .with_max_iterations(100)
@@ -1880,7 +1880,7 @@ mod tests {
     #[test]
     fn dogleg_trust_region_increase_factor_is_read() -> TestResult {
         let run = |factor: f64| -> Result<usize, Box<dyn std::error::Error>> {
-            let mut problem = rosenbrock_problem();
+            let mut problem = rosenbrock_problem()?;
             let result = DogLeg::with_config(
                 DogLegConfig::new()
                     .with_max_iterations(200)
@@ -1907,9 +1907,9 @@ mod tests {
     fn dogleg_repeated_optimize_calls_are_reproducible() -> TestResult {
         let mut solver = DogLeg::with_config(DogLegConfig::new().with_max_iterations(100));
 
-        let mut first_problem = rosenbrock_problem();
+        let mut first_problem = rosenbrock_problem()?;
         let first = solver.optimize(&mut first_problem)?;
-        let mut second_problem = rosenbrock_problem();
+        let mut second_problem = rosenbrock_problem()?;
         let second = solver.optimize(&mut second_problem)?;
 
         assert_eq!(
@@ -1929,7 +1929,7 @@ mod tests {
     /// `max_condition_number` detects a variable no residual constrains.
     #[test]
     fn dogleg_max_condition_number_detects_an_unconstrained_variable() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let _orphan = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
 
         let result = DogLeg::with_config(
@@ -1946,11 +1946,11 @@ mod tests {
         Ok(())
     }
 
-    fn linear_problem(start: f64) -> problem::Problem {
+    fn linear_problem(start: f64) -> Result<problem::Problem, Box<dyn std::error::Error>> {
         let mut prob = problem::Problem::new(JacobianMode::Sparse);
         let x = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![start]);
-        prob.add_residual_block(&[x], Box::new(LinearFactor { target: 0.0 }), None);
-        prob
+        prob.add_residual_block(&[x], Box::new(LinearFactor { target: 0.0 }), None)?;
+        Ok(prob)
     }
 
     // -------------------------------------------------------------------------
@@ -2023,7 +2023,7 @@ mod tests {
 
     #[test]
     fn test_dl_max_iterations_termination() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = DogLegConfig::new().with_max_iterations(2);
         let mut solver = DogLeg::with_config(cfg);
         let result = solver.optimize(&mut problem)?;
@@ -2037,7 +2037,7 @@ mod tests {
 
     #[test]
     fn test_dl_gradient_tolerance_convergence() -> TestResult {
-        let mut problem = linear_problem(1.0);
+        let mut problem = linear_problem(1.0)?;
         let cfg = DogLegConfig::new()
             .with_gradient_tolerance(1e3)
             .with_cost_tolerance(1e-20)
@@ -2053,7 +2053,7 @@ mod tests {
 
     #[test]
     fn test_dl_cost_tolerance_convergence() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = DogLegConfig::new()
             .with_cost_tolerance(1e2) // very loose
             .with_gradient_tolerance(1e-20)
@@ -2073,7 +2073,7 @@ mod tests {
     #[test]
     fn test_dl_qr_solver() -> TestResult {
         use crate::linalg::LinearSolverType;
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = DogLegConfig::new()
             .with_linear_solver_type(LinearSolverType::SparseQR)
             .with_max_iterations(100);
@@ -2086,7 +2086,7 @@ mod tests {
     #[test]
     fn test_dl_jacobi_scaling_disabled() -> TestResult {
         // DogLeg has Jacobi scaling ON by default; test with it explicitly disabled
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = DogLegConfig::new()
             .with_jacobi_scaling(false)
             .with_max_iterations(100);
@@ -2139,7 +2139,7 @@ mod tests {
         let mut problem = problem::Problem::new(JacobianMode::Sparse);
         let x1 = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
         let x2 = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
-        problem.add_residual_block(&[x1, x2], Box::new(IllScaledFactor { a: 100.0 }), None);
+        problem.add_residual_block(&[x1, x2], Box::new(IllScaledFactor { a: 100.0 }), None)?;
 
         let mut state = crate::optimizer::initialize_optimization_state(&mut problem)?;
         let (residuals, jacobian) = SparseMode::assemble(
@@ -2204,7 +2204,7 @@ mod tests {
 
     #[test]
     fn test_dl_min_cost_threshold() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = DogLegConfig::new()
             .with_min_cost_threshold(1e10)
             .with_cost_tolerance(1e-20)
@@ -2221,7 +2221,7 @@ mod tests {
 
     #[test]
     fn test_dl_trust_region_radius_in_config() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = DogLegConfig::new()
             .with_trust_region_radius(0.1) // small initial radius
             .with_max_iterations(200);
@@ -2233,7 +2233,7 @@ mod tests {
 
     #[test]
     fn test_dl_step_reuse_config() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = DogLegConfig::new()
             .with_step_reuse(true)
             .with_max_iterations(100);
@@ -2265,7 +2265,7 @@ mod tests {
 
     #[test]
     fn test_dl_result_fields() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let mut solver = DogLeg::new();
         let result = solver.optimize(&mut problem)?;
         assert!(result.initial_cost > result.final_cost);

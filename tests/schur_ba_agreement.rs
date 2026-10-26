@@ -96,10 +96,10 @@ fn build_mini_ba() -> Result<(Problem, usize), Box<dyn std::error::Error>> {
             &[pose_keys[o.camera_index], pt_map[&o.point_index]],
             Box::new(factor),
             None,
-        );
+        )?;
     }
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
     Ok((problem, obs.len()))
 }

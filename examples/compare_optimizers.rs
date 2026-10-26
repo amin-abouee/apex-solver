@@ -123,13 +123,13 @@ fn build_se3_problem(
             &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
-        );
+        )?;
     }
 
     for edge in &graph.edges_se3 {
         let factor = BetweenFactor::new(edge.measurement.clone());
         if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
-            problem.add_residual_block(&[k0, k1], Box::new(factor), None);
+            problem.add_residual_block(&[k0, k1], Box::new(factor), None)?;
         }
     }
 
@@ -164,13 +164,13 @@ fn build_se2_problem(
             &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
-        );
+        )?;
     }
 
     for edge in &graph.edges_se2 {
         let factor = BetweenFactor::new(edge.measurement.clone());
         if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
-            problem.add_residual_block(&[k0, k1], Box::new(factor), None);
+            problem.add_residual_block(&[k0, k1], Box::new(factor), None)?;
         }
     }
 

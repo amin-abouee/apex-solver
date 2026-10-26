@@ -1,5 +1,6 @@
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::validate::expect_uniform_blocks;
 use apex_manifolds::{LieGroup, Tangent};
 use faer::prelude::ReborrowMut;
@@ -283,7 +284,7 @@ where
         (dof, 2 * dof)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         // Both variables must be the same group as the measurement — the
         // parameter length is what distinguishes e.g. SE3 (7) from SE23 (10).
         let size = self.relative_pose.as_param_slice().len();

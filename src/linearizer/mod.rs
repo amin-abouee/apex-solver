@@ -568,11 +568,11 @@ mod tests {
         }
     }
 
-    fn one_var_problem() -> (Problem, VarKey) {
+    fn one_var_problem() -> Result<(Problem, VarKey), Box<dyn std::error::Error>> {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
-        (problem, k)
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
+        Ok((problem, k))
     }
 
     #[allow(clippy::type_complexity)]
@@ -606,7 +606,7 @@ mod tests {
     /// variables (sliding-window marginalization).
     #[test]
     fn test_compute_block_into_rejects_missing_variable() -> TestResult {
-        let (problem, _k) = one_var_problem();
+        let (problem, _k) = one_var_problem()?;
         let block = problem
             .residual_blocks()
             .values()
@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn test_compute_block_into_residual_value() -> TestResult {
-        let (problem, _k) = one_var_problem();
+        let (problem, _k) = one_var_problem()?;
         let (variables, _, _) = make_index_map(&problem);
         let block = problem
             .residual_blocks()
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn test_compute_block_into_jacobian_shape() -> TestResult {
-        let (problem, _k) = one_var_problem();
+        let (problem, _k) = one_var_problem()?;
         let (variables, _, _) = make_index_map(&problem);
         let block = problem
             .residual_blocks()
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn test_compute_block_into_variable_local_idx() -> TestResult {
-        let (problem, _k) = one_var_problem();
+        let (problem, _k) = one_var_problem()?;
         let (variables, _, _) = make_index_map(&problem);
         let block = problem
             .residual_blocks()
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn test_sparse_backend_assemble() -> TestResult {
-        let (problem, _k) = one_var_problem();
+        let (problem, _k) = one_var_problem()?;
         let (variables, index_map, total_dof) = make_index_map(&problem);
         let sym = crate::linearizer::cpu::sparse::build_symbolic_structure(
             &problem, &variables, &index_map, total_dof,
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn test_sparse_backend_assemble_no_symbolic_returns_error() -> TestResult {
-        let (problem, _k) = one_var_problem();
+        let (problem, _k) = one_var_problem()?;
         let (variables, index_map, total_dof) = make_index_map(&problem);
         let result = SparseMode::assemble(
             &problem,
@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_sparse_backend_compute_column_norms() -> TestResult {
-        let (problem, _k) = one_var_problem();
+        let (problem, _k) = one_var_problem()?;
         let (variables, index_map, total_dof) = make_index_map(&problem);
         let sym = crate::linearizer::cpu::sparse::build_symbolic_structure(
             &problem, &variables, &index_map, total_dof,
@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn test_sparse_backend_apply_column_scaling() -> TestResult {
-        let (problem, _k) = one_var_problem();
+        let (problem, _k) = one_var_problem()?;
         let (variables, index_map, total_dof) = make_index_map(&problem);
         let sym = crate::linearizer::cpu::sparse::build_symbolic_structure(
             &problem, &variables, &index_map, total_dof,
@@ -820,7 +820,7 @@ mod tests {
     fn test_dense_backend_assemble() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
         let (variables, index_map, total_dof) = make_index_map(&problem);
         let (residual, _) = DenseMode::assemble(
             &problem,

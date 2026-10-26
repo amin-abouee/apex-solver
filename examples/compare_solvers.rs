@@ -136,7 +136,7 @@ fn build_se3_problem(
         let prior = PriorFactor::new(v.pose.clone());
         let loss = HuberLoss::new(1.0)?;
         let first_key = var_keys[&first_id];
-        problem.add_residual_block(&[first_key], Box::new(prior), Some(Box::new(loss)));
+        problem.add_residual_block(&[first_key], Box::new(prior), Some(Box::new(loss)))?;
     }
 
     for edge in &graph.edges_se3 {
@@ -145,7 +145,7 @@ fn build_se3_problem(
                 &[k0, k1],
                 Box::new(BetweenFactor::new(edge.measurement.clone())),
                 None,
-            );
+            )?;
         }
     }
 
@@ -178,7 +178,7 @@ fn build_se2_problem(
         let prior = PriorFactor::new(v.pose.clone());
         let loss = HuberLoss::new(1.0)?;
         let first_key = var_keys[&first_id];
-        problem.add_residual_block(&[first_key], Box::new(prior), Some(Box::new(loss)));
+        problem.add_residual_block(&[first_key], Box::new(prior), Some(Box::new(loss)))?;
     }
 
     for edge in &graph.edges_se2 {
@@ -187,7 +187,7 @@ fn build_se2_problem(
                 &[k0, k1],
                 Box::new(BetweenFactor::new(edge.measurement.clone())),
                 None,
-            );
+            )?;
         }
     }
 

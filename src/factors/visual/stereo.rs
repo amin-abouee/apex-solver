@@ -19,11 +19,9 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
 use tracing::warn;
 
-use crate::core::CoreError;
-use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
 use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
+use crate::factors::{Factor, FactorResult};
 
 /// Rectified stereo calibration: focal lengths, principal point, baseline.
 #[derive(Clone, Debug)]
@@ -42,17 +40,13 @@ pub struct StereoCalibration {
 
 impl StereoCalibration {
     /// Create and validate a rectified stereo calibration.
-    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64, baseline: f64) -> CoreResult<Self> {
-        if !(fx.is_finite() && fx > 0.0)
-            || !(fy.is_finite() && fy > 0.0)
-            || !(cx.is_finite() && cy.is_finite())
-            || !(baseline.is_finite() && baseline > 0.0)
-        {
-            return Err(CoreError::InvalidInput(
-                "stereo calibration requires fx, fy > 0, finite principal point, baseline > 0"
-                    .into(),
-            ));
-        }
+    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64, baseline: f64) -> FactorResult<Self> {
+        use crate::factors::common::validate::{expect_finite, expect_positive};
+        const OWNER: &str = "StereoCalibration";
+        expect_positive(OWNER, "fx", fx)?;
+        expect_positive(OWNER, "fy", fy)?;
+        expect_finite(OWNER, "principal point", [cx, cy].iter())?;
+        expect_positive(OWNER, "baseline", baseline)?;
         Ok(Self {
             fx,
             fy,
@@ -235,20 +229,12 @@ impl Factor for StereoFactor {
         (3, 9)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2 {
-            return Err(format!(
-                "StereoFactor expects 2 variables, got {}",
-                variables.len()
-            ));
-        }
-        if variables[0].as_param_slice().len() != SE3::REP_SIZE {
-            return Err("StereoFactor requires an SE3 pose (7 parameters)".into());
-        }
-        if variables[1].as_param_slice().len() != 3 {
-            return Err("StereoFactor requires a 3D landmark".into());
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE, 3],
+            "StereoFactor",
+        )
     }
 }
 

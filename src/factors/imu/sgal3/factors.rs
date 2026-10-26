@@ -46,6 +46,7 @@ type Matrix10 = SMatrix<f64, 10, 10>;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_block_sizes;
 use crate::factors::imu::common::{split_bias, write_jacobian};
@@ -359,7 +360,7 @@ impl Factor for ImuFactor {
         (10, 26)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[SGal3::REP_SIZE, SGal3::REP_SIZE, 6],
@@ -488,7 +489,7 @@ impl Factor for CombinedImuFactor {
         (16, 32)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[SGal3::REP_SIZE, 6, SGal3::REP_SIZE, 6],

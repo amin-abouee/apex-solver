@@ -35,12 +35,13 @@ use apex_manifolds::LieGroup;
 use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
 
-use crate::core::CoreError;
-use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
+use crate::error::ErrorLogging;
 use crate::factors::common::group_point::into_anchor;
-use crate::factors::common::validate::expect_manifolds;
-use crate::factors::{Factor, NormalBlocks};
+use crate::factors::common::validate::{
+    expect_at_least, expect_finite, expect_image, expect_manifolds, expect_positive,
+};
+use crate::factors::{Factor, FactorError, FactorResult, NormalBlocks};
 
 /// A single-channel image, row-major, sampled bilinearly with pixel centres
 /// at integer coordinates.
@@ -57,18 +58,8 @@ impl IntensityImage {
     /// # Errors
     ///
     /// A size smaller than `2 × 2`, or `data` not `width · height` long.
-    pub fn new(width: usize, height: usize, data: Vec<f32>) -> CoreResult<Self> {
-        if width < 2 || height < 2 {
-            return Err(CoreError::InvalidInput(format!(
-                "IntensityImage: {width}×{height} is too small to interpolate"
-            )));
-        }
-        if data.len() != width * height {
-            return Err(CoreError::InvalidInput(format!(
-                "IntensityImage: {} values for {width}×{height} pixels",
-                data.len()
-            )));
-        }
+    pub fn new(width: usize, height: usize, data: Vec<f32>) -> FactorResult<Self> {
+        expect_image("IntensityImage", width, height, data.len())?;
         Ok(Self {
             width,
             height,
@@ -85,7 +76,7 @@ impl IntensityImage {
         width: usize,
         height: usize,
         intensity: impl Fn(usize, usize) -> f32,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
         let data = (0..height)
             .flat_map(|y| (0..width).map(move |x| (x, y)))
             .map(|(x, y)| intensity(x, y))
@@ -166,28 +157,27 @@ impl<G: ActsOnPoints3, CAM: CameraModel> PhotometricPatchFactor<G, CAM> {
         offsets: impl Into<Arc<[Vector2<f64>]>>,
         reference: &[f64],
         sigma: f64,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
+        const FACTOR: &str = "PhotometricPatchFactor";
         let offsets = offsets.into();
-        if offsets.len() < 2 || offsets.len() != reference.len() {
-            return Err(CoreError::InvalidInput(format!(
-                "PhotometricPatchFactor: {} offsets and {} reference values (need ≥ 2, equal)",
-                offsets.len(),
-                reference.len()
-            )));
+        expect_at_least(FACTOR, "patch offsets", offsets.len(), 2)?;
+        if offsets.len() != reference.len() {
+            return Err(FactorError::DimensionMismatch {
+                factor: FACTOR,
+                what: "reference intensities",
+                expected: offsets.len(),
+                actual: reference.len(),
+            }
+            .log());
         }
-        let finite = point_w.iter().all(|v| v.is_finite())
-            && offsets.iter().all(|o| o.iter().all(|v| v.is_finite()))
-            && reference.iter().all(|v| v.is_finite());
-        if !finite {
-            return Err(CoreError::InvalidInput(
-                "PhotometricPatchFactor: non-finite input".to_string(),
-            ));
-        }
-        if !(sigma.is_finite() && sigma > 0.0) {
-            return Err(CoreError::InvalidInput(format!(
-                "PhotometricPatchFactor: sigma must be finite and positive, got {sigma}"
-            )));
-        }
+        expect_finite(FACTOR, "point", point_w.iter())?;
+        expect_finite(
+            FACTOR,
+            "patch offsets",
+            offsets.iter().flat_map(|o| o.iter()),
+        )?;
+        expect_finite(FACTOR, "reference intensities", reference.iter())?;
+        expect_positive(FACTOR, "sigma", sigma)?;
         let mean = reference.iter().sum::<f64>() / reference.len() as f64;
         Ok(Self {
             camera,
@@ -358,7 +348,7 @@ where
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_manifolds(
             variables,
             &[G::NAME, "SE3"],
@@ -377,12 +367,17 @@ mod tests {
     use faer::Mat;
     use nalgebra::UnitQuaternion;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     fn texture(x: f64, y: f64) -> f64 {
         100.0 + 40.0 * (0.15 * x).sin() + 30.0 * (0.11 * y).cos() + 20.0 * (0.05 * (x + y)).sin()
     }
 
-    fn image() -> Result<Arc<IntensityImage>, CoreError> {
-        IntensityImage::from_fn(640, 480, |x, y| texture(x as f64, y as f64) as f32).map(Arc::new)
+    fn image() -> Result<Arc<IntensityImage>, Box<dyn std::error::Error>> {
+        Ok(
+            IntensityImage::from_fn(640, 480, |x, y| texture(x as f64, y as f64) as f32)
+                .map(Arc::new)?,
+        )
     }
 
     fn camera() -> PinholeCamera {
@@ -411,13 +406,11 @@ mod tests {
     fn factor<G: ActsOnPoints3>(
         state: &G,
         offset: f64,
-    ) -> Result<PhotometricPatchFactor<G, PinholeCamera>, CoreError> {
+    ) -> Result<PhotometricPatchFactor<G, PinholeCamera>, Box<dyn std::error::Error>> {
         let image = image()?;
         let point_w = world_point(state);
         let c = Vector3::new(0.3, -0.2, 4.0);
-        let centre = camera()
-            .project(&c)
-            .map_err(|e| CoreError::InvalidInput(e.to_string()))?;
+        let centre = camera().project(&c)?;
         let offsets = PhotometricPatchFactor::<G, PinholeCamera>::square_offsets(4, 1.0);
         let reference: Vec<f64> = offsets
             .iter()
@@ -427,8 +420,15 @@ mod tests {
                     .map(|(v, _)| v + offset)
             })
             .collect::<Option<_>>()
-            .ok_or_else(|| CoreError::InvalidInput("reference outside the image".to_string()))?;
-        PhotometricPatchFactor::new(camera(), image, point_w, offsets, &reference, 2.0)
+            .ok_or("reference outside the image")?;
+        Ok(PhotometricPatchFactor::new(
+            camera(),
+            image,
+            point_w,
+            offsets,
+            &reference,
+            2.0,
+        )?)
     }
 
     fn evaluate<G: ActsOnPoints3 + Send + Sync + 'static>(
@@ -464,7 +464,7 @@ mod tests {
 
     /// Zero at truth despite a brightness offset; Jacobians equal central
     /// differences, off truth, in group `G`'s own chart.
-    fn check_group<G: ActsOnPoints3 + Send + Sync + 'static>(state: G) -> Result<(), CoreError> {
+    fn check_group<G: ActsOnPoints3 + Send + Sync + 'static>(state: G) -> TestResult {
         let dof = G::DOF;
         let factor = factor(&state, 7.0)?;
         let (residual, _) = evaluate(&factor, &state, &extrinsic());
@@ -517,7 +517,7 @@ mod tests {
     /// from the sweep's — keeps exact normal equations through both
     /// wrappers.
     #[test]
-    fn the_wrapped_patch_keeps_its_normal_equations() -> Result<(), CoreError> {
+    fn the_wrapped_patch_keeps_its_normal_equations() -> TestResult {
         use crate::factors::held::HeldBlocks;
         use crate::factors::offset::RightOffset;
         let state = SE23::new(
@@ -546,12 +546,12 @@ mod tests {
     }
 
     #[test]
-    fn se3_poses() -> Result<(), CoreError> {
+    fn se3_poses() -> TestResult {
         check_group(SE3::new(Vector3::new(1.0, -0.5, 0.3), rotation()))
     }
 
     #[test]
-    fn se23_navigation_states() -> Result<(), CoreError> {
+    fn se23_navigation_states() -> TestResult {
         check_group(SE23::new(
             Vector3::new(1.0, -0.5, 0.3),
             Vector3::new(0.4, 0.1, 0.0),
@@ -560,13 +560,13 @@ mod tests {
     }
 
     #[test]
-    fn sim3_similarities() -> Result<(), CoreError> {
+    fn sim3_similarities() -> TestResult {
         check_group(Sim3::new(Vector3::new(1.0, -0.5, 0.3), rotation(), 1.1))
     }
 
     /// A uniform brightness change of the current image leaves the residual.
     #[test]
-    fn a_brightness_offset_cancels() -> Result<(), CoreError> {
+    fn a_brightness_offset_cancels() -> TestResult {
         let state = SE3::new(Vector3::new(1.0, -0.5, 0.3), rotation());
         let off = state.right_plus(
             &apex_manifolds::se3::SE3Tangent::from_slice(&[0.01, 0.0, 0.0, 0.0, 0.002, 0.0]),
@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn a_point_behind_the_camera_or_off_the_image_contributes_nothing() -> Result<(), CoreError> {
+    fn a_point_behind_the_camera_or_off_the_image_contributes_nothing() -> TestResult {
         let state = SE3::new(Vector3::new(1.0, -0.5, 0.3), rotation());
         let factor = factor(&state, 0.0)?;
         // Turned around: the point is behind the camera.
@@ -607,22 +607,13 @@ mod tests {
     }
 
     #[test]
-    fn bilinear_sampling_is_exact_on_pixels_and_has_the_right_gradient() -> Result<(), CoreError> {
+    fn bilinear_sampling_is_exact_on_pixels_and_has_the_right_gradient() -> TestResult {
         let image = image()?;
-        let (value, _) = image
-            .sample(100.0, 50.0)
-            .ok_or_else(|| CoreError::InvalidInput("outside".to_string()))?;
+        let (value, _) = image.sample(100.0, 50.0).ok_or("outside")?;
         assert!((value - f64::from(texture(100.0, 50.0) as f32)).abs() < 1e-9);
         let (u, v, eps) = (123.37, 77.61, 1e-6);
-        let (_, gradient) = image
-            .sample(u, v)
-            .ok_or_else(|| CoreError::InvalidInput("outside".to_string()))?;
-        let value_at = |u: f64, v: f64| {
-            image
-                .sample(u, v)
-                .map(|(value, _)| value)
-                .ok_or_else(|| CoreError::InvalidInput("outside".to_string()))
-        };
+        let (_, gradient) = image.sample(u, v).ok_or("outside")?;
+        let value_at = |u: f64, v: f64| image.sample(u, v).map(|(value, _)| value).ok_or("outside");
         let d_u = (value_at(u + eps, v)? - value_at(u - eps, v)?) / (2.0 * eps);
         let d_v = (value_at(u, v + eps)? - value_at(u, v - eps)?) / (2.0 * eps);
         assert!((gradient.x - d_u).abs() < 1e-5 && (gradient.y - d_v).abs() < 1e-5);
@@ -634,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_inputs_are_rejected() -> Result<(), CoreError> {
+    fn bad_inputs_are_rejected() -> TestResult {
         assert!(IntensityImage::new(1, 5, vec![0.0; 5]).is_err());
         assert!(IntensityImage::new(4, 4, vec![0.0; 15]).is_err());
         let image = image()?;

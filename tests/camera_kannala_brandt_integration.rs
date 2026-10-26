@@ -198,13 +198,13 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
             &[pose_keys[cam_idx], landmarks_key, intrinsics_key],
             Box::new(factor),
             None, // No robust loss for clean synthetic data
-        );
+        )?;
     }
 
     // Fix first camera pose for gauge freedom (anchor the coordinate system)
     // This prevents the solution from drifting in SE3 space
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
 
     // ============================================================================
@@ -405,12 +405,12 @@ fn test_kannala_brandt_3_cameras_calibration() -> TestResult {
             &[pose_keys[cam_idx], landmarks_key, intrinsics_key],
             Box::new(factor),
             None,
-        );
+        )?;
     }
 
     // Fix first pose
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
 
     // Optimize

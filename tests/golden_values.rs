@@ -69,7 +69,7 @@ fn solve(dataset: &str, is_3d: bool) -> Result<f64, Box<dyn std::error::Error>> 
                     &[kf, kt],
                     Box::new(BetweenFactor::new(edge.measurement.clone())),
                     Some(Box::new(L2Loss)),
-                );
+                )?;
             }
         }
     } else {
@@ -89,7 +89,7 @@ fn solve(dataset: &str, is_3d: bool) -> Result<f64, Box<dyn std::error::Error>> 
                     &[kf, kt],
                     Box::new(BetweenFactor::new(edge.measurement.clone())),
                     Some(Box::new(L2Loss)),
-                );
+                )?;
             }
         }
     }

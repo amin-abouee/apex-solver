@@ -28,6 +28,7 @@ use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::validate::expect_block_sizes;
 use crate::factors::imu::common::{split_bias, write_jacobian};
 use crate::factors::imu::preintegration::ImuPreintegration;
@@ -211,7 +212,7 @@ impl Factor for ImuFactor {
         (9, 24)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[SE23::REP_SIZE, SE23::REP_SIZE, 6],
@@ -312,7 +313,7 @@ impl Factor for CombinedImuFactor {
         (15, 30)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[SE23::REP_SIZE, 6, SE23::REP_SIZE, 6],

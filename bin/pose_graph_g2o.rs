@@ -165,20 +165,12 @@ fn edge_noise_model(
     info: nalgebra::DMatrix<f64>,
     strategy: RepairStrategy,
 ) -> Result<(NoiseModel, InformationRepair), apex_solver::error::ApexSolverError> {
-    strategy.build(info).map_err(|e| {
-        apex_solver::error::ApexSolverError::from(
-            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-        )
-    })
+    Ok(strategy.build(info)?)
 }
 
 /// Parse `--indefinite-repair` once, before the edge loop.
 fn repair_strategy(args: &Args) -> Result<RepairStrategy, apex_solver::error::ApexSolverError> {
-    RepairStrategy::from_name(&args.indefinite_repair).map_err(|e| {
-        apex_solver::error::ApexSolverError::from(
-            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-        )
-    })
+    Ok(RepairStrategy::from_name(&args.indefinite_repair)?)
 }
 
 // ============================================================================
@@ -379,17 +371,12 @@ fn format_summary_table(results: &[DatasetResult]) {
 fn create_loss_function(
     loss_name: &str,
     scale: Option<f64>,
-) -> Result<Option<Box<dyn LossFunction + Send + Sync>>, Box<dyn std::error::Error>> {
-    // Single table lives in the library (`loss_from_name`); this wrapper only
-    // adapts the error type so help text and accepted names cannot drift.
-    Ok(Some(
-        apex_solver::core::loss_functions::loss_from_name(loss_name, scale).map_err(|e| {
-            Box::<dyn std::error::Error>::from(format!(
-                "{e}. Valid options: {}",
-                apex_solver::core::loss_functions::loss_canonical_names().join(", ")
-            ))
-        })?,
-    ))
+) -> apex_solver::core::CoreResult<Option<Box<dyn LossFunction + Send + Sync>>> {
+    // Single table lives in the library (`loss_from_name`), so help text and
+    // accepted names cannot drift; its error lists the valid names.
+    Ok(Some(apex_solver::core::loss_functions::loss_from_name(
+        loss_name, scale,
+    )?))
 }
 
 fn test_se2_dataset(
@@ -486,19 +473,15 @@ fn test_se2_dataset(
             &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
-        );
+        )?;
     } else if optimizer_type == "lm" || optimizer_type == "levenberg-marquardt" {
         let first_key = var_key_map[&vertex_ids[0]];
-        problem.fix_variable(first_key, 0);
-        problem.fix_variable(first_key, 1);
-        problem.fix_variable(first_key, 2);
+        problem.fix_variable(first_key, 0)?;
+        problem.fix_variable(first_key, 1)?;
+        problem.fix_variable(first_key, 2)?;
     }
 
-    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
-        apex_solver::error::ApexSolverError::from(
-            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-        )
-    })?;
+    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale)?;
 
     let strategy = repair_strategy(args)?;
     let mut repair_summary = RepairSummary::default();
@@ -508,11 +491,7 @@ fn test_se2_dataset(
         let between_factor = BetweenFactor::new(relative_pose);
 
         let edge_loss = if loss_fn.is_some() {
-            create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
-                apex_solver::error::ApexSolverError::from(
-                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-                )
-            })?
+            create_loss_function(&args.loss_function, args.loss_scale)?
         } else {
             None
         };
@@ -533,7 +512,7 @@ fn test_se2_dataset(
                 Box::new(between_factor),
                 edge_loss,
                 edge_noise,
-            );
+            )?;
         }
     }
 
@@ -562,13 +541,7 @@ fn test_se2_dataset(
     }
 
     let init_cost_start = Instant::now();
-    let init_state = initialize_optimization_state(&mut problem).map_err(|e| {
-        apex_solver::core::CoreError::SymbolicStructure(format!(
-            "Failed to initialize optimization state for dataset {}",
-            dataset_name
-        ))
-        .log_with_source(e)
-    })?;
+    let init_state = initialize_optimization_state(&mut problem)?;
     let initial_cost = init_state.initial_cost;
     let init_cost_time = init_cost_start.elapsed();
 
@@ -863,19 +836,15 @@ fn test_se3_dataset(
             &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
-        );
+        )?;
     } else if optimizer_type == "lm" || optimizer_type == "levenberg-marquardt" {
         let first_key = var_key_map[&vertex_ids[0]];
         for dof in 0..6 {
-            problem.fix_variable(first_key, dof);
+            problem.fix_variable(first_key, dof)?;
         }
     }
 
-    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
-        apex_solver::error::ApexSolverError::from(
-            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-        )
-    })?;
+    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale)?;
 
     let strategy = repair_strategy(args)?;
     let mut repair_summary = RepairSummary::default();
@@ -885,11 +854,7 @@ fn test_se3_dataset(
         let between_factor = BetweenFactor::new(relative_pose);
 
         let edge_loss = if loss_fn.is_some() {
-            create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
-                apex_solver::error::ApexSolverError::from(
-                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-                )
-            })?
+            create_loss_function(&args.loss_function, args.loss_scale)?
         } else {
             None
         };
@@ -910,7 +875,7 @@ fn test_se3_dataset(
                 Box::new(between_factor),
                 edge_loss,
                 edge_noise,
-            );
+            )?;
         }
     }
 
@@ -930,13 +895,7 @@ fn test_se3_dataset(
     }
 
     let init_cost_start = Instant::now();
-    let init_state = initialize_optimization_state(&mut problem).map_err(|e| {
-        apex_solver::core::CoreError::SymbolicStructure(format!(
-            "Failed to initialize optimization state for dataset {}",
-            dataset_name
-        ))
-        .log_with_source(e)
-    })?;
+    let init_state = initialize_optimization_state(&mut problem)?;
     let initial_cost = init_state.initial_cost;
     let init_cost_time = init_cost_start.elapsed();
     info!(

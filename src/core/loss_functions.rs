@@ -83,6 +83,7 @@
 //! ```
 
 use crate::core::{CoreError, CoreResult};
+use crate::error::ErrorLogging;
 
 /// Validate a scale/shape parameter used in division, multiplication, a
 /// threshold, or a logarithm: it must be finite and strictly positive.
@@ -93,22 +94,30 @@ use crate::core::{CoreError, CoreResult};
 /// downstream. `DcsLoss` was the only constructor in this module to already
 /// guard against both (ISSUE-0007); every other parameterized loss now uses
 /// this shared validator instead of repeating the incomplete check.
-fn finite_positive(name: &str, value: f64) -> CoreResult<f64> {
+fn finite_positive(owner: &'static str, param: &'static str, value: f64) -> CoreResult<f64> {
     if !value.is_finite() || value <= 0.0 {
-        return Err(CoreError::InvalidInput(format!(
-            "{name} must be finite and positive, got {value}"
-        )));
+        return Err(CoreError::InvalidParameter {
+            owner,
+            param,
+            requirement: "finite and positive",
+            value,
+        }
+        .log());
     }
     Ok(value)
 }
 
 /// Validate a shape parameter (e.g. Barron's `alpha`) that is used in
 /// `powf`/exponentiation but is not required to be positive — only finite.
-fn finite(name: &str, value: f64) -> CoreResult<f64> {
+fn finite(owner: &'static str, param: &'static str, value: f64) -> CoreResult<f64> {
     if !value.is_finite() {
-        return Err(CoreError::InvalidInput(format!(
-            "{name} must be finite, got {value}"
-        )));
+        return Err(CoreError::InvalidParameter {
+            owner,
+            param,
+            requirement: "finite",
+            value,
+        }
+        .log());
     }
     Ok(value)
 }
@@ -382,7 +391,7 @@ impl HuberLoss {
     /// # example().unwrap();
     /// ```
     pub fn new(scale: f64) -> CoreResult<Self> {
-        let scale = finite_positive("scale", scale)?;
+        let scale = finite_positive("HuberLoss", "scale", scale)?;
         Ok(HuberLoss {
             scale,
             scale2: scale * scale,
@@ -510,7 +519,7 @@ impl CauchyLoss {
     /// # example().unwrap();
     /// ```
     pub fn new(scale: f64) -> CoreResult<Self> {
-        let scale = finite_positive("scale", scale)?;
+        let scale = finite_positive("CauchyLoss", "scale", scale)?;
         let scale2 = scale * scale;
         Ok(CauchyLoss {
             scale2,
@@ -618,7 +627,7 @@ impl FairLoss {
     ///
     /// `Ok(FairLoss)` if scale > 0, otherwise an error
     pub fn new(scale: f64) -> CoreResult<Self> {
-        let scale = finite_positive("scale", scale)?;
+        let scale = finite_positive("FairLoss", "scale", scale)?;
         Ok(FairLoss { scale })
     }
 }
@@ -702,7 +711,7 @@ impl GemanMcClureLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        let scale = finite_positive("scale", scale)?;
+        let scale = finite_positive("GemanMcClureLoss", "scale", scale)?;
         let scale2 = scale * scale;
         Ok(GemanMcClureLoss { c: 1.0 / scale2 })
     }
@@ -790,7 +799,7 @@ impl DcsLoss {
     ///
     /// * `phi` - Free parameter Φ (must be positive; 1.0 is the paper default)
     pub fn new(phi: f64) -> CoreResult<Self> {
-        let phi = finite_positive("phi", phi)?;
+        let phi = finite_positive("DcsLoss", "phi", phi)?;
         Ok(DcsLoss { phi })
     }
 }
@@ -866,7 +875,7 @@ impl WelschLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        let scale = finite_positive("scale", scale)?;
+        let scale = finite_positive("WelschLoss", "scale", scale)?;
         let scale2 = scale * scale;
         Ok(WelschLoss {
             scale2,
@@ -952,7 +961,7 @@ impl TukeyBiweightLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        let scale = finite_positive("scale", scale)?;
+        let scale = finite_positive("TukeyBiweightLoss", "scale", scale)?;
         Ok(TukeyBiweightLoss {
             scale,
             scale2: scale * scale,
@@ -1049,7 +1058,7 @@ impl AndrewsWaveLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        let scale = finite_positive("scale", scale)?;
+        let scale = finite_positive("AndrewsWaveLoss", "scale", scale)?;
         Ok(AndrewsWaveLoss {
             scale,
             scale2: scale * scale,
@@ -1146,7 +1155,7 @@ impl RamsayEaLoss {
     ///
     /// * `scale` - The scale parameter a (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        let scale = finite_positive("scale", scale)?;
+        let scale = finite_positive("RamsayEaLoss", "scale", scale)?;
         Ok(RamsayEaLoss {
             scale,
             inv_scale2: 1.0 / (scale * scale),
@@ -1238,7 +1247,7 @@ impl TrimmedMeanLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        let scale = finite_positive("scale", scale)?;
+        let scale = finite_positive("TrimmedMeanLoss", "scale", scale)?;
         Ok(TrimmedMeanLoss {
             scale2: scale * scale,
         })
@@ -1317,7 +1326,7 @@ impl LpNormLoss {
     ///
     /// * `p` - The norm parameter (0 < p ≤ 2 for practical use)
     pub fn new(p: f64) -> CoreResult<Self> {
-        let p = finite_positive("p", p)?;
+        let p = finite_positive("LpNormLoss", "p", p)?;
         Ok(LpNormLoss { p })
     }
 }
@@ -1417,8 +1426,8 @@ impl BarronGeneralLoss {
     /// * `alpha` - The shape parameter (controls robustness)
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(alpha: f64, scale: f64) -> CoreResult<Self> {
-        let scale = finite_positive("scale", scale)?;
-        let alpha = finite("alpha", alpha)?;
+        let scale = finite_positive("BarronGeneralLoss", "scale", scale)?;
+        let alpha = finite("BarronGeneralLoss", "alpha", alpha)?;
         Ok(BarronGeneralLoss {
             alpha,
             scale2: scale * scale,
@@ -1548,7 +1557,7 @@ impl TDistributionLoss {
     /// - ν = 3.0-4.0: More robust to outliers
     /// - ν = 10.0: Less aggressive, closer to Gaussian
     pub fn new(nu: f64) -> CoreResult<Self> {
-        let nu = finite_positive("nu", nu)?;
+        let nu = finite_positive("TDistributionLoss", "nu", nu)?;
         Ok(TDistributionLoss {
             nu,
             half_nu_plus_1: (nu + 1.0) / 2.0,
@@ -1728,10 +1737,12 @@ pub fn loss_from_name(
         "t-distribution" | "tdistribution" => Box::new(TDistributionLoss::new(s(5.0))?),
         "adaptive-barron" | "adaptivebarron" => Box::new(AdaptiveBarronLoss::new(0.0, s(1.0))?),
         other => {
-            return Err(CoreError::InvalidInput(format!(
-                "unknown loss function: {other}. Valid options: {}",
-                loss_canonical_names().join(", ")
-            )));
+            return Err(CoreError::UnknownName {
+                kind: "loss function",
+                name: other.to_string(),
+                valid: loss_canonical_names().join(", "),
+            }
+            .log());
         }
     };
     Ok(loss)

@@ -57,17 +57,25 @@ pub fn bias_random_walk_noise(params: &ImuParameters, dt: f64) -> CoreResult<Noi
 /// The six standard deviations used by [`bias_random_walk_noise`].
 fn bias_random_walk_sigmas(params: &ImuParameters, dt: f64) -> CoreResult<[f64; BIAS_DIM]> {
     use crate::core::CoreError;
+    use crate::error::ErrorLogging;
 
+    let invalid = |param, requirement, value| {
+        CoreError::InvalidParameter {
+            owner: "bias random walk",
+            param,
+            requirement,
+            value,
+        }
+        .log()
+    };
     if !dt.is_finite() || dt <= 0.0 {
-        return Err(CoreError::InvalidInput(format!(
-            "bias random walk needs a positive, finite interval, got dt={dt}"
-        )));
+        return Err(invalid("dt", "finite and positive", dt));
     }
-    if params.sigma_gw_c <= 0.0 || params.sigma_aw_c <= 0.0 {
-        return Err(CoreError::InvalidInput(format!(
-            "bias random-walk densities must be positive, got sigma_gw_c={}, sigma_aw_c={}",
-            params.sigma_gw_c, params.sigma_aw_c
-        )));
+    if params.sigma_gw_c <= 0.0 {
+        return Err(invalid("sigma_gw_c", "positive", params.sigma_gw_c));
+    }
+    if params.sigma_aw_c <= 0.0 {
+        return Err(invalid("sigma_aw_c", "positive", params.sigma_aw_c));
     }
 
     let scale = dt.sqrt();

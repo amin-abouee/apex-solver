@@ -66,10 +66,10 @@ use apex_manifolds::capability::RigidPose;
 use apex_manifolds::se3::SE3;
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::Factor;
+use crate::error::ErrorLogging;
 use crate::factors::common::math::tangent_basis;
-use crate::factors::common::validate::expect_block_sizes;
+use crate::factors::common::validate::{expect_block_sizes, expect_positive};
+use crate::factors::{Factor, FactorError, FactorResult};
 
 use super::inverse_depth_plane::{Chain, MAX_COLUMNS, columns, point_jacobians, write_jacobian};
 
@@ -127,17 +127,16 @@ impl<G: RigidPose> InverseDepthBearingFactor<G> {
         host_bearing: Vector3<f64>,
         measured_bearing: Vector3<f64>,
         sqrt_information: SMatrix<f64, 2, 2>,
-    ) -> CoreResult<Self> {
-        let host = unit(&host_bearing).ok_or_else(|| {
-            CoreError::InvalidInput(format!(
-                "InverseDepthBearingFactor: host bearing {host_bearing:?} has no direction"
-            ))
-        })?;
-        let measured = unit(&measured_bearing).ok_or_else(|| {
-            CoreError::InvalidInput(format!(
-                "InverseDepthBearingFactor: measured bearing {measured_bearing:?} has no direction"
-            ))
-        })?;
+    ) -> FactorResult<Self> {
+        let no_direction = |what| {
+            FactorError::Degenerate {
+                factor: "InverseDepthBearingFactor",
+                what,
+            }
+            .log()
+        };
+        let host = unit(&host_bearing).ok_or_else(|| no_direction("host bearing"))?;
+        let measured = unit(&measured_bearing).ok_or_else(|| no_direction("measured bearing"))?;
 
         Ok(Self {
             host_bearing: host,
@@ -157,12 +156,8 @@ impl<G: RigidPose> InverseDepthBearingFactor<G> {
         host_bearing: Vector3<f64>,
         measured_bearing: Vector3<f64>,
         sigma: f64,
-    ) -> CoreResult<Self> {
-        if !sigma.is_finite() || sigma <= 0.0 {
-            return Err(CoreError::InvalidInput(format!(
-                "InverseDepthBearingFactor: sigma must be finite and positive, got {sigma}"
-            )));
-        }
+    ) -> FactorResult<Self> {
+        expect_positive("InverseDepthBearingFactor", "sigma", sigma)?;
         let sqrt_information = SMatrix::<f64, 2, 2>::identity() * (1.0 / sigma);
         Self::new(host_bearing, measured_bearing, sqrt_information)
     }
@@ -281,7 +276,7 @@ impl<G: RigidPose + Send + Sync + 'static> Factor for InverseDepthBearingFactor<
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[G::REP_SIZE, G::REP_SIZE, SE3::REP_SIZE, 1],

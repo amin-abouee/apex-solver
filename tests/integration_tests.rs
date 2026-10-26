@@ -105,7 +105,7 @@ fn run_se3_optimization(
             &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
-        );
+        )?;
     }
 
     // Add SE3 between factors
@@ -113,7 +113,7 @@ fn run_se3_optimization(
         let relative_pose = edge.measurement.clone();
         let between_factor = BetweenFactor::new(relative_pose);
         if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
-            problem.add_residual_block(&[k0, k1], Box::new(between_factor), None);
+            problem.add_residual_block(&[k0, k1], Box::new(between_factor), None)?;
         }
     }
 
@@ -212,14 +212,14 @@ fn run_se2_optimization(
             &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
-        );
+        )?;
     }
 
     // Add SE2 between factors
     for edge in &graph.edges_se2 {
         let between_factor = BetweenFactor::new(edge.measurement.clone());
         if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
-            problem.add_residual_block(&[k0, k1], Box::new(between_factor), None);
+            problem.add_residual_block(&[k0, k1], Box::new(between_factor), None)?;
         }
     }
 

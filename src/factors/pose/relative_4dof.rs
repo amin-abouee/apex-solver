@@ -19,6 +19,7 @@
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, Vector3};
 
@@ -109,15 +110,11 @@ impl Factor for Relative4DofFactor {
         (4, 8)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 2
-            || variables
-                .iter()
-                .any(|v| v.manifold_type_name() != "Rn" || v.as_param_slice().len() != 4)
-        {
-            return Err("Relative4DofFactor connects two Rn(4) variables".to_string());
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        use crate::factors::common::validate::{expect_manifolds, expect_uniform_blocks};
+        const FACTOR: &str = "Relative4DofFactor";
+        expect_manifolds(variables, &["Rn", "Rn"], FACTOR)?;
+        expect_uniform_blocks(variables, 2, 4, FACTOR)
     }
 }
 

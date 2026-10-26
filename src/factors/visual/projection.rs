@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
-use crate::factors::{Factor, OptimizeParams};
+use crate::error::ErrorLogging;
+use crate::factors::common::validate::{expect_count, expect_manifold, expect_size};
+use crate::factors::{Factor, FactorError, FactorResult, OptimizeParams};
 use apex_camera_models::{CameraModel, ProjectionError};
 use apex_manifolds::Tangent;
 use apex_manifolds::capability::ActsOnPoints3;
@@ -540,17 +542,14 @@ where
         }
         let camera: &CAM = decoded_camera.as_ref().unwrap_or(&self.camera);
 
-        let n = self.observations.ncols();
-        // Hard assert, not debug-only: a stride mismatch silently misprojects
-        // every landmark, and `profile.test` inherits release, so a
-        // `debug_assert` would never fire under `cargo test`.
-        assert_eq!(
-            landmarks.len(),
-            3 * n,
-            "landmark buffer length {} is not 3×N observations ({n}); \
-             the buffer must be flat column-major [x0,y0,z0,…]",
-            landmarks.len()
-        );
+        // `validate_variables` rejects a landmark block that is not 3×N at
+        // registration. Called directly with a mismatched buffer, the factor
+        // reports a NaN residual (which the linearizer turns into an error)
+        // instead of misprojecting every landmark.
+        if landmarks.len() != 3 * self.observations.ncols() {
+            residual.fill(f64::NAN);
+            return;
+        }
 
         // Write directly into caller-provided buffers — zero temporary allocation.
         self.evaluate_internal(&pose, landmarks, camera, residual, jacobian);
@@ -575,48 +574,30 @@ where
         (n * 2, cols)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        const FACTOR: &str = "ProjectionFactor";
+        let blocks = usize::from(OP::POSE) + usize::from(OP::LANDMARK) + usize::from(OP::INTRINSIC);
+        expect_count(variables, blocks, FACTOR)?;
         let mut idx = 0;
-
         if OP::POSE {
-            let pose = variables.get(idx).ok_or_else(|| {
-                "ProjectionFactor expects a pose variable as its first parameter".to_string()
-            })?;
-            if pose.manifold_type_name() != G::NAME {
-                return Err(format!(
-                    "pose variable is {}, ProjectionFactor requires {}",
-                    pose.manifold_type_name(),
-                    G::NAME
-                ));
-            }
+            expect_manifold(variables[idx], idx, G::NAME, FACTOR)?;
             idx += 1;
         }
-
+        let n = self.observations.ncols();
         if OP::LANDMARK {
-            let landmarks = variables
-                .get(idx)
-                .ok_or_else(|| "ProjectionFactor expects a landmark variable".to_string())?;
-            let expected = 3 * self.observations.ncols();
-            if landmarks.as_param_slice().len() != expected {
-                return Err(format!(
-                    "landmark variable holds {} parameters but the factor's {} observations \
-                     reference {} landmarks (3 coordinates each)",
-                    landmarks.as_param_slice().len(),
-                    self.observations.ncols(),
-                    self.observations.ncols()
-                ));
+            expect_size(variables[idx], idx, 3 * n, FACTOR)?;
+        } else {
+            let fixed = self.fixed_landmarks.as_ref().map_or(0, |l| l.ncols());
+            if fixed != n {
+                return Err(FactorError::DimensionMismatch {
+                    factor: FACTOR,
+                    what: "fixed landmarks",
+                    expected: n,
+                    actual: fixed,
+                }
+                .log());
             }
-        } else if self
-            .fixed_landmarks
-            .as_ref()
-            .is_none_or(|l| l.ncols() != self.observations.ncols())
-        {
-            return Err(format!(
-                "fixed landmarks must be set and match the {} observations",
-                self.observations.ncols()
-            ));
         }
-
         Ok(())
     }
 }

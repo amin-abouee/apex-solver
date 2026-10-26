@@ -18,6 +18,7 @@
 use apex_manifolds::rn::Rn;
 use apex_manifolds::{LieGroup, se3::SE3};
 use apex_solver::ManifoldType;
+use apex_solver::core::CoreResult;
 use apex_solver::core::problem::Problem;
 use apex_solver::core::variable::Variable;
 use apex_solver::factors::Factor;
@@ -243,7 +244,7 @@ impl Factor for WindowObservation {
 
 /// [`window_like_system`] as a solvable `Problem`: the same layout, with a
 /// smooth nonlinear residual so Levenberg-Marquardt needs several iterations.
-fn window_problem(frames: usize, landmarks: usize) -> Problem {
+fn window_problem(frames: usize, landmarks: usize) -> CoreResult<Problem> {
     let mut problem = Problem::new(apex_solver::JacobianMode::Sparse);
     let states: Vec<_> = (0..frames)
         .map(|_| problem.add_variable(ManifoldType::RN, nalgebra::DVector::zeros(9)))
@@ -291,10 +292,10 @@ fn window_problem(frames: usize, landmarks: usize) -> Problem {
                 &[states[host], states[observer], extrinsic, landmark],
                 Box::new(WindowObservation { weights, target }),
                 None,
-            );
+            )?;
         }
     }
-    problem
+    Ok(problem)
 }
 
 type BaSystemDense = (
@@ -535,7 +536,7 @@ fn bench_explicit_sparse_schur_window(c: &mut Criterion) {
     });
     group.bench_function("lm_8_iterations_11_states_560_landmarks", |b| {
         b.iter_batched(
-            || window_problem(11, 560),
+            || window_problem(11, 560).unwrap_or_else(|e| panic!("invalid window: {e}")),
             |mut problem| {
                 let config = LevenbergMarquardtConfig::new()
                     .with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)
@@ -663,7 +664,9 @@ fn bench_assemble(c: &mut Criterion) {
         keys.push(problem.add_variable(ManifoldType::RN, nalgebra::dvector![i as f64, 0.5, -0.25]));
     }
     for i in 0..n_vars - 1 {
-        problem.add_residual_block(&[keys[i], keys[i + 1]], Box::new(PairFactor), None);
+        problem
+            .add_residual_block(&[keys[i], keys[i + 1]], Box::new(PairFactor), None)
+            .unwrap_or_else(|e| panic!("valid pair factor: {e}"));
     }
 
     // Production initialization path: variables, index map, symbolic
@@ -714,7 +717,9 @@ fn bench_fingerprint(c: &mut Criterion) {
         keys.push(problem.add_variable(ManifoldType::RN, nalgebra::dvector![i as f64, 0.5, -0.25]));
     }
     for i in 0..5_000 {
-        problem.add_residual_block(&[keys[i], keys[i + 1]], Box::new(PairFactor), None);
+        problem
+            .add_residual_block(&[keys[i], keys[i + 1]], Box::new(PairFactor), None)
+            .unwrap_or_else(|e| panic!("valid pair factor: {e}"));
     }
     let mut state = apex_solver::optimizer::initialize_optimization_state(&mut problem)
         .unwrap_or_else(|e| panic!("optimization state: {e:?}"));

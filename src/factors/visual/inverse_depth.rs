@@ -25,6 +25,7 @@ use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 
 /// Inverse-depth landmark reprojection factor over `[pose_i, anchor, pose_j]`.
@@ -259,21 +260,12 @@ impl<CAM: CameraModel> Factor for InverseDepthFactor<CAM> {
         (2, 15)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 3 {
-            return Err(format!(
-                "InverseDepthFactor expects 3 variables, got {}",
-                variables.len()
-            ));
-        }
-        for (idx, expected) in [(0usize, SE3::REP_SIZE), (1, 3), (2, SE3::REP_SIZE)] {
-            if variables[idx].as_param_slice().len() != expected {
-                return Err(format!(
-                    "InverseDepthFactor block {idx} requires {expected} parameters"
-                ));
-            }
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE, 3, SE3::REP_SIZE],
+            "InverseDepthFactor",
+        )
     }
 }
 

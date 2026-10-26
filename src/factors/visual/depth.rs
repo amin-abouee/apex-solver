@@ -35,6 +35,7 @@ use apex_manifolds::se3::SE3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_block_sizes;
 
@@ -238,7 +239,7 @@ impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
         (1, 16)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[SE3::REP_SIZE, 4, SE3::REP_SIZE],

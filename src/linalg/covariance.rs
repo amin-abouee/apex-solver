@@ -512,18 +512,18 @@ mod tests {
 
     /// Two independent scalars observed with different precisions:
     /// `H = diag(4, 100)`, so `Σ = diag(0.25, 0.01)`.
-    fn two_variable_problem() -> (Problem, VarKey, VarKey) {
+    fn two_variable_problem() -> Result<(Problem, VarKey, VarKey), Box<dyn std::error::Error>> {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x = problem.add_variable(ManifoldType::RN, dvector![0.0]);
         let y = problem.add_variable(ManifoldType::RN, dvector![0.0]);
-        problem.add_residual_block(&[x], Box::new(ScaledFactor { a: 2.0, b: 1.0 }), None);
-        problem.add_residual_block(&[y], Box::new(ScaledFactor { a: 10.0, b: 1.0 }), None);
-        (problem, x, y)
+        problem.add_residual_block(&[x], Box::new(ScaledFactor { a: 2.0, b: 1.0 }), None)?;
+        problem.add_residual_block(&[y], Box::new(ScaledFactor { a: 10.0, b: 1.0 }), None)?;
+        Ok((problem, x, y))
     }
 
     #[test]
     fn computes_analytic_inverse_hessian() -> TestResult {
-        let (problem, x, y) = two_variable_problem();
+        let (problem, x, y) = two_variable_problem()?;
         let cov = Covariance::compute(
             CovarianceOptions::default(),
             &problem,
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn independent_variables_have_zero_cross_covariance() -> TestResult {
-        let (problem, x, y) = two_variable_problem();
+        let (problem, x, y) = two_variable_problem()?;
         let cov = Covariance::compute(
             CovarianceOptions::default(),
             &problem,
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn per_variable_matches_individual_blocks() -> TestResult {
-        let (problem, x, y) = two_variable_problem();
+        let (problem, x, y) = two_variable_problem()?;
         let cov = Covariance::compute(
             CovarianceOptions::default(),
             &problem,
@@ -582,11 +582,11 @@ mod tests {
     /// A gauge-free problem must fail loudly under Cholesky rather than silently
     /// returning whatever damping happened to make invertible. See issue #38.
     #[test]
-    fn rank_deficient_problem_reports_error_under_cholesky() {
+    fn rank_deficient_problem_reports_error_under_cholesky() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x = problem.add_variable(ManifoldType::RN, dvector![0.0]);
         let y = problem.add_variable(ManifoldType::RN, dvector![0.0]);
-        problem.add_residual_block(&[x, y], Box::new(DifferenceFactor), None);
+        problem.add_residual_block(&[x, y], Box::new(DifferenceFactor), None)?;
 
         let variables = problem.variables.clone();
         match Covariance::compute(CovarianceOptions::default(), &problem, &variables) {
@@ -603,6 +603,7 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     /// The same gauge-free problem succeeds under `DenseSvd`, which reports the
@@ -612,7 +613,7 @@ mod tests {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x = problem.add_variable(ManifoldType::RN, dvector![0.0]);
         let y = problem.add_variable(ManifoldType::RN, dvector![0.0]);
-        problem.add_residual_block(&[x, y], Box::new(DifferenceFactor), None);
+        problem.add_residual_block(&[x, y], Box::new(DifferenceFactor), None)?;
 
         let variables = problem.variables.clone();
         let cov = Covariance::compute(
@@ -653,7 +654,7 @@ mod tests {
     /// scaling is skipped rather than dividing by zero.
     #[test]
     fn variance_scaling_skipped_without_residual_dof() -> TestResult {
-        let (problem, x, _) = two_variable_problem();
+        let (problem, x, _) = two_variable_problem()?;
         let variables = problem.variables.clone();
 
         let unscaled = Covariance::compute(CovarianceOptions::default(), &problem, &variables)?;
@@ -676,8 +677,8 @@ mod tests {
         let x = problem.add_variable(ManifoldType::RN, dvector![0.0]);
         // Two inconsistent observations of the same scalar: H = 2, and at x = 0
         // the residuals are (-1, -3), so cost = 0.5·10 = 5 and σ̂² = 2·5/(2−1) = 10.
-        problem.add_residual_block(&[x], Box::new(ScaledFactor { a: 1.0, b: 1.0 }), None);
-        problem.add_residual_block(&[x], Box::new(ScaledFactor { a: 1.0, b: 3.0 }), None);
+        problem.add_residual_block(&[x], Box::new(ScaledFactor { a: 1.0, b: 1.0 }), None)?;
+        problem.add_residual_block(&[x], Box::new(ScaledFactor { a: 1.0, b: 3.0 }), None)?;
 
         let variables = problem.variables.clone();
         let cov = Covariance::compute(

@@ -93,6 +93,9 @@ use apex_manifolds::{LieGroup, Tangent};
 use faer::Mat;
 use nalgebra::DVector;
 
+use crate::core::{CoreError, CoreResult};
+use crate::error::ErrorLogging;
+
 /// Generic Variable struct that uses static dispatch with any manifold type.
 ///
 /// This struct represents optimization variables that live on manifolds and provides
@@ -395,8 +398,8 @@ pub trait ManifoldVariable: Send + Sync + 'static {
     ///
     /// # Errors
     /// If the implementor does not support freezing.
-    fn freeze_linearization_point(&mut self) -> Result<(), String> {
-        Err("this variable does not support a frozen linearization point".to_string())
+    fn freeze_linearization_point(&mut self) -> CoreResult<()> {
+        Err(CoreError::FreezeUnsupported.log())
     }
     /// Freeze the linearization point at an **explicit** value.
     ///
@@ -409,11 +412,11 @@ pub trait ManifoldVariable: Send + Sync + 'static {
     /// marginal and restores it here.
     ///
     /// # Errors
-    /// If the implementor does not support freezing, or `params` is the wrong
-    /// length for the manifold.
-    fn set_linearization_point(&mut self, params: &[f64]) -> Result<(), String> {
+    /// If the implementor does not support freezing, or `params` is not a
+    /// valid element of the manifold.
+    fn set_linearization_point(&mut self, params: &[f64]) -> CoreResult<()> {
         let _ = params;
-        Err("this variable does not support a frozen linearization point".to_string())
+        Err(CoreError::FreezeUnsupported.log())
     }
     /// Clear the frozen linearization point.
     fn clear_linearization_point(&mut self) {}
@@ -441,20 +444,22 @@ where
             .map(LieGroup::as_param_slice)
     }
 
-    fn freeze_linearization_point(&mut self) -> Result<(), String> {
+    fn freeze_linearization_point(&mut self) -> CoreResult<()> {
         self.linearization_point = Some(self.value.clone());
         Ok(())
     }
 
-    fn set_linearization_point(&mut self, params: &[f64]) -> Result<(), String> {
+    fn set_linearization_point(&mut self, params: &[f64]) -> CoreResult<()> {
         let expected = self.value.as_param_slice().len();
         if params.len() != expected {
-            return Err(format!(
-                "linearization point takes {expected} parameters, got {}",
-                params.len()
-            ));
+            return Err(CoreError::DimensionMismatch {
+                what: "linearization point",
+                expected,
+                actual: params.len(),
+            }
+            .log());
         }
-        self.linearization_point = Some(M::from_param_slice(params));
+        self.linearization_point = Some(M::try_from_param_slice(params)?);
         Ok(())
     }
 

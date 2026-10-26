@@ -413,7 +413,7 @@ fn run_bundle_adjustment(
     // Fix first camera pose (gauge freedom) - all 6 DOF
     info!("Fixing first camera pose (all 6 DOF) for gauge freedom...");
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
 
     // Configure solver
@@ -585,9 +585,13 @@ where
         };
 
         if include_intrinsics {
-            problem.add_residual_block(&[pose_key, pt_key, intr_key], Box::new(factor), Some(loss));
+            problem.add_residual_block(
+                &[pose_key, pt_key, intr_key],
+                Box::new(factor),
+                Some(loss),
+            )?;
         } else {
-            problem.add_residual_block(&[pose_key, pt_key], Box::new(factor), Some(loss));
+            problem.add_residual_block(&[pose_key, pt_key], Box::new(factor), Some(loss))?;
         }
     }
     Ok(())

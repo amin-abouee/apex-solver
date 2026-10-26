@@ -2830,13 +2830,13 @@ mod tests {
                 &[w[0], w[1]],
                 Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0))),
                 None,
-            );
+            )?;
         }
         problem.add_residual_block(
             &[keys[0]],
             Box::new(PriorFactor::new(SE2::from_xy_angle(0.0, 0.0, 0.0))),
             None,
-        );
+        )?;
         problem.mark_for_elimination(keys[1]);
         problem.mark_for_elimination(keys[3]);
         problem.group_rows_for_elimination();
@@ -2917,13 +2917,13 @@ mod tests {
                 &[w[0], w[1]],
                 Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0))),
                 None,
-            );
+            )?;
         }
         problem.add_residual_block(
             &[keys[0]],
             Box::new(PriorFactor::new(SE2::from_xy_angle(0.0, 0.0, 0.0))),
             None,
-        );
+        )?;
         problem.mark_for_elimination(keys[1]);
         problem.mark_for_elimination(keys[3]);
         problem.group_rows_for_elimination();
@@ -3000,13 +3000,13 @@ mod tests {
                 &[w[0], w[1]],
                 Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0))),
                 None,
-            );
+            )?;
         }
         problem.add_residual_block(
             &[keys[0]],
             Box::new(PriorFactor::new(SE2::from_xy_angle(0.0, 0.0, 0.0))),
             None,
-        );
+        )?;
         problem.mark_for_elimination(keys[1]);
         problem.mark_for_elimination(keys[3]);
         problem.group_rows_for_elimination();

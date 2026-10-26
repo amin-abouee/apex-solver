@@ -15,6 +15,7 @@ use nalgebra::Vector3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::group_point::act_point;
 
 /// Barometric altitude factor over `[pose (7), baro bias (1)]`
@@ -68,18 +69,12 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for BarometricFactor<G> {
         (1, G::DOF + 1)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        match variables {
-            [state, bias]
-                if state.manifold_type_name() == G::NAME && bias.as_param_slice().len() == 1 =>
-            {
-                Ok(())
-            }
-            _ => Err(format!(
-                "BarometricFactor expects [{} state, R¹ baro bias]",
-                G::NAME
-            )),
-        }
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        use crate::factors::common::validate::{expect_count, expect_manifold, expect_size};
+        const FACTOR: &str = "BarometricFactor";
+        expect_count(variables, 2, FACTOR)?;
+        expect_manifold(variables[0], 0, G::NAME, FACTOR)?;
+        expect_size(variables[1], 1, 1, FACTOR)
     }
 }
 #[cfg(test)]

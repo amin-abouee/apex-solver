@@ -20,9 +20,10 @@ use rayon::prelude::*;
 use apex_manifolds::capability::ActsOnPoints3;
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::common::validate::expect_manifolds;
-use crate::factors::{Factor, NormalBlocks};
+use crate::factors::common::validate::{
+    expect_at_least, expect_group_dof, expect_manifolds, expect_point_and_sigma,
+};
+use crate::factors::{Factor, FactorResult, NormalBlocks};
 
 use super::action::{Action, MAX_DOF, cached_action};
 use super::plane::Plane;
@@ -58,28 +59,13 @@ impl<G: ActsOnPoints3> LidarMapPlanesFactor<G> {
     ///
     /// A group without a 3-D point action, no match, a non-finite point or
     /// a sigma that is not finite and positive.
-    pub fn new(matches: impl Into<Arc<[PlaneMatch]>>) -> CoreResult<Self> {
+    pub fn new(matches: impl Into<Arc<[PlaneMatch]>>) -> FactorResult<Self> {
         let matches = matches.into();
         let name = "LidarMapPlanesFactor";
-        if G::DOF > MAX_DOF {
-            return Err(CoreError::InvalidInput(format!(
-                "{name}: {} has too many degrees of freedom",
-                G::NAME
-            )));
-        }
-        if matches.is_empty() {
-            return Err(CoreError::InvalidInput(format!("{name}: no match")));
-        }
+        expect_group_dof(name, G::NAME, G::DOF, MAX_DOF)?;
+        expect_at_least(name, "match list", matches.len(), 1)?;
         for m in matches.iter() {
-            if !m.point.iter().all(|v| v.is_finite()) {
-                return Err(CoreError::InvalidInput(format!("{name}: non-finite point")));
-            }
-            if !(m.sigma.is_finite() && m.sigma > 0.0) {
-                return Err(CoreError::InvalidInput(format!(
-                    "{name}: sigma must be finite and positive, got {}",
-                    m.sigma
-                )));
-            }
+            expect_point_and_sigma(name, &m.point, m.sigma)?;
         }
         Ok(Self {
             matches,
@@ -195,7 +181,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for LidarMapPlanesFactor<G
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_manifolds(
             variables,
             &[G::NAME],
@@ -214,7 +200,9 @@ mod tests {
     use faer::Mat;
     use nalgebra::{DMatrix, DVector, UnitQuaternion};
 
-    fn matches() -> Result<Vec<PlaneMatch>, CoreError> {
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn matches() -> Result<Vec<PlaneMatch>, Box<dyn std::error::Error>> {
         (0..6)
             .map(|k| {
                 let f = f64::from(k);
@@ -230,7 +218,7 @@ mod tests {
     /// Over several parallel chunks, the normal equations equal the
     /// Jacobian's `JᵀJ`, `Jᵀr` and `‖r‖²`; and a shared `Arc` is not copied.
     #[test]
-    fn normal_equations_match_the_jacobian() -> Result<(), CoreError> {
+    fn normal_equations_match_the_jacobian() -> TestResult {
         let base = matches()?;
         let many: Arc<[PlaneMatch]> = (0..3 * CHUNK + 7)
             .map(|k| {
@@ -253,7 +241,7 @@ mod tests {
                 &params,
                 Some(&mut NormalBlocks::new(&mut hessian, &mut gradient, &[0])),
             )
-            .ok_or_else(|| CoreError::InvalidInput("no normal equations".to_string()))?;
+            .ok_or("no normal equations")?;
         assert_eq!(factor.accumulate_normal(&params, None), Some(cost));
         let (rows, cols) = factor.jacobian_shape();
         let mut r = vec![0.0; rows];
@@ -269,7 +257,7 @@ mod tests {
 
     /// Residuals match the point-by-point formula, and the Jacobian finite
     /// differences, on every group.
-    fn check<G: ActsOnPoints3 + Send + Sync + 'static>(state: G) -> Result<(), CoreError> {
+    fn check<G: ActsOnPoints3 + Send + Sync + 'static>(state: G) -> TestResult {
         let ms = matches()?;
         let factor = LidarMapPlanesFactor::<G>::new(ms.clone())?;
         let (rows, cols) = factor.jacobian_shape();
@@ -310,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn batched_matches_agree_with_single_points_on_every_group() -> Result<(), CoreError> {
+    fn batched_matches_agree_with_single_points_on_every_group() -> TestResult {
         let q = UnitQuaternion::from_euler_angles(0.2, -0.1, 0.7);
         let t = Vector3::new(0.4, -1.2, 0.3);
         check(SE3::new(t, q))?;
@@ -319,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn construction_rejects_bad_input() -> Result<(), CoreError> {
+    fn construction_rejects_bad_input() -> TestResult {
         assert!(LidarMapPlanesFactor::<SE3>::new(Vec::new()).is_err());
         let mut ms = matches()?;
         ms[0].sigma = 0.0;

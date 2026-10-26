@@ -13,6 +13,7 @@
 use super::BetweenFactor;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::validate::expect_block_sizes;
 use apex_manifolds::LieGroup;
 use faer::prelude::ReborrowMut;
@@ -134,7 +135,7 @@ where
         (dof, dof)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[self.prior.as_param_slice().len()],
@@ -208,16 +209,15 @@ impl Factor for EuclideanPriorFactor {
 
     /// Restrict to `Rn` variables: on anything else the ambient difference is
     /// not the tangent-space error (see the type docs).
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        for variable in variables {
-            if variable.manifold_type_name() != "Rn" {
-                return Err(format!(
-                    "EuclideanPriorFactor operates on ambient parameters and is restricted to Rn \
-                     variables, but was registered on a {} variable. Use PriorFactor<T> for \
-                     Lie-group anchoring.",
-                    variable.manifold_type_name()
-                ));
-            }
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        // Use PriorFactor<T> to anchor a Lie-group variable.
+        for (block, variable) in variables.iter().enumerate() {
+            crate::factors::common::validate::expect_manifold(
+                *variable,
+                block,
+                "Rn",
+                "EuclideanPriorFactor",
+            )?;
         }
         Ok(())
     }
@@ -413,7 +413,13 @@ mod tests {
             .validate_variables(&[variables.get(key).ok_or("key missing")?.as_ref()])
             .err()
             .ok_or("expected rejection")?;
-        assert!(err.contains("Rn"), "rejection must name Rn: {err}");
+        assert!(
+            matches!(
+                err,
+                crate::factors::FactorError::VariableManifold { expected: "Rn", .. }
+            ),
+            "rejection must name Rn: {err}"
+        );
         Ok(())
     }
 }

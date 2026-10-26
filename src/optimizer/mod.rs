@@ -119,6 +119,19 @@ pub enum OptimizerError {
     #[error("Linearizer error: {0}")]
     Linearizer(#[from] crate::linearizer::LinearizerError),
 
+    /// A finite variable bound, which no optimizer enforces yet: solving
+    /// would silently return the unconstrained answer.
+    #[error(
+        "variable {key:?} component {index} has bound [{lower}, {upper}], but no optimizer \
+         enforces variable bounds yet; remove it with Problem::remove_variable_bounds"
+    )]
+    BoundsUnsupported {
+        key: crate::core::VarKey,
+        index: usize,
+        lower: f64,
+        upper: f64,
+    },
+
     /// Problem has no variables to optimize
     #[error("Problem has no variables to optimize")]
     EmptyProblem,
@@ -595,14 +608,13 @@ pub fn initialize_optimization_state(problem: &mut Problem) -> OptimizerResult<I
             .find(|&(_, &(lower, upper))| lower > f64::NEG_INFINITY || upper < f64::INFINITY)
             .map(|(&idx, &(lower, upper))| (k, idx, lower, upper))
     }) {
-        let core_err = crate::core::CoreError::InvalidConstraint(format!(
-            "variable {var_key:?} component {idx} has bound [{lower}, {upper}], but no \
-             optimizer currently enforces variable bounds during the solve — set_variable_bounds \
-             is accepted and stored but silently ignored, which would return the unconstrained \
-             answer; remove the bound (Problem::remove_variable_bounds) or wait for constrained \
-             optimization support"
-        ));
-        return Err(OptimizerError::from(core_err));
+        return Err(OptimizerError::BoundsUnsupported {
+            key: var_key,
+            index: idx,
+            lower,
+            upper,
+        }
+        .log());
     }
 
     let mut variables = problem.variables.clone();
@@ -1942,7 +1954,7 @@ mod tests {
 
         let mut problem = Problem::new(JacobianMode::Sparse);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
 
         let state = initialize_optimization_state(&mut problem)?;
         assert_eq!(state.total_dof, 1);
@@ -1956,14 +1968,14 @@ mod tests {
     /// reject with a typed error rather than silently solving the
     /// unconstrained problem, for zero-width, one-sided, and interior bounds.
     #[test]
-    fn initialize_optimization_state_rejects_active_variable_bounds() {
+    fn initialize_optimization_state_rejects_active_variable_bounds() -> TestResult {
         use crate::core::problem::Problem;
 
         for (lower, upper) in [(0.0, 0.0), (f64::NEG_INFINITY, 5.0), (-5.0, f64::INFINITY)] {
             let mut problem = Problem::new(JacobianMode::Sparse);
             let k = problem.add_variable(ManifoldType::RN, dvector![10.0]);
-            problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
-            problem.set_variable_bounds(k, 0, lower, upper);
+            problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
+            problem.set_variable_bounds(k, 0, lower, upper)?;
 
             let Err(err) = initialize_optimization_state(&mut problem) else {
                 panic!("a non-trivial bound must be rejected, not silently ignored");
@@ -1974,6 +1986,7 @@ mod tests {
                 "error must reference the offending bound, got: {message}"
             );
         }
+        Ok(())
     }
 
     /// A bound of exactly `(-inf, inf)` is a documented no-op (equivalent to
@@ -1984,8 +1997,8 @@ mod tests {
 
         let mut problem = Problem::new(JacobianMode::Sparse);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
-        problem.set_variable_bounds(k, 0, f64::NEG_INFINITY, f64::INFINITY);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
+        problem.set_variable_bounds(k, 0, f64::NEG_INFINITY, f64::INFINITY)?;
 
         initialize_optimization_state(&mut problem)?;
         Ok(())
@@ -1998,7 +2011,7 @@ mod tests {
 
         let mut problem = Problem::new(JacobianMode::Sparse);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
 
         let state = initialize_optimization_state(&mut problem)?;
         assert_eq!(state.total_dof, 1);

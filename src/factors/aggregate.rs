@@ -31,8 +31,9 @@ use std::sync::Mutex;
 use rayon::prelude::*;
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::{Factor, NormalBlocks};
+use crate::error::ErrorLogging;
+use crate::factors::common::validate::expect_count;
+use crate::factors::{Factor, FactorError, FactorResult, NormalBlocks};
 
 /// Parts per deterministic summation chunk.
 const CHUNK: usize = 64;
@@ -86,30 +87,40 @@ impl AggregateFactor {
     ///
     /// # Errors
     ///
-    /// No part or a part reading a block out of range
-    /// ([`CoreError::InvalidInput`]), or a part whose Jacobian width does not
-    /// match its blocks' dimensions ([`CoreError::DimensionMismatch`]).
-    pub fn new(parts: Vec<AggregatePart>, dofs: Vec<usize>) -> CoreResult<Self> {
+    /// No part or a part reading a block out of range, or a part whose
+    /// Jacobian width does not match its blocks' dimensions.
+    pub fn new(parts: Vec<AggregatePart>, dofs: Vec<usize>) -> FactorResult<Self> {
+        const FACTOR: &str = "AggregateFactor";
         if parts.is_empty() {
-            return Err(CoreError::InvalidInput(
-                "AggregateFactor: no part".to_string(),
-            ));
+            return Err(FactorError::TooFew {
+                factor: FACTOR,
+                what: "part list",
+                min: 1,
+                actual: 0,
+            }
+            .log());
         }
-        for (index, part) in parts.iter().enumerate() {
+        for part in &parts {
             let mut width = 0;
             for &block in &part.blocks {
                 width += dofs.get(block).ok_or_else(|| {
-                    CoreError::InvalidInput(format!(
-                        "AggregateFactor: part {index} reads block {block} of {}",
-                        dofs.len()
-                    ))
+                    FactorError::IndexOutOfRange {
+                        factor: FACTOR,
+                        what: "part block",
+                        index: block,
+                        len: dofs.len(),
+                    }
+                    .log()
                 })?;
             }
             if width != part.factor.jacobian_shape().1 {
-                return Err(CoreError::DimensionMismatch(format!(
-                    "AggregateFactor: part {index} has {} columns, its blocks {width}",
-                    part.factor.jacobian_shape().1
-                )));
+                return Err(FactorError::DimensionMismatch {
+                    factor: FACTOR,
+                    what: "part Jacobian columns",
+                    expected: width,
+                    actual: part.factor.jacobian_shape().1,
+                }
+                .log());
             }
         }
         let offsets = dofs
@@ -284,6 +295,8 @@ impl Factor for AggregateFactor {
             let equations = self.normal_equations(params);
             residual.fill(0.0);
             residual[n] = equations.2.sqrt();
+            // The trial cache is only a shortcut: a poisoned lock skips it and
+            // the next linearization recomputes the same normal equations.
             if let Ok(mut trial) = self.trial.lock() {
                 *trial = Some(Trial {
                     params: flat,
@@ -292,6 +305,7 @@ impl Factor for AggregateFactor {
             }
             return;
         };
+        // A poisoned cache is treated as empty (see above), never as an error.
         let kept = self
             .trial
             .lock()
@@ -342,14 +356,8 @@ impl Factor for AggregateFactor {
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != self.dofs.len() {
-            return Err(format!(
-                "AggregateFactor expects {} blocks, got {}",
-                self.dofs.len(),
-                variables.len()
-            ));
-        }
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        expect_count(variables, self.dofs.len(), "AggregateFactor")?;
         for part in &self.parts {
             let mine: Vec<&dyn ManifoldVariable> =
                 part.blocks.iter().map(|&b| variables[b]).collect();
@@ -366,6 +374,8 @@ mod tests {
     use apex_manifolds::se3::SE3;
     use apex_manifolds::{LieGroup, Tangent};
     use nalgebra::{UnitQuaternion, Vector3};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn pose(i: f64) -> SE3 {
         SE3::new(
@@ -396,7 +406,7 @@ mod tests {
     /// Three planes over three poses, each plane on a different pair: the
     /// aggregate's `J'ᵀJ'`, `J'ᵀr'` and `‖r'‖²` equal the parts' sums.
     #[test]
-    fn the_aggregate_preserves_normal_equations_and_cost() -> Result<(), CoreError> {
+    fn the_aggregate_preserves_normal_equations_and_cost() -> TestResult {
         let poses: Vec<SE3> = (0..3).map(|i| pose(f64::from(i))).collect();
         let moved: Vec<SE3> = poses
             .iter()
@@ -420,7 +430,7 @@ mod tests {
         let make = |normal: Vector3<f64>,
                     offset: f64,
                     pair: [usize; 2]|
-         -> Result<Box<dyn Factor>, CoreError> {
+         -> Result<Box<dyn Factor>, Box<dyn std::error::Error>> {
             let frames = pair
                 .iter()
                 .enumerate()
@@ -443,7 +453,7 @@ mod tests {
                     blocks: pair.to_vec(),
                 })
             })
-            .collect::<Result<Vec<_>, CoreError>>()?;
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
         let aggregate = AggregateFactor::new(parts, vec![6, 6, 6])?;
         let params: Vec<&[f64]> = moved.iter().map(|p| p.as_param_slice()).collect();
         let (hessian, gradient, cost) = aggregate.normal_equations(&params);
@@ -474,7 +484,7 @@ mod tests {
     /// part (its own normal equations), a between factor (rows coupling two
     /// blocks, read in reverse block order) and a prior (one block).
     #[test]
-    fn sparse_accumulation_matches_the_dense_sum() -> Result<(), CoreError> {
+    fn sparse_accumulation_matches_the_dense_sum() -> TestResult {
         use crate::factors::pose::{BetweenFactor, PriorFactor};
         let poses: Vec<SE3> = (0..3).map(|i| pose(f64::from(i))).collect();
         let normal = Vector3::new(0.1, 0.2, 1.0).normalize();
@@ -542,9 +552,9 @@ mod tests {
     /// the same point reuses them and equals a fresh linearization, and a
     /// different point does not.
     #[test]
-    fn a_trial_point_is_linearized_once() -> Result<(), CoreError> {
+    fn a_trial_point_is_linearized_once() -> TestResult {
         use crate::factors::pose::PriorFactor;
-        let make = || -> Result<AggregateFactor, CoreError> {
+        let make = || -> FactorResult<AggregateFactor> {
             AggregateFactor::new(
                 vec![
                     AggregatePart {
@@ -573,23 +583,11 @@ mod tests {
         let reused = make()?;
         let mut cost = vec![0.0; rows];
         reused.linearize(&params, &mut cost, None);
-        assert!(
-            reused
-                .trial
-                .lock()
-                .map_err(|e| CoreError::ParallelComputation(e.to_string()))?
-                .is_some()
-        );
+        assert!(reused.trial.lock().map_err(|e| e.to_string())?.is_some());
         let total: f64 = fresh.0.iter().map(|v| v * v).sum();
         assert!((cost[rows - 1].powi(2) - total).abs() < 1e-12 * total.max(1.0));
         assert_eq!(linearized(&reused, &params), fresh);
-        assert!(
-            reused
-                .trial
-                .lock()
-                .map_err(|e| CoreError::ParallelComputation(e.to_string()))?
-                .is_none()
-        );
+        assert!(reused.trial.lock().map_err(|e| e.to_string())?.is_none());
 
         let moved = pose(0.2);
         reused.linearize(
@@ -602,14 +600,14 @@ mod tests {
     }
 
     #[test]
-    fn construction_rejects_bad_layouts() -> Result<(), CoreError> {
+    fn construction_rejects_bad_layouts() -> TestResult {
         assert!(AggregateFactor::new(Vec::new(), vec![6]).is_err());
         let moments = PointMoments::from_points(&[
             Vector3::new(1.0, 0.0, 0.0),
             Vector3::new(0.0, 1.0, 0.0),
             Vector3::new(0.0, 0.0, 1.0),
         ]);
-        let part = |blocks: Vec<usize>| -> Result<AggregatePart, CoreError> {
+        let part = |blocks: Vec<usize>| -> Result<AggregatePart, FactorError> {
             Ok(AggregatePart {
                 factor: Box::new(LidarPlaneMomentFactor::<SE3>::new(
                     vec![moments],

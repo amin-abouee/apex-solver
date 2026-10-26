@@ -11,13 +11,12 @@ use apex_manifolds::capability::ActsOnPoints3;
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, Vector3};
 
-use crate::core::CoreError;
-use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
+use crate::error::ErrorLogging;
 use crate::factors::common::group_point::{
     act_point, expect_state_and_point, expect_two_states, into_anchor,
 };
+use crate::factors::{Factor, FactorError, FactorResult};
 
 /// 1D range constraint between the origins (translations) of two states.
 ///
@@ -82,7 +81,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for PosePoseRangeFactor<G>
         (1, 2 * G::DOF)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_two_states::<G>(variables, "PosePoseRangeFactor")
     }
 }
@@ -146,7 +145,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for PosePointRangeFactor<G
         (1, G::DOF + 3)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_state_and_point::<G>(variables, "PosePointRangeFactor")
     }
 }
@@ -172,12 +171,14 @@ pub struct BearingRangeFactor<G: ActsOnPoints3> {
 
 impl<G: ActsOnPoints3> BearingRangeFactor<G> {
     /// Create the factor; the bearing is normalized internally.
-    pub fn new(measured_bearing: Vector3<f64>, measured_range: f64) -> CoreResult<Self> {
+    pub fn new(measured_bearing: Vector3<f64>, measured_range: f64) -> FactorResult<Self> {
         let n = measured_bearing.norm();
         if !(n.is_finite() && n > 1e-12) {
-            return Err(CoreError::InvalidInput(
-                "measured bearing must be non-zero and finite".into(),
-            ));
+            return Err(FactorError::Degenerate {
+                factor: "BearingRangeFactor",
+                what: "measured bearing",
+            }
+            .log());
         }
         Ok(Self {
             measured_bearing: measured_bearing / n,
@@ -257,7 +258,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for BearingRangeFactor<G> 
         (4, G::DOF + 3)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_state_and_point::<G>(variables, "BearingRangeFactor")
     }
 }
@@ -269,12 +270,14 @@ mod tests {
     use apex_manifolds::se3::SE3Tangent;
     use apex_manifolds::{LieGroup, Tangent};
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     fn fd_check_1d(
         factor: &dyn Factor,
         pose: &SE3,
         second: Vec<f64>,
         second_is_pose: bool,
-    ) -> Result<(), CoreError> {
+    ) -> TestResult {
         let pose_vec: Vec<f64> = pose.as_param_slice().to_vec();
         let cols = factor.jacobian_shape().1;
         let mut r0 = vec![0.0; 1];
@@ -296,9 +299,7 @@ mod tests {
             let fd = (r_pert[0] - r0[0]) / EPS;
             let ana = jac_buf[col];
             if (fd - ana).abs() > TOL {
-                return Err(CoreError::InvalidInput(format!(
-                    "pose[{col}]: analytical={ana:.6} fd={fd:.6}"
-                )));
+                return Err(format!("pose[{col}]: analytical={ana:.6} fd={fd:.6}").into());
             }
         }
         let second_len = if second_is_pose { 6 } else { second.len() };
@@ -334,16 +335,14 @@ mod tests {
             let fd = (r_plus[0] - r_minus[0]) / (2.0 * EPS);
             let ana = jac_buf[6 + col];
             if (fd - ana).abs() > TOL {
-                return Err(CoreError::InvalidInput(format!(
-                    "second[{col}]: analytical={ana:.6} fd={fd:.6}"
-                )));
+                return Err(format!("second[{col}]: analytical={ana:.6} fd={fd:.6}").into());
             }
         }
         Ok(())
     }
 
     #[test]
-    fn pose_pose_range_zero_residual_and_fd() -> Result<(), CoreError> {
+    fn pose_pose_range_zero_residual_and_fd() -> TestResult {
         let ti = SE3::from_isometry(nalgebra::Isometry3::from_parts(
             nalgebra::Translation3::new(0.2, 0.4, -0.1),
             nalgebra::UnitQuaternion::from_euler_angles(0.02, 0.03, -0.01),
@@ -366,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn pose_point_range_zero_residual_and_fd() -> Result<(), CoreError> {
+    fn pose_point_range_zero_residual_and_fd() -> TestResult {
         let pose = SE3::from_isometry(nalgebra::Isometry3::from_parts(
             nalgebra::Translation3::new(0.3, -0.2, 0.6),
             nalgebra::UnitQuaternion::from_euler_angles(0.05, -0.02, 0.04),
@@ -386,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn bearing_range_zero_residual_and_fd() -> Result<(), CoreError> {
+    fn bearing_range_zero_residual_and_fd() -> TestResult {
         let pose = SE3::from_isometry(nalgebra::Isometry3::from_parts(
             nalgebra::Translation3::new(0.1, 0.3, -0.2),
             nalgebra::UnitQuaternion::from_euler_angles(0.03, 0.02, -0.05),
@@ -456,7 +455,7 @@ mod tests {
     /// way stays self-consistent and passes. That is exactly how
     /// `BearingRangeFactor` shipped using `R` where it needed `Rᵀ`.
     #[test]
-    fn bearing_range_golden_value_pins_the_convention() -> Result<(), CoreError> {
+    fn bearing_range_golden_value_pins_the_convention() -> TestResult {
         // Body yawed +90° about z at the origin. A landmark 2 m along world +x
         // therefore sits along the body's −y axis.
         let pose = SE3::from_isometry(nalgebra::Isometry3::from_parts(
@@ -484,7 +483,7 @@ mod tests {
     /// `BearingFactor` and `BearingRangeFactor` must agree on which way the
     /// bearing points; they disagreed before this convention was fixed.
     #[test]
-    fn bearing_range_agrees_with_bearing_factor() -> Result<(), CoreError> {
+    fn bearing_range_agrees_with_bearing_factor() -> TestResult {
         use crate::factors::ranging::bearing::BearingFactor;
 
         let pose = SE3::from_isometry(nalgebra::Isometry3::from_parts(

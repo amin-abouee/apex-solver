@@ -59,7 +59,7 @@ fn initial_cost(
         }),
         loss_boxed,
         noise,
-    );
+    )?;
     // One iteration with a tiny step cannot change the initial cost, which the
     // result reports directly — the cleanest public accessor for the objective.
     let config = apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig::new()
@@ -99,7 +99,7 @@ fn dense_noise_from_information_whitens_cost() -> TestResult {
         Box::new(EuclideanPriorFactor::new(DVector::from_vec(vec![0.0, 0.0]))),
         None,
         noise,
-    );
+    )?;
     let config = apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig::new()
         .with_max_iterations(1);
     let mut solver =
@@ -125,20 +125,21 @@ fn null_noise_is_bit_identical_to_unweighted_path() -> TestResult {
             target: DVector::from_vec(vec![0.5, -1.0, 2.5]),
         });
         if use_with_noise {
-            problem.add_residual_block_with_noise(&[x], factor, None, NoiseModel::Null);
+            problem.add_residual_block_with_noise(&[x], factor, None, NoiseModel::Null)?;
         } else {
-            problem.add_residual_block(&[x], factor, None);
+            problem.add_residual_block(&[x], factor, None)?;
         }
         let config = apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig::new()
             .with_max_iterations(1);
         let mut solver =
             apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardt::with_config(config);
-        solver
+        let result = solver
             .optimize(&mut problem)
-            .unwrap_or_else(|e| panic!("solve failed: {e:?}"))
+            .unwrap_or_else(|e| panic!("solve failed: {e:?}"));
+        Ok::<_, apex_solver::core::CoreError>(result)
     };
-    let with = build(true);
-    let without = build(false);
+    let with = build(true)?;
+    let without = build(false)?;
     assert_eq!(with.initial_cost.to_bits(), without.initial_cost.to_bits());
     assert_eq!(with.final_cost.to_bits(), without.final_cost.to_bits());
     assert_eq!(with.iterations, without.iterations);
@@ -179,7 +180,7 @@ fn whitened_jacobian_matches_whitened_fd() -> TestResult {
         }),
         None,
         noise.clone(),
-    );
+    )?;
     // Production initialization path (public): gives variables, index map,
     // symbolic structure and the assembly workspace.
     let mut state = apex_solver::optimizer::initialize_optimization_state(&mut problem)?;
@@ -237,7 +238,7 @@ fn dimension_mismatch_is_rejected() -> TestResult {
     let mut problem = Problem::new(JacobianMode::Sparse);
     let x = problem.add_variable(ManifoldType::RN, dvector![1.0, 2.0, 3.0]);
     let err = problem
-        .try_add_residual_block_with_noise(
+        .add_residual_block_with_noise(
             &[x],
             Box::new(Linear3 {
                 target: DVector::from_vec(vec![0.0; 3]),
@@ -248,7 +249,7 @@ fn dimension_mismatch_is_rejected() -> TestResult {
         .err()
         .ok_or("dimension mismatch must be rejected")?;
     assert!(
-        matches!(err, apex_solver::core::CoreError::DimensionMismatch(_)),
+        matches!(err, apex_solver::core::CoreError::DimensionMismatch { .. }),
         "{err}"
     );
     Ok(())
@@ -380,7 +381,7 @@ fn internally_whitened_factor_rejects_a_noise_model() {
         .unwrap_or_else(|e| panic!("{e}"))
     };
 
-    let rejected = problem.try_add_residual_block_with_noise(
+    let rejected = problem.add_residual_block_with_noise(
         &[pose, point],
         Box::new(make()),
         None,
@@ -395,7 +396,7 @@ fn internally_whitened_factor_rejects_a_noise_model() {
     }
 
     // The same factor registers fine with the null model.
-    if let Err(e) = problem.try_add_residual_block_with_noise(
+    if let Err(e) = problem.add_residual_block_with_noise(
         &[pose, point],
         Box::new(make()),
         None,
