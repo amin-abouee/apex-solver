@@ -159,6 +159,7 @@ vrs = ["apex-io/vrs"]
 download = ["apex-io/download"]
 
 [dependencies]
+apex-error.workspace = true
 apex-manifolds.workspace = true
 apex-camera-models.workspace = true
 
@@ -192,7 +193,6 @@ workspace = true
 optional = true
 
 [dev-dependencies]
-apex-error.workspace = true
 criterion.workspace = true
 rand.workspace = true
 tempfile.workspace = true

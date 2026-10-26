@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use apex_solver::ErrorLogging;
 use apex_solver::JacobianMode;
 use apex_solver::NoiseModel;
 use apex_solver::apex_io::{
@@ -22,6 +21,7 @@ use apex_solver::optimizer::levenberg_marquardt::{DampingUpdate, LevenbergMarqua
 use apex_solver::optimizer::{
     DogLeg, GaussNewton, LevenbergMarquardt, OptimizationStatus, initialize_optimization_state,
 };
+use apex_solver::{ErrorChainExt, ErrorLogging};
 use clap::Parser;
 use nalgebra::dvector;
 use tracing::{error, info, warn};

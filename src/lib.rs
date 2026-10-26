@@ -66,7 +66,7 @@ pub mod prelude;
 
 // Re-export core types
 pub use core::variable::Variable;
-pub use error::{ApexSolverError, ApexSolverResult, ErrorLogging};
+pub use error::{ApexSolverError, ApexSolverResult, ErrorChainExt, ErrorLogging};
 
 // Re-export factor types
 pub use core::marginalization::{

@@ -38,236 +38,88 @@
 //! should use path 1 directly.
 
 use crate::{
-    core::CoreError, factors::FactorError, linalg::LinAlgError, linearizer::LinearizerError,
-    observers::ObserverError, optimizer::OptimizerError,
+    core::CoreError, core::marginalization::MarginalizationError, factors::FactorError,
+    factors::imu::PreintegrationError, linalg::LinAlgError, linalg::covariance::CovarianceError,
+    linearizer::LinearizerError, observers::ObserverError, optimizer::OptimizerError,
 };
 use apex_camera_models::CameraModelError;
 use apex_io::IoError;
 use apex_manifolds::ManifoldError;
-use std::error::Error as StdError;
 use thiserror::Error;
+
+pub use apex_error::{ErrorChainExt, ErrorLogging};
 
 /// Main result type used throughout the apex-solver library
 pub type ApexSolverResult<T> = Result<T, ApexSolverError>;
 
-/// Main error type for the apex-solver library
+/// Root error of the apex-solver library.
 ///
-/// This is the top-level error type (Layer A) exposed by public APIs. It wraps
-/// module-specific errors while preserving the full error chain for debugging.
+/// Every variant transparently wraps one module error, so `Display` prints the
+/// module's own message and [`std::error::Error::source`] walks down from
+/// there. Render the whole chain with [`ErrorChainExt::chain`] or
+/// [`ErrorChainExt::chain_compact`]:
 ///
-/// # Error Chain Access
+/// ```
+/// use apex_solver::error::{ApexSolverError, ErrorChainExt};
+/// use apex_solver::apex_manifolds::{ManifoldError, RnError};
 ///
-/// You can access the full error chain using the `chain()` method:
-///
-/// ```no_run
-/// # use apex_solver::error::ApexSolverError;
-/// # use tracing::warn;
-/// # fn solver_optimize() -> Result<(), ApexSolverError> { Ok(()) }
-/// # fn example() {
-/// if let Err(e) = solver_optimize() {
-///     warn!("Error: {}", e);
-///     warn!("Full chain: {}", e.chain());
-/// }
-/// # }
+/// let leaf = RnError::DimensionMismatch { expected: 3, actual: 2 };
+/// let error = ApexSolverError::from(ManifoldError::from(leaf));
+/// assert_eq!(
+///     error.chain_compact(),
+///     "Rn dimension mismatch, expected 3 but got 2"
+/// );
 /// ```
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ApexSolverError {
-    /// Core module errors (problem construction, factors, variables, loss functions)
+    /// Problem construction and variable bookkeeping.
     #[error(transparent)]
     Core(#[from] CoreError),
 
-    /// Optimization algorithm errors
+    /// Optimization algorithms.
     #[error(transparent)]
     Optimizer(#[from] OptimizerError),
 
-    /// Linear algebra errors
+    /// Linear solvers and factorizations.
     #[error(transparent)]
     LinearAlgebra(#[from] LinAlgError),
 
-    /// Manifold operation errors
+    /// Manifold operations.
     #[error(transparent)]
     Manifold(#[from] ManifoldError),
 
-    /// I/O and file parsing errors
+    /// File loading and parsing.
     #[error(transparent)]
     Io(#[from] IoError),
 
-    /// Observer/visualization errors
+    /// Observers and visualization.
     #[error(transparent)]
     Observer(#[from] ObserverError),
 
-    /// Factor computation errors (projection, between factors, etc.)
+    /// Factor construction and registration.
     #[error(transparent)]
     Factor(#[from] FactorError),
 
-    /// Linearizer errors (Jacobian assembly, symbolic structure)
+    /// Residual and Jacobian assembly.
     #[error(transparent)]
     Linearizer(#[from] LinearizerError),
 
-    /// Camera model errors (projection, parameter validation, etc.)
+    /// Camera models.
     #[error(transparent)]
     Camera(#[from] CameraModelError),
-}
 
-// Module-specific errors are automatically converted via #[from] attributes above
-// No manual From implementations needed - thiserror handles it!
+    /// Marginalization of variables into a prior.
+    #[error(transparent)]
+    Marginalization(#[from] MarginalizationError),
 
-/// Trait for error logging with chaining support.
-///
-/// Provides `log()` and `log_with_source()` methods for all error types in the
-/// apex-solver library. Implemented as a blanket trait for any type that implements
-/// `Display`, so all error enums (`CoreError`, `LinAlgError`, `OptimizerError`,
-/// `FactorError`, `LinearizerError`, `ObserverError`, `ApexSolverError`) get these
-/// methods automatically without per-type boilerplate.
-///
-/// # Example
-///
-/// ```no_run
-/// use apex_solver::error::ErrorLogging;
-/// use apex_solver::core::CoreError;
-///
-/// fn operation() -> Result<(), CoreError> { Ok(()) }
-///
-/// fn example() -> Result<(), CoreError> {
-///     // Log and propagate — .log() returns self for chaining with ?
-///     operation()
-///         .map_err(|e| e.log())?;
-///     Ok(())
-/// }
-/// ```
-///
-/// # Logging with source context
-///
-/// ```no_run
-/// use apex_solver::error::ErrorLogging;
-/// use apex_solver::linalg::LinAlgError;
-///
-/// fn matrix_op() -> Result<(), std::io::Error> { Ok(()) }
-///
-/// fn example() -> Result<(), LinAlgError> {
-///     matrix_op()
-///         .map_err(|e| {
-///             LinAlgError::SingularMatrix("matrix is singular".to_string())
-///                 .log_with_source(e)
-///         })?;
-///     Ok(())
-/// }
-/// ```
-pub trait ErrorLogging: Sized + std::fmt::Display {
-    /// Log the error with `tracing::error` and return self for chaining.
-    ///
-    /// This is equivalent to `tracing::error!("{}", self); self` but allows
-    /// method chaining with `?` via `.map_err(|e| e.log())`.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use apex_solver::core::CoreError;
-    /// use apex_solver::error::ErrorLogging;
-    ///
-    /// let e = CoreError::Variable("missing key".to_string());
-    /// let returned = e.log();
-    /// assert_eq!(returned.to_string(), "Variable error: missing key");
-    /// ```
-    fn log(self) -> Self {
-        tracing::error!("{}", self);
-        self
-    }
+    /// Covariance estimation.
+    #[error(transparent)]
+    Covariance(#[from] CovarianceError),
 
-    /// Log the error with an additional source error for debugging context.
-    ///
-    /// Logs both the error and the underlying source error (from a third-party
-    /// library or internal operation), providing full debugging context.
-    ///
-    /// # Arguments
-    ///
-    /// * `source_error` — The original error (must implement `Debug`)
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use apex_solver::linalg::LinAlgError;
-    /// use apex_solver::error::ErrorLogging;
-    ///
-    /// let source = std::io::Error::other("disk full");
-    /// let e = LinAlgError::FactorizationFailed("LU decomposition failed".to_string());
-    /// let returned = e.log_with_source(source);
-    /// assert_eq!(returned.to_string(), "Matrix factorization failed: LU decomposition failed");
-    /// ```
-    fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
-        tracing::error!("{} | Source: {:?}", self, source_error);
-        self
-    }
-}
-
-// Blanket implementation: any type that implements Display gets ErrorLogging for free.
-// This eliminates the need for per-error-type log()/log_with_source() methods.
-impl<T: std::fmt::Display> ErrorLogging for T {}
-
-impl ApexSolverError {
-    /// Get the full error chain as a string for logging and debugging.
-    ///
-    /// This method traverses the error source chain and returns a formatted string
-    /// showing the hierarchy of errors from the top-level ApexSolverError down to the
-    /// root cause.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use apex_solver::error::ApexSolverError;
-    /// # use tracing::warn;
-    /// # fn solver_optimize() -> Result<(), ApexSolverError> { Ok(()) }
-    /// # fn example() {
-    /// match solver_optimize() {
-    ///     Ok(result) => { /* ... */ }
-    ///     Err(e) => {
-    ///         warn!("Optimization failed!");
-    ///         warn!("Error chain: {}", e.chain());
-    ///         // Output: "Optimizer error: Linear system solve failed →
-    ///         //          Linear algebra error: Singular matrix detected"
-    ///     }
-    /// }
-    /// # }
-    /// ```
-    pub fn chain(&self) -> String {
-        let mut chain = vec![self.to_string()];
-        let mut source = self.source();
-
-        while let Some(err) = source {
-            chain.push(format!("  → {}", err));
-            source = err.source();
-        }
-
-        chain.join("\n")
-    }
-
-    /// Get a compact single-line error chain for logging
-    ///
-    /// Similar to `chain()` but formats as a single line with arrow separators.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use apex_solver::error::ApexSolverError;
-    /// # use apex_solver::core::CoreError;
-    /// # use tracing::error;
-    /// # fn example() {
-    /// # let apex_err = ApexSolverError::Core(CoreError::InvalidInput("test".to_string()));
-    /// error!("Operation failed: {}", apex_err.chain_compact());
-    /// // Output: "Optimizer error → Linear algebra error → Singular matrix"
-    /// # }
-    /// ```
-    pub fn chain_compact(&self) -> String {
-        let mut chain = vec![self.to_string()];
-        let mut source = self.source();
-
-        while let Some(err) = source {
-            chain.push(err.to_string());
-            source = err.source();
-        }
-
-        chain.join(" → ")
-    }
+    /// IMU preintegration.
+    #[error(transparent)]
+    Preintegration(#[from] PreintegrationError),
 }
 
 #[cfg(test)]
