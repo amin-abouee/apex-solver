@@ -44,6 +44,8 @@ use apex_manifolds::{LieGroup, ManifoldType, Tangent, rn, se2, se3, se23, sgal3,
 
 use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, FactorKey, VarKey};
+use crate::error::ErrorLogging;
+use crate::factors::FactorError;
 use crate::factors::marginal::{LocalLogFn, MarginalPriorFactor, MarginalPriorFactorT};
 use crate::linearizer::LinearizerError;
 use crate::linearizer::{JacobianEvaluation, compute_block_into_with};
@@ -123,11 +125,11 @@ impl Marginalizer {
         marginalized: &[VarKey],
     ) -> MarginalizationResult<Marginal> {
         if marginalized.is_empty() {
-            return Err(MarginalizationError::EmptyRequest);
+            return Err(MarginalizationError::EmptyRequest.log());
         }
         for key in marginalized {
             if problem.variable(*key).is_none() {
-                return Err(MarginalizationError::UnknownVariable(*key));
+                return Err(MarginalizationError::UnknownVariable { key: *key }.log());
             }
         }
         let dropped: HashSet<VarKey> = marginalized.iter().copied().collect();
@@ -152,7 +154,7 @@ impl Marginalizer {
                 .iter()
                 .any(|(_, block)| block.variable_keys.contains(key));
             if !touched {
-                return Err(MarginalizationError::Unobserved(*key));
+                return Err(MarginalizationError::Unobserved { key: *key }.log());
             }
         }
 
@@ -199,7 +201,7 @@ impl Marginalizer {
 
         if kept.is_empty() {
             let first = marginalized.first().copied().unwrap_or_default();
-            return Err(MarginalizationError::NoKeptVariables(first));
+            return Err(MarginalizationError::NoKeptVariables { key: first }.log());
         }
 
         let dof = |key: VarKey| problem.variable(key).map_or(0, ManifoldVariable::dof);
@@ -296,8 +298,9 @@ impl Marginalizer {
 
         let lambda_mm_inv = pseudo_inverse(&lambda_mm, 1e-12).ok_or_else(|| {
             MarginalizationError::SingularEliminatedBlock {
-                context: format!("{eliminated_dof}-DOF eliminated block has no usable inverse"),
+                dof: eliminated_dof,
             }
+            .log()
         })?;
         let mut prior_information = lambda_kk - &lambda_km * &lambda_mm_inv * lambda_km.transpose();
         let prior_gradient = g_k - &lambda_km * &lambda_mm_inv * g_m;
@@ -338,7 +341,7 @@ impl Marginalizer {
             .map(|key| {
                 problem
                     .manifold_type(*key)
-                    .ok_or(MarginalizationError::UnknownVariable(*key))
+                    .ok_or_else(|| MarginalizationError::UnknownVariable { key: *key }.log())
             })
             .collect::<MarginalizationResult<Vec<_>>>()?;
 
@@ -432,11 +435,11 @@ impl Marginalizer {
         match self.sqrt_information {
             SqrtInformation::Cholesky => {
                 let Some(chol) = information.clone().cholesky() else {
-                    return Err(MarginalizationError::RankDeficient { rank: 0, dim });
+                    return Err(MarginalizationError::RankDeficient { rank: 0, dim }.log());
                 };
                 let sqrt = chol.l().transpose();
                 let Some(pseudo) = pseudo_inverse(information, 1e-12) else {
-                    return Err(MarginalizationError::RankDeficient { rank: 0, dim });
+                    return Err(MarginalizationError::RankDeficient { rank: 0, dim }.log());
                 };
                 Ok((sqrt, pseudo, dim))
             }
@@ -569,17 +572,19 @@ impl Marginal {
     ///
     /// # Errors
     ///
-    /// [`MarginalizationError::Factor`] if a kept block is not on `G`, or the
+    /// [`MarginalizationError::GroupMismatch`] if a kept block is not on `G`, or
+    /// [`MarginalizationError::Factor`] if the
     /// factor rejects the dimensions.
     pub fn to_typed_factor<G: LieGroup>(
         &self,
     ) -> MarginalizationResult<(Vec<VarKey>, MarginalPriorFactorT<G>)> {
         let wanted = ManifoldType::from_name(G::NAME);
         if let Some(other) = self.manifolds.iter().find(|m| Some(**m) != wanted) {
-            return Err(MarginalizationError::Factor(format!(
-                "kept block on {other:?} but the typed prior is for {}",
-                G::NAME
-            )));
+            return Err(MarginalizationError::GroupMismatch {
+                group: G::NAME,
+                found: *other,
+            }
+            .log());
         }
         let anchors = self
             .linearization_point
@@ -587,8 +592,7 @@ impl Marginal {
             .map(|x0| G::from_param_slice(x0.as_slice()))
             .collect();
         let factor =
-            MarginalPriorFactorT::new(anchors, self.sqrt_information.clone(), self.offset.clone())
-                .map_err(|e| MarginalizationError::Factor(e.to_string()))?;
+            MarginalPriorFactorT::new(anchors, self.sqrt_information.clone(), self.offset.clone())?;
         Ok((self.kept.clone(), factor))
     }
 
@@ -637,8 +641,12 @@ fn prior_factor(
         }
     });
 
-    MarginalPriorFactor::new(dims, sqrt_information, offset, local_log)
-        .map_err(|e| MarginalizationError::Factor(e.to_string()))
+    Ok(MarginalPriorFactor::new(
+        dims,
+        sqrt_information,
+        offset,
+        local_log,
+    )?)
 }
 
 /// What [`Marginalizer::apply`] did.
@@ -689,38 +697,39 @@ fn block_local_log(manifold: ManifoldType, x0: &[f64]) -> BlockLog {
 }
 
 /// Why a marginalization could not be computed.
-#[derive(Debug, thiserror::Error)]
+///
+/// Built and logged once where the condition is found; the wrapped module
+/// errors were logged by their own origin.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum MarginalizationError {
     /// No variables were requested.
     #[error("nothing to marginalize")]
     EmptyRequest,
 
     /// A requested key is not in the problem.
-    #[error("unknown variable key {0:?}")]
-    UnknownVariable(VarKey),
+    #[error("unknown variable key {key:?}")]
+    UnknownVariable { key: VarKey },
 
     /// A requested variable participates in no residual block.
-    #[error("variable {0:?} appears in no residual block; drop it instead of marginalizing it")]
-    Unobserved(VarKey),
+    #[error("variable {key:?} appears in no residual block; drop it instead of marginalizing it")]
+    Unobserved { key: VarKey },
 
     /// Every absorbed block touches only marginalized variables.
     #[error(
-        "marginalizing {0:?} would leave no retained variable; the absorbed factors touch \
+        "marginalizing {key:?} would leave no retained variable; the absorbed factors touch \
          nothing else, so there is nothing to summarize"
     )]
-    NoKeptVariables(VarKey),
+    NoKeptVariables { key: VarKey },
 
     /// `Λ_mm` is singular, which is a modelling error rather than a gauge
     /// freedom: a marginalized variable nothing observes, or observations that
     /// are degenerate. Drop the variable and its factors instead.
     #[error(
-        "the eliminated block is singular ({context}); a marginalized variable is \
-         unobserved or its observations are degenerate"
+        "the {dof}-DOF eliminated block is singular; a marginalized variable is unobserved or \
+         its observations are degenerate"
     )]
-    SingularEliminatedBlock {
-        /// What was being eliminated when it failed.
-        context: String,
-    },
+    SingularEliminatedBlock { dof: usize },
 
     /// `Λ_p` is rank deficient and [`SqrtInformation::Cholesky`] was requested.
     #[error(
@@ -734,16 +743,23 @@ pub enum MarginalizationError {
         dim: usize,
     },
 
+    /// A typed prior asked for a group that a kept block is not on.
+    #[error("a kept block is on {found:?}, but the typed prior is for {group}")]
+    GroupMismatch {
+        group: &'static str,
+        found: ManifoldType,
+    },
+
     /// The prior factor rejected its dimensions.
-    #[error("marginal prior rejected: {0}")]
-    Factor(String),
+    #[error("marginal prior rejected")]
+    Factor(#[from] FactorError),
 
     /// A block could not be linearized.
-    #[error(transparent)]
+    #[error("failed to linearize the absorbed blocks")]
     Linearization(#[from] LinearizerError),
 
     /// The problem rejected a mutation.
-    #[error(transparent)]
+    #[error("the problem rejected the marginal")]
     Core(#[from] CoreError),
 }
 
@@ -976,12 +992,35 @@ mod tests {
     fn a_typed_prior_for_the_wrong_group_is_rejected() -> TestResult {
         let (problem, keys, _blocks) = linear_chain([0.0, 1.0, 2.0])?;
         let marginal = Marginalizer::new().compute(&problem, &[keys[0]])?;
+        let Err(err) = marginal.to_typed_factor::<apex_manifolds::se3::SE3>() else {
+            return Err("a prior for the wrong group must be rejected".into());
+        };
         assert!(
-            marginal
-                .to_typed_factor::<apex_manifolds::se3::SE3>()
-                .is_err()
+            matches!(
+                err,
+                MarginalizationError::GroupMismatch {
+                    group: "SE3",
+                    found: ManifoldType::RN
+                }
+            ),
+            "{err}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_factor_error_keeps_the_marginalization_context() {
+        use crate::error::ErrorChainExt;
+        let error = MarginalizationError::from(FactorError::DimensionMismatch {
+            factor: "MarginalPriorFactor",
+            what: "offset",
+            expected: 6,
+            actual: 3,
+        });
+        assert_eq!(
+            error.chain_compact(),
+            "marginal prior rejected → MarginalPriorFactor: offset has 3 entries, expected 6"
+        );
     }
 
     /// A variable held only by a *relative* edge carries no absolute
@@ -1059,7 +1098,7 @@ mod tests {
     fn an_unobserved_variable_is_named() -> TestResult {
         let (mut problem, _keys, _blocks) = linear_chain([0.0, 1.0, 2.0])?;
         let lonely = problem.add_variable(ManifoldType::RN, rn(&[9.0, 9.0]));
-        let Err(MarginalizationError::Unobserved(key)) =
+        let Err(MarginalizationError::Unobserved { key }) =
             Marginalizer::new().compute(&problem, &[lonely])
         else {
             panic!("expected Unobserved");
@@ -1073,7 +1112,7 @@ mod tests {
     #[test]
     fn marginalizing_the_whole_blanket_is_rejected() -> TestResult {
         let (problem, keys, _blocks) = linear_chain([0.0, 1.0, 2.0])?;
-        let Err(MarginalizationError::NoKeptVariables(_)) =
+        let Err(MarginalizationError::NoKeptVariables { .. }) =
             Marginalizer::new().compute(&problem, &keys)
         else {
             panic!("expected NoKeptVariables");

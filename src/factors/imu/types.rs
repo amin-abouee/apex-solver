@@ -217,6 +217,7 @@ mod tests {
 // No `PartialEq`: `NonPositiveInterval` deliberately carries NaN bounds, and
 // `err == err` is false for those — a non-reflexive comparison is a trap.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
+#[non_exhaustive]
 pub enum PreintegrationError {
     /// No measurement pair overlapped `[t0, t1]`, so nothing was integrated.
     ///
