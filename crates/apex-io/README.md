@@ -769,26 +769,30 @@ pub struct QosProfile {
 
 ## Error Handling
 
-### Pose graph — `IoError`
+`IoError` (`apex_io::IoError`) is the crate root. Each module returns its own error, and the root
+wraps each one transparently, so `?` lifts a module error to `IoError` and `source()` walks to
+the cause. Every error is logged once, through `apex_error::ErrorLogging`, where it is built;
+the per-message decoders (CDR, ROS1 payloads, point-cloud fields, the transcoder) are the
+exception: a failed decode is an expected outcome there, carries only `Copy` fields, and is
+logged by the caller that gives up on a read.
 
-| Variant | Description |
-|---------|-------------|
-| `Io(io::Error)` | Underlying I/O error |
-| `Parse { line, message }` | Parse error with line number |
-| `UnsupportedVertexType(String)` | Unknown vertex type in file |
-| `UnsupportedEdgeType(String)` | Unknown edge type in file |
-| `InvalidNumber { line, value }` | Failed to parse a number |
-| `MissingFields { line }` | Insufficient fields on a line |
-| `DuplicateVertex { id }` | Vertex ID collision |
-| `InvalidQuaternion { line, norm }` | Non-unit quaternion |
-| `UnsupportedFormat(String)` | Unrecognized file extension |
-| `FileCreationFailed { path, reason }` | Output file creation failed |
-
-### ROS2 bag — `BagError`
-
-`BagError` covers metadata parsing, storage backend (SQLite3/MCAP), CDR deserialization,
-compression, and connection mismatch failures. All variants include enough context (file path,
-topic, byte offset) for actionable diagnostics.
+| Module | Error | Covers |
+|--------|-------|--------|
+| `graph` | `GraphError` | G2O / TORO read, parse (line, field, token) and write |
+| `bal` | `BalError` | BAL read and parse; header counts never size an allocation |
+| `trajectory` | `TrajectoryError` | TUM / ASL trajectory rows and files |
+| `asl` | `AslError` | ASL (EuRoC) folders, CSVs and images |
+| `lamaria` | `LamariaError` | LaMAria calibration JSON |
+| `utils` | `DatasetError` | Dataset registry, download, decompression, extraction |
+| `vrs` | `VrsError`, `LayoutError` | VRS container, codecs, writer; `DataLayout` / `RecordFormat` access |
+| `rosbag` | `BagError` | Root of the rosbag errors and the `BagReader` / `BagWriter` facade |
+| `rosbag::ros1` | `Ros1Error` | ROS1 bag reader, writer, records and message codec |
+| `rosbag::ros2` | `Ros2BagError` | ROS2 reader, writer, metadata, SQLite3 and MCAP storage |
+| `rosbag::storage::mcap` | `McapError` | MCAP container parsing and chunked writing |
+| `rosbag::cdr` | `CdrError` | CDR decode: `{ kind, position, len }` |
+| `rosbag::point_cloud` | `PointCloudError` | `PointCloud2` field reads |
+| `rosbag::transcode` | `TranscodeError` | Message definitions, topic planning, ROS1 <-> ROS2 conversion |
+| `rosbag::ros2::dds` | `DdsError` | Live DDS subscriptions (feature `dds`) |
 
 ---
 
