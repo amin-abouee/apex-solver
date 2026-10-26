@@ -581,11 +581,11 @@ impl RerunObserver {
                 rerun::RecordingStreamBuilder::new("apex-solver-optimization")
                     .save(path)
                     .map_err(|e| {
-                        ObserverError::RecordingSaveFailed {
+                        ObserverError::RecordingSave {
                             path: path.to_string(),
-                            reason: format!("{}", e),
+                            source: e,
                         }
-                        .log_with_source(e)
+                        .log()
                     })?
             } else {
                 // Try to spawn Rerun viewer
@@ -603,11 +603,11 @@ impl RerunObserver {
                         rerun::RecordingStreamBuilder::new("apex-solver-optimization")
                             .save("optimization.rrd")
                             .map_err(|e2| {
-                                ObserverError::RecordingSaveFailed {
+                                ObserverError::RecordingSave {
                                     path: "optimization.rrd".to_string(),
-                                    reason: format!("{}", e2),
+                                    source: e2,
                                 }
-                                .log_with_source(e2)
+                                .log()
                             })?
                     }
                 }
@@ -761,9 +761,10 @@ impl RerunObserver {
     /// * `graph` - The graph structure loaded from G2O file
     /// * `scale` - Scale factor for visualization
     pub fn log_initial_graph(&self, graph: &io::Graph, scale: f32) -> ObserverResult<()> {
-        let rec = self.rec.as_ref().ok_or_else(|| {
-            ObserverError::InvalidState("Recording stream not initialized".to_string())
-        })?;
+        let rec = self
+            .rec
+            .as_ref()
+            .ok_or_else(|| ObserverError::NotInitialized.log())?;
 
         // Visualize SE3 vertices only (no edges)
         if self.config.show_cameras {
@@ -773,11 +774,11 @@ impl RerunObserver {
 
                 let entity_path = format!("initial_graph/se3_poses/{}", id);
                 rec.log(entity_path.as_str(), &transform).map_err(|e| {
-                    ObserverError::LoggingFailed {
+                    ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        reason: format!("{}", e),
+                        source: e,
                     }
-                    .log_with_source(e)
+                    .log()
                 })?;
 
                 // Add a small pinhole camera for better visualization
@@ -790,11 +791,11 @@ impl RerunObserver {
                     .with_image_plane_distance(self.config.camera_frustum_scale),
                 )
                 .map_err(|e| {
-                    ObserverError::LoggingFailed {
+                    ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        reason: format!("{}", e),
+                        source: e,
                     }
-                    .log_with_source(e)
+                    .log()
                 })?;
             }
         }
@@ -820,11 +821,11 @@ impl RerunObserver {
                     .with_radii([self.config.se2_pose_radius * scale]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "initial_graph/se2_poses".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -839,9 +840,10 @@ impl RerunObserver {
     ///
     /// * `status` - Convergence status message
     pub fn log_convergence(&self, status: &str) -> ObserverResult<()> {
-        let rec = self.rec.as_ref().ok_or_else(|| {
-            ObserverError::InvalidState("Recording stream not initialized".to_string())
-        })?;
+        let rec = self
+            .rec
+            .as_ref()
+            .ok_or_else(|| ObserverError::NotInitialized.log())?;
 
         // Log as a text annotation
         rec.log(
@@ -849,11 +851,11 @@ impl RerunObserver {
             &rerun::archetypes::TextDocument::new(status),
         )
         .map_err(|e| {
-            ObserverError::LoggingFailed {
+            ObserverError::Logging {
                 entity_path: "optimization/status".to_string(),
-                reason: format!("{}", e),
+                source: e,
             }
-            .log_with_source(e)
+            .log()
         })?;
 
         Ok(())
@@ -887,9 +889,10 @@ impl RerunObserver {
         &self,
         problem: &crate::core::problem::Problem,
     ) -> ObserverResult<()> {
-        let rec = self.rec.as_ref().ok_or_else(|| {
-            ObserverError::InvalidState("Recording stream not initialized".to_string())
-        })?;
+        let rec = self
+            .rec
+            .as_ref()
+            .ok_or_else(|| ObserverError::NotInitialized.log())?;
 
         // Collect 3D landmarks for batch logging
         let mut landmark_positions: Vec<[f32; 3]> = Vec::new();
@@ -941,11 +944,11 @@ impl RerunObserver {
 
                     let entity_path = format!("initial_graph/cameras/{}", var_name);
                     rec.log(entity_path.as_str(), &transform).map_err(|e| {
-                        ObserverError::LoggingFailed {
+                        ObserverError::Logging {
                             entity_path: entity_path.clone(),
-                            reason: format!("{}", e),
+                            source: e,
                         }
-                        .log_with_source(e)
+                        .log()
                     })?;
 
                     rec.log(
@@ -957,11 +960,11 @@ impl RerunObserver {
                         .with_image_plane_distance(self.config.camera_frustum_scale),
                     )
                     .map_err(|e| {
-                        ObserverError::LoggingFailed {
+                        ObserverError::Logging {
                             entity_path: entity_path.clone(),
-                            reason: format!("{}", e),
+                            source: e,
                         }
-                        .log_with_source(e)
+                        .log()
                     })?;
                 }
                 "Rn" if self.config.show_landmarks && var.dof() == 3 => {
@@ -989,11 +992,11 @@ impl RerunObserver {
                     )]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "initial_graph/landmarks".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1021,9 +1024,10 @@ impl RerunObserver {
         values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
         iterations: usize,
     ) -> ObserverResult<()> {
-        let rec = self.rec.as_ref().ok_or_else(|| {
-            ObserverError::InvalidState("Recording stream not initialized".to_string())
-        })?;
+        let rec = self
+            .rec
+            .as_ref()
+            .ok_or_else(|| ObserverError::NotInitialized.log())?;
 
         // Set time to final iteration
         rec.set_time_sequence("iteration", iterations as i64);
@@ -1068,11 +1072,11 @@ impl RerunObserver {
 
                 let entity_path = format!("final_graph/cameras/{}", var_name);
                 rec.log(entity_path.as_str(), &transform).map_err(|e| {
-                    ObserverError::LoggingFailed {
+                    ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        reason: format!("{}", e),
+                        source: e,
                     }
-                    .log_with_source(e)
+                    .log()
                 })?;
 
                 rec.log(
@@ -1084,11 +1088,11 @@ impl RerunObserver {
                     .with_image_plane_distance(self.config.camera_frustum_scale),
                 )
                 .map_err(|e| {
-                    ObserverError::LoggingFailed {
+                    ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        reason: format!("{}", e),
+                        source: e,
                     }
-                    .log_with_source(e)
+                    .log()
                 })?;
 
                 camera_count += 1;
@@ -1125,11 +1129,11 @@ impl RerunObserver {
                     )]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "final_graph/landmarks".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1149,11 +1153,11 @@ impl RerunObserver {
                 )]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "final_graph/se2_poses".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1274,20 +1278,21 @@ impl RerunObserver {
             return Ok(());
         }
 
-        let rec = self.rec.as_ref().ok_or_else(|| {
-            ObserverError::InvalidState("Recording stream not initialized".to_string())
-        })?;
+        let rec = self
+            .rec
+            .as_ref()
+            .ok_or_else(|| ObserverError::NotInitialized.log())?;
         rec.set_time_sequence("iteration", iteration as i64);
 
         // Log each metric to separate entity paths for independent scaling
         if let Some(cost) = metrics.cost {
             rec.log("cost_plot/value", &rerun::archetypes::Scalars::new([cost]))
                 .map_err(|e| {
-                    ObserverError::LoggingFailed {
+                    ObserverError::Logging {
                         entity_path: "cost_plot/value".to_string(),
-                        reason: format!("{}", e),
+                        source: e,
                     }
-                    .log_with_source(e)
+                    .log()
                 })?;
         }
 
@@ -1297,11 +1302,11 @@ impl RerunObserver {
                 &rerun::archetypes::Scalars::new([gradient_norm]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "gradient_plot/norm".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1311,11 +1316,11 @@ impl RerunObserver {
                 &rerun::archetypes::Scalars::new([damping]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "damping_plot/lambda".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1325,11 +1330,11 @@ impl RerunObserver {
                 &rerun::archetypes::Scalars::new([step_norm]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "step_plot/norm".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1339,11 +1344,11 @@ impl RerunObserver {
                 &rerun::archetypes::Scalars::new([step_quality]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "quality_plot/rho".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1356,9 +1361,10 @@ impl RerunObserver {
             return Ok(());
         }
 
-        let rec = self.rec.as_ref().ok_or_else(|| {
-            ObserverError::InvalidState("Recording stream not initialized".to_string())
-        })?;
+        let rec = self
+            .rec
+            .as_ref()
+            .ok_or_else(|| ObserverError::NotInitialized.log())?;
         rec.set_time_sequence("iteration", iteration as i64);
 
         // Log Hessian if available
@@ -1370,11 +1376,11 @@ impl RerunObserver {
                 &rerun::archetypes::Tensor::new(image_data),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "optimization/matrices/hessian".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1387,11 +1393,11 @@ impl RerunObserver {
                     &rerun::archetypes::Tensor::new(image_data),
                 )
                 .map_err(|e| {
-                    ObserverError::LoggingFailed {
+                    ObserverError::Logging {
                         entity_path: "optimization/matrices/gradient".to_string(),
-                        reason: format!("{}", e),
+                        source: e,
                     }
-                    .log_with_source(e)
+                    .log()
                 })?;
             }
         }
@@ -1409,9 +1415,10 @@ impl RerunObserver {
         &self,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     ) -> ObserverResult<()> {
-        let rec = self.rec.as_ref().ok_or_else(|| {
-            ObserverError::InvalidState("Recording stream not initialized".to_string())
-        })?;
+        let rec = self
+            .rec
+            .as_ref()
+            .ok_or_else(|| ObserverError::NotInitialized.log())?;
         rec.set_time_sequence("iteration", 0_i64);
 
         let mut se2_positions: Vec<[f32; 2]> = Vec::new();
@@ -1449,11 +1456,11 @@ impl RerunObserver {
 
                 let entity_path = format!("initial_graph/cameras/{}", var_name);
                 rec.log(entity_path.as_str(), &transform).map_err(|e| {
-                    ObserverError::LoggingFailed {
+                    ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        reason: format!("{}", e),
+                        source: e,
                     }
-                    .log_with_source(e)
+                    .log()
                 })?;
 
                 rec.log(
@@ -1465,11 +1472,11 @@ impl RerunObserver {
                     .with_image_plane_distance(self.config.camera_frustum_scale),
                 )
                 .map_err(|e| {
-                    ObserverError::LoggingFailed {
+                    ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        reason: format!("{}", e),
+                        source: e,
                     }
-                    .log_with_source(e)
+                    .log()
                 })?;
             }
             if self.config.show_se2_poses
@@ -1498,11 +1505,11 @@ impl RerunObserver {
                     )]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "initial_graph/landmarks".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1518,11 +1525,11 @@ impl RerunObserver {
                     )]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "initial_graph/se2_poses".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1535,9 +1542,10 @@ impl RerunObserver {
         iteration: usize,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     ) -> ObserverResult<()> {
-        let rec = self.rec.as_ref().ok_or_else(|| {
-            ObserverError::InvalidState("Recording stream not initialized".to_string())
-        })?;
+        let rec = self
+            .rec
+            .as_ref()
+            .ok_or_else(|| ObserverError::NotInitialized.log())?;
         rec.set_time_sequence("iteration", iteration as i64);
 
         // Collect 3D landmarks for batch logging (much more efficient for large point clouds)
@@ -1578,11 +1586,11 @@ impl RerunObserver {
 
                 let entity_path = format!("optimized_graph/cameras/{}", var_name);
                 rec.log(entity_path.as_str(), &transform).map_err(|e| {
-                    ObserverError::LoggingFailed {
+                    ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        reason: format!("{}", e),
+                        source: e,
                     }
-                    .log_with_source(e)
+                    .log()
                 })?;
 
                 rec.log(
@@ -1594,11 +1602,11 @@ impl RerunObserver {
                     .with_image_plane_distance(self.config.camera_frustum_scale),
                 )
                 .map_err(|e| {
-                    ObserverError::LoggingFailed {
+                    ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        reason: format!("{}", e),
+                        source: e,
                     }
-                    .log_with_source(e)
+                    .log()
                 })?;
             }
             if self.config.show_se2_poses
@@ -1630,11 +1638,11 @@ impl RerunObserver {
                     )]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "optimized_graph/landmarks".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1651,11 +1659,11 @@ impl RerunObserver {
                     )]),
             )
             .map_err(|e| {
-                ObserverError::LoggingFailed {
+                ObserverError::Logging {
                     entity_path: "optimized_graph/se2_poses".to_string(),
-                    reason: format!("{}", e),
+                    source: e,
                 }
-                .log_with_source(e)
+                .log()
             })?;
         }
 
@@ -1818,18 +1826,16 @@ impl OptObserver for RerunObserver {
         }
 
         // Log initial state once before any optimization updates
-        if !self.initial_state_logged.get()
-            && let Err(e) = self.log_initial_state(values)
-        {
-            let _ = e.log();
+        if !self.initial_state_logged.get() {
+            // Logged where it failed; a failed visualization never stops the solve.
+            let _ = self.log_initial_state(values);
         }
 
         let metrics = self.iteration_metrics.borrow();
 
         // Always log scalar metrics (plots) - they're lightweight and useful
-        if let Err(e) = self.log_scalars(iteration, &metrics) {
-            let _ = e.log();
-        }
+        // Logged where it failed; a failed visualization never stops the solve.
+        let _ = self.log_scalars(iteration, &metrics);
 
         // In InitialAndFinal mode, skip manifold logging for intermediate iterations
         // Initial state (iteration 0) is logged via log_initial_ba_state()
@@ -1840,12 +1846,10 @@ impl OptObserver for RerunObserver {
         };
 
         if should_log_manifolds {
-            if let Err(e) = self.log_matrices(iteration, &metrics) {
-                let _ = e.log();
-            }
-            if let Err(e) = self.log_manifolds(iteration, values) {
-                let _ = e.log();
-            }
+            // Logged where it failed; a failed visualization never stops the solve.
+            let _ = self.log_matrices(iteration, &metrics);
+            // Logged where it failed; a failed visualization never stops the solve.
+            let _ = self.log_manifolds(iteration, values);
         }
 
         // Clear transient data for next iteration
@@ -1875,9 +1879,8 @@ impl OptObserver for RerunObserver {
         }
 
         // Log final state with displacement statistics
-        if let Err(e) = self.log_final_state(values, iterations) {
-            let _ = e.log();
-        }
+        // Logged where it failed; a failed visualization never stops the solve.
+        let _ = self.log_final_state(values, iterations);
     }
 }
 
