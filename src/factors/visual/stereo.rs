@@ -12,7 +12,7 @@
 //! (`z ≤ 0`) are handled with the same smooth penalty as the monocular
 //! [`ProjectionFactor`](crate::factors::visual::projection::ProjectionFactor).
 
-use apex_camera_models::CameraModelError;
+use apex_camera_models::{ProjectionError, ProjectionResult};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
@@ -63,11 +63,11 @@ impl StereoCalibration {
     }
 
     /// Project a camera-frame point to `(uL, uR, v)`; errors behind the
-    /// cheirality boundary surface as [`CameraModelError::PointBehindCamera`].
-    pub fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector3<f64>, CameraModelError> {
+    /// cheirality boundary surface as [`ProjectionError::PointBehindCamera`].
+    pub fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector3<f64>> {
         let z = p_cam.z;
         if !(z.is_finite()) || z <= apex_camera_models::MIN_DEPTH {
-            return Err(CameraModelError::PointBehindCamera {
+            return Err(ProjectionError::PointBehindCamera {
                 z,
                 min_z: apex_camera_models::MIN_DEPTH,
             });
@@ -145,7 +145,7 @@ impl Factor for StereoFactor {
 
         let projection = match cal.project(&p_cam) {
             Ok(uv) => uv,
-            Err(CameraModelError::PointBehindCamera { z, min_z }) => {
+            Err(ProjectionError::PointBehindCamera { z, min_z }) => {
                 if self.verbose_cheirality {
                     warn!("StereoFactor: point behind camera (z={z}, min_z={min_z})");
                 }

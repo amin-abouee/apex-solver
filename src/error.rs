@@ -274,6 +274,10 @@ impl ApexSolverError {
 mod tests {
     use super::*;
     use crate::factors::FactorError;
+    use apex_camera_models::{
+        CameraModelResult, ConversionError, ConversionResult, EstimationError, ParamError,
+        ParamResult, ProjectionError, UnprojectionError,
+    };
     use apex_manifolds::RnError;
     use faer::Mat;
 
@@ -589,10 +593,10 @@ mod tests {
             }
             .into(),
             LinearizerError::SymbolicStructure("sym_err".into()).into(),
-            CameraModelError::PointBehindCamera {
+            CameraModelError::from(ProjectionError::PointBehindCamera {
                 z: -0.5,
                 min_z: 1e-6,
-            }
+            })
             .into(),
         ];
 
@@ -709,10 +713,10 @@ mod tests {
 
     #[test]
     fn test_camera_error_point_behind_camera_direct() -> TestResult {
-        let cam_err = CameraModelError::PointBehindCamera {
+        let cam_err = CameraModelError::from(ProjectionError::PointBehindCamera {
             z: -0.5,
             min_z: 1e-6,
-        };
+        });
         let apex_err: ApexSolverError = cam_err.into();
         assert!(
             matches!(apex_err, ApexSolverError::Camera(_)),
@@ -731,10 +735,10 @@ mod tests {
 
     #[test]
     fn test_camera_error_focal_length_preserves_fields() -> TestResult {
-        let cam_err = CameraModelError::FocalLengthNotPositive {
+        let cam_err = CameraModelError::from(ParamError::FocalLengthNotPositive {
             fx: -1.0,
             fy: 500.0,
-        };
+        });
         let apex_err: ApexSolverError = cam_err.into();
         assert!(
             matches!(apex_err, ApexSolverError::Camera(_)),
@@ -749,10 +753,10 @@ mod tests {
 
     #[test]
     fn test_camera_error_numerical_preserves_fields() -> TestResult {
-        let cam_err = CameraModelError::DenominatorTooSmall {
+        let cam_err = CameraModelError::from(ProjectionError::DenominatorTooSmall {
             denom: 1e-15,
             threshold: 1e-6,
-        };
+        });
         let apex_err: ApexSolverError = cam_err.into();
         assert!(
             matches!(apex_err, ApexSolverError::Camera(_)),
@@ -771,12 +775,12 @@ mod tests {
 
     #[test]
     fn test_camera_error_parameter_out_of_range() -> TestResult {
-        let cam_err = CameraModelError::ParameterOutOfRange {
-            param: "alpha".to_string(),
+        let cam_err = CameraModelError::from(ParamError::ParameterOutOfRange {
+            param: "alpha",
             value: 1.5,
             min: 0.0,
             max: 1.0,
-        };
+        });
         let apex_err: ApexSolverError = cam_err.into();
         assert!(
             matches!(apex_err, ApexSolverError::Camera(_)),
@@ -789,55 +793,105 @@ mod tests {
         Ok(())
     }
 
+    /// A camera leaf error reaches `ApexSolverError` through every hop with a
+    /// bare `?`, and each hop's message appears once in the chain.
+    #[test]
+    fn test_camera_error_chain_from_leaf_to_root() -> TestResult {
+        fn validate() -> ParamResult<()> {
+            Err(ParamError::ParamCount {
+                model: "pinhole",
+                expected: 4,
+                actual: 5,
+            })
+        }
+        fn convert() -> ConversionResult<()> {
+            validate()?;
+            Ok(())
+        }
+        fn camera() -> CameraModelResult<()> {
+            convert()?;
+            Ok(())
+        }
+        fn solver() -> ApexSolverResult<()> {
+            camera()?;
+            Ok(())
+        }
+        let error = solver().err().ok_or("expected an error")?;
+        assert!(matches!(
+            error,
+            ApexSolverError::Camera(CameraModelError::Conversion(
+                ConversionError::InvalidInitial(ParamError::ParamCount { .. })
+            ))
+        ));
+        let expected = "the initial camera is not valid → pinhole has 4 parameters, got 5";
+        assert_eq!(apex_error::ErrorChainExt::chain_compact(&error), expected);
+        assert_eq!(error.chain_compact(), expected);
+        Ok(())
+    }
+
     #[test]
     fn test_camera_error_all_variants_accessible() -> TestResult {
         let errors: Vec<ApexSolverError> = vec![
-            CameraModelError::PointBehindCamera {
+            CameraModelError::from(ProjectionError::PointBehindCamera {
                 z: -0.5,
                 min_z: 1e-6,
-            }
+            })
             .into(),
-            CameraModelError::PointAtCameraCenter.into(),
-            CameraModelError::ProjectionOutOfBounds.into(),
-            CameraModelError::PointOutsideImage { x: 100.0, y: 200.0 }.into(),
-            CameraModelError::DenominatorTooSmall {
+            CameraModelError::from(ProjectionError::PointAtCameraCenter).into(),
+            CameraModelError::from(ProjectionError::OutOfDomain {
+                model: "fov",
+                z: 0.0,
+            })
+            .into(),
+            CameraModelError::from(ProjectionError::DenominatorTooSmall {
                 denom: 1e-15,
                 threshold: 1e-6,
-            }
+            })
             .into(),
-            CameraModelError::NumericalError {
-                operation: "unproject".to_string(),
-                details: "convergence failed".to_string(),
-            }
+            CameraModelError::from(ProjectionError::DistortionFold { radial: -0.1 }).into(),
+            CameraModelError::from(UnprojectionError::PointOutsideImage { x: 100.0, y: 200.0 })
+                .into(),
+            CameraModelError::from(UnprojectionError::NotConverged {
+                iterations: 10,
+                residual: 0.5,
+            })
             .into(),
-            CameraModelError::FocalLengthNotPositive {
+            CameraModelError::from(UnprojectionError::SingularJacobian).into(),
+            CameraModelError::from(ParamError::FocalLengthNotPositive {
                 fx: -1.0,
                 fy: 500.0,
-            }
+            })
             .into(),
-            CameraModelError::FocalLengthNotFinite {
+            CameraModelError::from(ParamError::FocalLengthNotFinite {
                 fx: f64::INFINITY,
                 fy: 500.0,
-            }
+            })
             .into(),
-            CameraModelError::PrincipalPointNotFinite {
+            CameraModelError::from(ParamError::PrincipalPointNotFinite {
                 cx: f64::NAN,
                 cy: 240.0,
-            }
+            })
             .into(),
-            CameraModelError::DistortionNotFinite {
-                name: "k1".to_string(),
+            CameraModelError::from(ParamError::DistortionNotFinite {
+                name: "k1",
                 value: f64::NAN,
-            }
+            })
             .into(),
-            CameraModelError::ParameterOutOfRange {
-                param: "alpha".to_string(),
+            CameraModelError::from(ParamError::ParameterOutOfRange {
+                param: "alpha",
                 value: 1.5,
                 min: 0.0,
                 max: 1.0,
-            }
+            })
             .into(),
-            CameraModelError::InvalidParams("bad".to_string()).into(),
+            CameraModelError::from(ParamError::DistortionVariant {
+                model: "fov",
+                expected: "FOV",
+                actual: "None",
+            })
+            .into(),
+            CameraModelError::from(EstimationError::SvdSolve { reason: "rank" }).into(),
+            CameraModelError::from(ConversionError::TooFewRays { got: 1, need: 6 }).into(),
         ];
 
         for err in &errors {

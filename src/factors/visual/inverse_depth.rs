@@ -130,7 +130,7 @@ impl<CAM: CameraModel> Factor for InverseDepthFactor<CAM> {
 
         let uv_j = match self.camera.project(&p_cj) {
             Ok(uv) => uv,
-            Err(apex_camera_models::CameraModelError::PointBehindCamera { z, min_z }) => {
+            Err(apex_camera_models::ProjectionError::PointBehindCamera { z, min_z }) => {
                 if self.verbose_cheirality {
                     warn!("InverseDepthFactor: point behind camera j (z={z})");
                 }

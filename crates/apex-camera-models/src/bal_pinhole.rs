@@ -7,7 +7,11 @@
 //! [BAL pinhole cookbook chapter](../doc/cookbook/src/bal-pinhole.html) for the projection,
 //! unprojection, and Jacobian derivations.
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
+use crate::{
+    CameraModel, DistortionModel, ParamError, ParamResult, PinholeParams, ProjectionError,
+    ProjectionResult, UnprojectionResult, check_param_count, skew_symmetric,
+};
+use apex_error::ErrorLogging;
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -22,6 +26,8 @@ use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 pub struct BALPinholeCameraStrict {
     /// Single focal length (fx = fy = f)
     pub f: f64,
+    /// Must be [`DistortionModel::Radial`]; the checked constructors reject any
+    /// other variant, and a struct literal with one projects to NaN.
     pub distortion: DistortionModel,
 }
 
@@ -33,8 +39,10 @@ impl BALPinholeCameraStrict {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if the strict BAL constraints are
-    /// violated or if the distortion type is wrong.
+    /// Returns [`ParamError::UnequalFocalLengths`] or
+    /// [`ParamError::PrincipalPointNotZero`] if the strict BAL constraints are
+    /// violated, or the validation error (wrong distortion variant, bad values).
+    /// The error is logged here.
     ///
     /// # Example
     ///
@@ -46,27 +54,29 @@ impl BALPinholeCameraStrict {
     /// let camera = BALPinholeCameraStrict::new(pinhole, distortion)?;
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    pub fn new(
-        pinhole: PinholeParams,
-        distortion: DistortionModel,
-    ) -> Result<Self, CameraModelError> {
+    pub fn new(pinhole: PinholeParams, distortion: DistortionModel) -> ParamResult<Self> {
         if (pinhole.fx - pinhole.fy).abs() > 1e-10 {
-            return Err(CameraModelError::InvalidParams(
-                "BALPinholeCameraStrict requires fx = fy (single focal length)".to_string(),
-            ));
+            return Err(ParamError::UnequalFocalLengths {
+                model: "bal_pinhole",
+                fx: pinhole.fx,
+                fy: pinhole.fy,
+            }
+            .log());
         }
         if pinhole.cx.abs() > 1e-10 || pinhole.cy.abs() > 1e-10 {
-            return Err(CameraModelError::InvalidParams(
-                "BALPinholeCameraStrict requires cx = cy = 0 (no principal point offset)"
-                    .to_string(),
-            ));
+            return Err(ParamError::PrincipalPointNotZero {
+                model: "bal_pinhole",
+                cx: pinhole.cx,
+                cy: pinhole.cy,
+            }
+            .log());
         }
 
         let camera = Self {
             f: pinhole.fx,
             distortion,
         };
-        camera.validate_params()?;
+        camera.validate_params().map_err(ErrorLogging::log)?;
         Ok(camera)
     }
 
@@ -74,18 +84,19 @@ impl BALPinholeCameraStrict {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if `f` is not positive and finite.
-    pub fn new_no_distortion(f: f64) -> Result<Self, CameraModelError> {
+    /// Returns a [`ParamError`] if `f` is not positive and finite.
+    pub fn new_no_distortion(f: f64) -> ParamResult<Self> {
         let pinhole = PinholeParams::new(f, f, 0.0, 0.0)?;
         let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
         Self::new(pinhole, distortion)
     }
 
-    /// Returns the radial distortion coefficients `(k1, k2)`.
+    /// Returns the radial distortion coefficients `(k1, k2)`, or NaN for
+    /// another variant (only a struct literal can hold one).
     fn distortion_params(&self) -> (f64, f64) {
         match self.distortion {
             DistortionModel::Radial { k1, k2 } => (k1, k2),
-            _ => (0.0, 0.0),
+            _ => (f64::NAN, f64::NAN),
         }
     }
 
@@ -111,24 +122,23 @@ impl From<&BALPinholeCameraStrict> for [f64; 3] {
     }
 }
 
-/// Parameter order: `[f, k1, k2]`.
+/// Parameter order: `[f, k1, k2]`. Fails unless the slice has exactly 3
+/// elements that form a valid camera. Not logged: the solver decodes
+/// intrinsics blocks with it on every linearization.
 impl TryFrom<&[f64]> for BALPinholeCameraStrict {
-    type Error = CameraModelError;
+    type Error = ParamError;
 
-    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
-        if params.len() < 3 {
-            return Err(CameraModelError::InvalidParams(format!(
-                "BALPinholeCameraStrict requires at least 3 parameters, got {}",
-                params.len()
-            )));
-        }
-        Ok(Self {
+    fn try_from(params: &[f64]) -> ParamResult<Self> {
+        check_param_count("bal_pinhole", 3, params)?;
+        let camera = Self {
             f: params[0],
             distortion: DistortionModel::Radial {
                 k1: params[1],
                 k2: params[2],
             },
-        })
+        };
+        camera.validate_params()?;
+        Ok(camera)
     }
 }
 
@@ -145,16 +155,15 @@ impl From<[f64; 3]> for BALPinholeCameraStrict {
     }
 }
 
-/// Creates a `BALPinholeCameraStrict` from a parameter slice with validation.
+/// Creates a `BALPinholeCameraStrict` from a parameter slice with validation,
+/// and logs the rejection.
 ///
 /// # Errors
 ///
-/// Returns [`CameraModelError::InvalidParams`] if the slice has fewer than 3 elements,
-/// or any other [`CameraModelError`] if the resulting parameters are invalid.
-pub fn try_from_params(params: &[f64]) -> Result<BALPinholeCameraStrict, CameraModelError> {
-    let camera = BALPinholeCameraStrict::try_from(params)?;
-    camera.validate_params()?;
-    Ok(camera)
+/// [`ParamError::ParamCount`] unless the slice has exactly 3 elements, or the
+/// validation error.
+pub fn try_from_params(params: &[f64]) -> ParamResult<BALPinholeCameraStrict> {
+    BALPinholeCameraStrict::try_from(params).map_err(ErrorLogging::log)
 }
 
 impl CameraModel for BALPinholeCameraStrict {
@@ -166,11 +175,14 @@ impl CameraModel for BALPinholeCameraStrict {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::ProjectionOutOfBounds`] if the point is not in
+    /// Returns [`ProjectionError::OutOfDomain`] if the point is not in
     /// front of the camera (`z ≥ -MIN_DEPTH`).
-    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
+    fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector2<f64>> {
         if !self.check_projection_condition(p_cam.z) {
-            return Err(CameraModelError::ProjectionOutOfBounds);
+            return Err(ProjectionError::OutOfDomain {
+                model: "bal_pinhole",
+                z: p_cam.z,
+            });
         }
         let inv_neg_z = -1.0 / p_cam.z;
         let x_n = p_cam.x * inv_neg_z;
@@ -192,7 +204,7 @@ impl CameraModel for BALPinholeCameraStrict {
     /// the deficit must *grow* with `+z`. The trait default (`-z`, gradient
     /// `-e_z`) would be actively harmful here — it would push points further
     /// behind the camera instead of back in front of it. Note this is also
-    /// why `project` reports the condition as `ProjectionOutOfBounds` rather
+    /// why `project` reports the condition as `OutOfDomain` rather
     /// than `PointBehindCamera`: the `PointBehindCamera { z, min_z }` shape
     /// assumes a z-forward inequality.
     fn projection_deficit(&self, p_cam: &Vector3<f64>) -> (f64, Vector3<f64>) {
@@ -299,7 +311,7 @@ impl CameraModel for BALPinholeCameraStrict {
     /// Unprojects a 2D pixel to a unit 3D ray in camera frame (BAL convention: ray
     /// has `z = -1/√(1+r²)`). Uses a fixed 5-iteration fixed-point solve to invert
     /// the radial distortion.
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+    fn unproject(&self, point_2d: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>> {
         let x_d = point_2d.x / self.f;
         let y_d = point_2d.y / self.f;
 
@@ -319,15 +331,16 @@ impl CameraModel for BALPinholeCameraStrict {
         Ok(Vector3::new(x_n / norm, y_n / norm, -1.0 / norm))
     }
 
-    /// Validates that `f` is positive and finite, and that the distortion
-    /// coefficients are finite.
+    /// Validates that `f` is positive and finite, and that the distortion is
+    /// [`DistortionModel::Radial`] with finite coefficients.
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] on any violation.
-    fn validate_params(&self) -> Result<(), CameraModelError> {
+    /// Returns a [`ParamError`] on any violation.
+    fn validate_params(&self) -> ParamResult<()> {
         self.get_pinhole_params().validate()?;
-        self.get_distortion().validate()
+        self.distortion.expect_variant("bal_pinhole", "Radial")?;
+        self.distortion.validate()
     }
 
     /// Returns `fx = fy = f` and `cx = cy = 0`.

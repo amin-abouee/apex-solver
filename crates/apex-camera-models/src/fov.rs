@@ -5,13 +5,19 @@
 //! [fov cookbook chapter](../doc/cookbook/src/fov.html) for the full projection,
 //! unprojection, and Jacobian derivations.
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
+use crate::{
+    CameraModel, DistortionModel, EstimationError, EstimationResult, ParamError, ParamResult,
+    PinholeParams, ProjectionError, ProjectionResult, UnprojectionResult, check_param_count,
+};
+use apex_error::ErrorLogging;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// FOV camera model with 5 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FovCamera {
     pub pinhole: PinholeParams,
+    /// Must be [`DistortionModel::FOV`]; the checked constructors reject any
+    /// other variant, and a struct literal with one projects to NaN.
     pub distortion: DistortionModel,
 }
 
@@ -20,7 +26,7 @@ impl FovCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// Returns a [`ParamError`], logged here, if `distortion` is not
     /// [`DistortionModel::FOV`].
     ///
     /// # Example
@@ -34,15 +40,12 @@ impl FovCamera {
     /// assert_eq!(camera.get_model_name(), "fov");
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    pub fn new(
-        pinhole: PinholeParams,
-        distortion: DistortionModel,
-    ) -> Result<Self, CameraModelError> {
+    pub fn new(pinhole: PinholeParams, distortion: DistortionModel) -> ParamResult<Self> {
         let camera = Self {
             pinhole,
             distortion,
         };
-        camera.validate_params()?;
+        camera.validate_params().map_err(ErrorLogging::log)?;
         Ok(camera)
     }
 
@@ -50,7 +53,7 @@ impl FovCamera {
     fn distortion_params(&self) -> f64 {
         match self.distortion {
             DistortionModel::FOV { w } => w,
-            _ => 0.0,
+            _ => f64::NAN,
         }
     }
 
@@ -61,19 +64,23 @@ impl FovCamera {
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
         points_2d: &nalgebra::Matrix2xX<f64>,
-    ) -> Result<(), CameraModelError> {
+    ) -> EstimationResult<()> {
         if points_2d.ncols() != points_3d.ncols() {
-            return Err(CameraModelError::InvalidParams(
-                "Number of 2D and 3D points must match".to_string(),
-            ));
+            return Err(EstimationError::PointCountMismatch {
+                points_3d: points_3d.ncols(),
+                points_2d: points_2d.ncols(),
+            }
+            .log());
         }
 
         let num_points = points_2d.ncols();
 
         if num_points < 2 {
-            return Err(CameraModelError::InvalidParams(
-                "Need at least 2 point correspondences for linear estimation".to_string(),
-            ));
+            return Err(EstimationError::TooFewPoints {
+                got: num_points,
+                need: 2,
+            }
+            .log());
         }
 
         let mut best_w = 1.0;
@@ -128,10 +135,12 @@ impl FovCamera {
             }
         }
 
-        self.distortion = DistortionModel::FOV { w: best_w };
-
-        self.validate_params()?;
-
+        let estimated = Self {
+            pinhole: self.pinhole,
+            distortion: DistortionModel::FOV { w: best_w },
+        };
+        estimated.validate_params().map_err(ErrorLogging::log)?;
+        *self = estimated;
         Ok(())
     }
 }
@@ -167,16 +176,11 @@ impl From<&FovCamera> for [f64; 5] {
 /// Creates a camera from a slice with layout `[fx, fy, cx, cy, w]`.
 /// Returns an error if the slice has fewer than 5 elements.
 impl TryFrom<&[f64]> for FovCamera {
-    type Error = CameraModelError;
+    type Error = ParamError;
 
-    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
-        if params.len() < 5 {
-            return Err(CameraModelError::InvalidParams(format!(
-                "FovCamera requires at least 5 parameters, got {}",
-                params.len()
-            )));
-        }
-        Ok(Self {
+    fn try_from(params: &[f64]) -> ParamResult<Self> {
+        check_param_count("fov", 5, params)?;
+        let camera = Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -184,7 +188,9 @@ impl TryFrom<&[f64]> for FovCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::FOV { w: params[4] },
-        })
+        };
+        camera.validate_params()?;
+        Ok(camera)
     }
 }
 
@@ -206,10 +212,8 @@ impl From<[f64; 5]> for FovCamera {
 /// Creates an `FovCamera` from a parameter slice with full validation.
 /// Unlike [`<FovCamera as TryFrom<&[f64]>>::try_from`], this also calls
 /// [`CameraModel::validate_params`] and returns any validation errors.
-pub fn try_from_params(params: &[f64]) -> Result<FovCamera, CameraModelError> {
-    let camera = FovCamera::try_from(params)?;
-    camera.validate_params()?;
-    Ok(camera)
+pub fn try_from_params(params: &[f64]) -> ParamResult<FovCamera> {
+    FovCamera::try_from(params).map_err(ErrorLogging::log)
 }
 
 impl CameraModel for FovCamera {
@@ -221,14 +225,14 @@ impl CameraModel for FovCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::ProjectionOutOfBounds`] if `z` is too small.
-    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
+    /// Returns [`ProjectionError::OutOfDomain`] if `z` is too small.
+    fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector2<f64>> {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
         if z < crate::GEOMETRIC_PRECISION {
-            return Err(CameraModelError::ProjectionOutOfBounds);
+            return Err(ProjectionError::OutOfDomain { model: "fov", z });
         }
 
         let r = (x * x + y * y).sqrt();
@@ -254,7 +258,7 @@ impl CameraModel for FovCamera {
 
     /// The FOV domain is exactly `z ≥ GEOMETRIC_PRECISION` (the sole
     /// condition `project` checks), so its deficit is measured from that
-    /// plane rather than from `z = 0`. Reporting `ProjectionOutOfBounds`
+    /// plane rather than from `z = 0`. Reporting `OutOfDomain`
     /// for this condition means a `PointBehindCamera` arm never fires for
     /// this model, so this override is the only way to get a deficit here:
     /// the trait default (`-z`) would go non-positive for a point that is
@@ -270,7 +274,7 @@ impl CameraModel for FovCamera {
 
     /// Unprojects a 2D image point to a unit 3D ray. Inverts the projection via the
     /// trigonometric relationship of the FOV model.
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+    fn unproject(&self, point_2d: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>> {
         let u = point_2d.x;
         let v = point_2d.y;
 
@@ -416,10 +420,11 @@ impl CameraModel for FovCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any rule is violated.
-    fn validate_params(&self) -> Result<(), CameraModelError> {
+    /// Returns a [`ParamError`] if any rule is violated.
+    fn validate_params(&self) -> ParamResult<()> {
         self.pinhole.validate()?;
-        self.get_distortion().validate()
+        self.distortion.expect_variant("fov", "FOV")?;
+        self.distortion.validate()
     }
 
     /// Returns the pinhole parameters.
@@ -723,17 +728,12 @@ mod tests {
             Vector3::new(-0.4, 0.1, 2.0),
         ]);
         let batch = camera.project_batch(&pts);
-        for i in 0..3 {
-            let col = pts.column(i);
+        assert_eq!(batch.len(), 3);
+        for (i, (col, uv)) in pts.column_iter().zip(&batch).enumerate() {
             let p = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
-            assert!(
-                (batch[(0, i)] - p.x).abs() < 1e-10,
-                "batch u mismatch at col {i}"
-            );
-            assert!(
-                (batch[(1, i)] - p.y).abs() < 1e-10,
-                "batch v mismatch at col {i}"
-            );
+            let uv = (*uv)?;
+            assert!((uv.x - p.x).abs() < 1e-10, "batch u mismatch at col {i}");
+            assert!((uv.y - p.y).abs() < 1e-10, "batch v mismatch at col {i}");
         }
         Ok(())
     }

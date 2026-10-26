@@ -5,13 +5,20 @@
 //! [rad-tan cookbook chapter](../doc/cookbook/src/rad-tan.html) for the full projection,
 //! unprojection, and Jacobian derivations.
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
+use crate::{
+    CameraModel, DistortionModel, EstimationError, EstimationResult, ParamError, ParamResult,
+    PinholeParams, ProjectionError, ProjectionResult, UnprojectionError, UnprojectionResult,
+    check_param_count,
+};
+use apex_error::ErrorLogging;
 use nalgebra::{DVector, Matrix2, SMatrix, Vector2, Vector3};
 
 /// A Radial-Tangential camera model with 9 intrinsic parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RadTanCamera {
     pub pinhole: PinholeParams,
+    /// Must be [`DistortionModel::BrownConrady`]; the checked constructors reject any
+    /// other variant, and a struct literal with one projects to NaN.
     pub distortion: DistortionModel,
 }
 
@@ -20,7 +27,7 @@ impl RadTanCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// Returns a [`ParamError`], logged here, if `distortion` is not
     /// [`DistortionModel::BrownConrady`].
     ///
     /// # Example
@@ -34,15 +41,12 @@ impl RadTanCamera {
     /// assert_eq!(camera.get_model_name(), "rad_tan");
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    pub fn new(
-        pinhole: PinholeParams,
-        distortion: DistortionModel,
-    ) -> Result<Self, CameraModelError> {
+    pub fn new(pinhole: PinholeParams, distortion: DistortionModel) -> ParamResult<Self> {
         let camera = Self {
             pinhole,
             distortion,
         };
-        camera.validate_params()?;
+        camera.validate_params().map_err(ErrorLogging::log)?;
         Ok(camera)
     }
 
@@ -56,7 +60,7 @@ impl RadTanCamera {
     fn distortion_params(&self) -> (f64, f64, f64, f64, f64) {
         match self.distortion {
             DistortionModel::BrownConrady { k1, k2, p1, p2, k3 } => (k1, k2, p1, p2, k3),
-            _ => (0.0, 0.0, 0.0, 0.0, 0.0),
+            _ => (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN),
         }
     }
 
@@ -67,18 +71,22 @@ impl RadTanCamera {
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
         points_2d: &nalgebra::Matrix2xX<f64>,
-    ) -> Result<(), CameraModelError> {
+    ) -> EstimationResult<()> {
         if points_2d.ncols() != points_3d.ncols() {
-            return Err(CameraModelError::InvalidParams(
-                "Number of 2D and 3D points must match".to_string(),
-            ));
+            return Err(EstimationError::PointCountMismatch {
+                points_3d: points_3d.ncols(),
+                points_2d: points_2d.ncols(),
+            }
+            .log());
         }
 
         let num_points = points_2d.ncols();
         if num_points < 3 {
-            return Err(CameraModelError::InvalidParams(
-                "Need at least 3 points for RadTan linear estimation".to_string(),
-            ));
+            return Err(EstimationError::TooFewPoints {
+                got: num_points,
+                need: 3,
+            }
+            .log());
         }
 
         let mut a = nalgebra::DMatrix::zeros(num_points * 2, 3);
@@ -121,22 +129,22 @@ impl RadTanCamera {
         let distortion_coeffs = match svd.solve(&b, 1e-10) {
             Ok(sol) => sol,
             Err(err_msg) => {
-                return Err(CameraModelError::NumericalError {
-                    operation: "svd_solve".to_string(),
-                    details: err_msg.to_string(),
-                });
+                return Err(EstimationError::SvdSolve { reason: err_msg }.log());
             }
         };
 
-        self.distortion = DistortionModel::BrownConrady {
-            k1: distortion_coeffs[0],
-            k2: distortion_coeffs[1],
-            p1: 0.0,
-            p2: 0.0,
-            k3: distortion_coeffs[2],
+        let estimated = Self {
+            pinhole: self.pinhole,
+            distortion: DistortionModel::BrownConrady {
+                k1: distortion_coeffs[0],
+                k2: distortion_coeffs[1],
+                p1: 0.0,
+                p2: 0.0,
+                k3: distortion_coeffs[2],
+            },
         };
-
-        self.validate_params()?;
+        estimated.validate_params().map_err(ErrorLogging::log)?;
+        *self = estimated;
         Ok(())
     }
 }
@@ -183,16 +191,11 @@ impl From<&RadTanCamera> for [f64; 9] {
 /// `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`. Returns an error if the slice
 /// has fewer than 9 elements.
 impl TryFrom<&[f64]> for RadTanCamera {
-    type Error = CameraModelError;
+    type Error = ParamError;
 
-    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
-        if params.len() < 9 {
-            return Err(CameraModelError::InvalidParams(format!(
-                "RadTanCamera requires at least 9 parameters, got {}",
-                params.len()
-            )));
-        }
-        Ok(Self {
+    fn try_from(params: &[f64]) -> ParamResult<Self> {
+        check_param_count("rad_tan", 9, params)?;
+        let camera = Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -206,7 +209,9 @@ impl TryFrom<&[f64]> for RadTanCamera {
                 p2: params[7],
                 k3: params[8],
             },
-        })
+        };
+        camera.validate_params()?;
+        Ok(camera)
     }
 }
 
@@ -235,10 +240,8 @@ impl From<[f64; 9]> for RadTanCamera {
 /// Creates a `RadTanCamera` from a parameter slice with full validation.
 /// Unlike [`<RadTanCamera as TryFrom<&[f64]>>::try_from`], this also calls
 /// [`CameraModel::validate_params`] and returns any validation errors.
-pub fn try_from_params(params: &[f64]) -> Result<RadTanCamera, CameraModelError> {
-    let camera = RadTanCamera::try_from(params)?;
-    camera.validate_params()?;
-    Ok(camera)
+pub fn try_from_params(params: &[f64]) -> ParamResult<RadTanCamera> {
+    RadTanCamera::try_from(params).map_err(ErrorLogging::log)
 }
 
 impl CameraModel for RadTanCamera {
@@ -247,12 +250,12 @@ impl CameraModel for RadTanCamera {
     type PointJacobian = SMatrix<f64, 2, 3>;
 
     /// Projects a 3D point in the camera frame to 2D image coordinates.
-    /// Returns [`CameraModelError::PointBehindCamera`] if the point lies at or behind
-    /// the camera, and [`CameraModelError::PointOutsideImage`] if the radial polynomial
+    /// Returns [`ProjectionError::PointBehindCamera`] if the point lies at or behind
+    /// the camera, and [`ProjectionError::DistortionFold`] if the radial polynomial
     /// becomes non-positive (the model cannot represent such rays).
-    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
+    fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector2<f64>> {
         if !self.check_projection_condition(p_cam.z) {
-            return Err(CameraModelError::PointBehindCamera {
+            return Err(ProjectionError::PointBehindCamera {
                 z: p_cam.z,
                 min_z: crate::GEOMETRIC_PRECISION,
             });
@@ -271,10 +274,7 @@ impl CameraModel for RadTanCamera {
         let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
 
         if radial <= crate::GEOMETRIC_PRECISION {
-            return Err(CameraModelError::PointOutsideImage {
-                x: x_prime,
-                y: y_prime,
-            });
+            return Err(ProjectionError::DistortionFold { radial });
         }
 
         let xy = x_prime * y_prime;
@@ -291,9 +291,9 @@ impl CameraModel for RadTanCamera {
     }
 
     /// Unprojects a 2D image point to a unit 3D ray. Uses Newton-Raphson on the
-    /// distortion residual; returns [`CameraModelError::NumericalError`] on singular
-    /// Jacobian or non-convergence.
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+    /// distortion residual; returns [`UnprojectionError::SingularJacobian`] or
+    /// [`UnprojectionError::NotConverged`].
+    fn unproject(&self, point_2d: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>> {
         let u = point_2d.x;
         let v = point_2d.y;
 
@@ -304,7 +304,7 @@ impl CameraModel for RadTanCamera {
         let mut point = target_distorted_point;
 
         const CONVERGENCE_EPS: f64 = crate::CONVERGENCE_THRESHOLD;
-        const MAX_ITERATIONS: u32 = 100;
+        const MAX_ITERATIONS: usize = 100;
 
         let (k1, k2, p1, p2, k3) = self.distortion_params();
 
@@ -344,10 +344,7 @@ impl CameraModel for RadTanCamera {
             let det = jacobian[(0, 0)] * jacobian[(1, 1)] - jacobian[(0, 1)] * jacobian[(1, 0)];
 
             if det.abs() < crate::GEOMETRIC_PRECISION {
-                return Err(CameraModelError::NumericalError {
-                    operation: "unprojection".to_string(),
-                    details: "Singular Jacobian in RadTan unprojection".to_string(),
-                });
+                return Err(UnprojectionError::SingularJacobian);
             }
 
             let inv_det = 1.0 / det;
@@ -358,9 +355,9 @@ impl CameraModel for RadTanCamera {
             point.y += delta_y;
 
             if iteration == MAX_ITERATIONS - 1 {
-                return Err(CameraModelError::NumericalError {
-                    operation: "unprojection".to_string(),
-                    details: "RadTan unprojection did not converge".to_string(),
+                return Err(UnprojectionError::NotConverged {
+                    iterations: MAX_ITERATIONS,
+                    residual: fx.abs().max(fy.abs()),
                 });
             }
         }
@@ -487,10 +484,11 @@ impl CameraModel for RadTanCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any rule is violated.
-    fn validate_params(&self) -> Result<(), CameraModelError> {
+    /// Returns a [`ParamError`] if any rule is violated.
+    fn validate_params(&self) -> ParamResult<()> {
         self.pinhole.validate()?;
-        self.get_distortion().validate()
+        self.distortion.expect_variant("rad_tan", "BrownConrady")?;
+        self.distortion.validate()
     }
 
     /// Returns the pinhole parameters.
@@ -888,17 +886,12 @@ mod tests {
             Vector3::new(-0.4, 0.1, 2.0),
         ]);
         let batch = camera.project_batch(&pts);
-        for i in 0..3 {
-            let col = pts.column(i);
+        assert_eq!(batch.len(), 3);
+        for (i, (col, uv)) in pts.column_iter().zip(&batch).enumerate() {
             let p = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
-            assert!(
-                (batch[(0, i)] - p.x).abs() < 1e-10,
-                "batch u mismatch at col {i}"
-            );
-            assert!(
-                (batch[(1, i)] - p.y).abs() < 1e-10,
-                "batch v mismatch at col {i}"
-            );
+            let uv = (*uv)?;
+            assert!((uv.x - p.x).abs() < 1e-10, "batch u mismatch at col {i}");
+            assert!((uv.y - p.y).abs() < 1e-10, "batch v mismatch at col {i}");
         }
         Ok(())
     }

@@ -281,6 +281,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "apex-camera-models"
 version = "0.4.0"
 dependencies = [
+ "apex-error",
  "apex-manifolds",
  "nalgebra",
  "thiserror 2.0.19",
@@ -348,6 +349,7 @@ name = "apex-solver"
 version = "1.5.0"
 dependencies = [
  "apex-camera-models",
+ "apex-error",
  "apex-io",
  "apex-manifolds",
  "chrono",

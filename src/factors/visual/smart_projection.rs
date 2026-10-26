@@ -37,7 +37,7 @@
 //!
 //! [`ProjectionFactor`]: crate::factors::visual::projection::ProjectionFactor
 
-use apex_camera_models::{CameraModel, CameraModelError};
+use apex_camera_models::{CameraModel, ProjectionError};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
@@ -384,7 +384,7 @@ impl<CAM: CameraModel> Factor for SmartProjectionFactor<CAM> {
                     a_list.push(a);
                     b_list.push(b);
                 }
-                Err(CameraModelError::PointBehindCamera { z, min_z }) => {
+                Err(ProjectionError::PointBehindCamera { z, min_z }) => {
                     if self.verbose {
                         warn!(
                             "SmartProjectionFactor: view {i} behind camera (z={z}, min_z={min_z})"

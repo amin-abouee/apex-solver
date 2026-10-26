@@ -5,13 +5,20 @@
 //! [eucm cookbook chapter](../doc/cookbook/src/eucm.html) for the full projection,
 //! unprojection, and Jacobian derivations.
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
+use crate::{
+    CameraModel, DistortionModel, EstimationError, EstimationResult, ParamError, ParamResult,
+    PinholeParams, ProjectionError, ProjectionResult, UnprojectionError, UnprojectionResult,
+    check_param_count,
+};
+use apex_error::ErrorLogging;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Extended Unified Camera Model with 6 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EucmCamera {
     pub pinhole: PinholeParams,
+    /// Must be [`DistortionModel::EUCM`]; the checked constructors reject any
+    /// other variant, and a struct literal with one projects to NaN.
     pub distortion: DistortionModel,
 }
 
@@ -20,7 +27,7 @@ impl EucmCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// Returns a [`ParamError`], logged here, if `distortion` is not
     /// [`DistortionModel::EUCM`].
     ///
     /// # Example
@@ -34,15 +41,12 @@ impl EucmCamera {
     /// assert_eq!(camera.get_model_name(), "eucm");
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    pub fn new(
-        pinhole: PinholeParams,
-        distortion: DistortionModel,
-    ) -> Result<Self, CameraModelError> {
+    pub fn new(pinhole: PinholeParams, distortion: DistortionModel) -> ParamResult<Self> {
         let camera = Self {
             pinhole,
             distortion,
         };
-        camera.validate_params()?;
+        camera.validate_params().map_err(ErrorLogging::log)?;
         Ok(camera)
     }
 
@@ -51,7 +55,7 @@ impl EucmCamera {
     fn distortion_params(&self) -> (f64, f64) {
         match self.distortion {
             DistortionModel::EUCM { alpha, beta } => (alpha, beta),
-            _ => (0.0, 0.0),
+            _ => (f64::NAN, f64::NAN),
         }
     }
 
@@ -89,18 +93,22 @@ impl EucmCamera {
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
         points_2d: &nalgebra::Matrix2xX<f64>,
-    ) -> Result<(), CameraModelError> {
+    ) -> EstimationResult<()> {
         if points_2d.ncols() != points_3d.ncols() {
-            return Err(CameraModelError::InvalidParams(
-                "Number of 2D and 3D points must match".to_string(),
-            ));
+            return Err(EstimationError::PointCountMismatch {
+                points_3d: points_3d.ncols(),
+                points_2d: points_2d.ncols(),
+            }
+            .log());
         }
 
         let num_points = points_2d.ncols();
         if num_points < 1 {
-            return Err(CameraModelError::InvalidParams(
-                "Need at least 1 point for EUCM linear estimation".to_string(),
-            ));
+            return Err(EstimationError::TooFewPoints {
+                got: num_points,
+                need: 1,
+            }
+            .log());
         }
 
         let mut a = nalgebra::DMatrix::zeros(num_points * 2, 1);
@@ -128,20 +136,19 @@ impl EucmCamera {
         let solution = match svd.solve(&b, 1e-10) {
             Ok(sol) => sol,
             Err(err_msg) => {
-                return Err(CameraModelError::NumericalError {
-                    operation: "svd_solve".to_string(),
-                    details: err_msg.to_string(),
-                });
+                return Err(EstimationError::SvdSolve { reason: err_msg }.log());
             }
         };
 
-        self.distortion = DistortionModel::EUCM {
-            alpha: solution[0],
-            beta: 1.0,
+        let estimated = Self {
+            pinhole: self.pinhole,
+            distortion: DistortionModel::EUCM {
+                alpha: solution[0],
+                beta: 1.0,
+            },
         };
-
-        self.validate_params()?;
-
+        estimated.validate_params().map_err(ErrorLogging::log)?;
+        *self = estimated;
         Ok(())
     }
 }
@@ -179,16 +186,11 @@ impl From<&EucmCamera> for [f64; 6] {
 /// Creates a camera from a slice with layout `[fx, fy, cx, cy, alpha, beta]`.
 /// Returns an error if the slice has fewer than 6 elements.
 impl TryFrom<&[f64]> for EucmCamera {
-    type Error = CameraModelError;
+    type Error = ParamError;
 
-    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
-        if params.len() < 6 {
-            return Err(CameraModelError::InvalidParams(format!(
-                "EucmCamera requires at least 6 parameters, got {}",
-                params.len()
-            )));
-        }
-        Ok(Self {
+    fn try_from(params: &[f64]) -> ParamResult<Self> {
+        check_param_count("eucm", 6, params)?;
+        let camera = Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -199,7 +201,9 @@ impl TryFrom<&[f64]> for EucmCamera {
                 alpha: params[4],
                 beta: params[5],
             },
-        })
+        };
+        camera.validate_params()?;
+        Ok(camera)
     }
 }
 
@@ -224,10 +228,8 @@ impl From<[f64; 6]> for EucmCamera {
 /// Creates an `EucmCamera` from a parameter slice with full validation.
 /// Unlike [`<EucmCamera as TryFrom<&[f64]>>::try_from`], this also calls
 /// [`CameraModel::validate_params`] and returns any validation errors.
-pub fn try_from_params(params: &[f64]) -> Result<EucmCamera, CameraModelError> {
-    let camera = EucmCamera::try_from(params)?;
-    camera.validate_params()?;
-    Ok(camera)
+pub fn try_from_params(params: &[f64]) -> ParamResult<EucmCamera> {
+    EucmCamera::try_from(params).map_err(ErrorLogging::log)
 }
 
 impl CameraModel for EucmCamera {
@@ -236,9 +238,10 @@ impl CameraModel for EucmCamera {
     type PointJacobian = SMatrix<f64, 2, 3>;
 
     /// Projects a 3D point in the camera frame to 2D image coordinates.
-    /// Returns [`CameraModelError::PointBehindCamera`] / `PointOutsideImage` if the
-    /// point violates the model's domain (`check_projection_condition`).
-    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
+    /// Returns [`ProjectionError::DenominatorTooSmall`] or
+    /// [`ProjectionError::PointBehindCamera`] if the point violates the model's
+    /// domain (`check_projection_condition`).
+    fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector2<f64>> {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
@@ -249,14 +252,14 @@ impl CameraModel for EucmCamera {
         let denom = alpha * d + (1.0 - alpha) * z;
 
         if denom < crate::GEOMETRIC_PRECISION {
-            return Err(CameraModelError::DenominatorTooSmall {
+            return Err(ProjectionError::DenominatorTooSmall {
                 denom,
                 threshold: crate::GEOMETRIC_PRECISION,
             });
         }
 
         if !self.check_projection_condition(z, denom) {
-            return Err(CameraModelError::PointBehindCamera {
+            return Err(ProjectionError::PointBehindCamera {
                 z,
                 min_z: crate::GEOMETRIC_PRECISION,
             });
@@ -269,10 +272,10 @@ impl CameraModel for EucmCamera {
     }
 
     /// Unprojects a 2D image point to a unit 3D ray via the EUCM algebraic inverse.
-    /// Returns [`CameraModelError::PointOutsideImage`] if the unprojection domain
-    /// (`check_unprojection_condition`) is violated, or a numerical error on
-    /// division by zero.
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+    /// Returns [`UnprojectionError::PointOutsideImage`] if the unprojection domain
+    /// (`check_unprojection_condition`) is violated, or
+    /// [`UnprojectionError::DenominatorTooSmall`] on division by zero.
+    fn unproject(&self, point_2d: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>> {
         let u = point_2d.x;
         let v = point_2d.y;
 
@@ -282,7 +285,7 @@ impl CameraModel for EucmCamera {
         let r2 = mx * mx + my * my;
 
         if !self.check_unprojection_condition(r2) {
-            return Err(CameraModelError::PointOutsideImage { x: u, y: v });
+            return Err(UnprojectionError::PointOutsideImage { x: u, y: v });
         }
 
         // EUCM closed-form inverse (Usenko et al., 3DV 2018, Eq. 41):
@@ -291,13 +294,13 @@ impl CameraModel for EucmCamera {
         let mz_num = 1.0 - beta * alpha * alpha * r2;
         let radicand = 1.0 - (2.0 * alpha - 1.0) * beta * r2;
         if radicand < 0.0 {
-            return Err(CameraModelError::PointOutsideImage { x: u, y: v });
+            return Err(UnprojectionError::PointOutsideImage { x: u, y: v });
         }
         let mz_denom = alpha * radicand.sqrt() + (1.0 - alpha);
         if mz_denom.abs() < crate::GEOMETRIC_PRECISION {
-            return Err(CameraModelError::NumericalError {
-                operation: "unprojection".to_string(),
-                details: "Division by near-zero in EUCM unprojection".to_string(),
+            return Err(UnprojectionError::DenominatorTooSmall {
+                denom: mz_denom,
+                threshold: crate::GEOMETRIC_PRECISION,
             });
         }
 
@@ -387,10 +390,11 @@ impl CameraModel for EucmCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any rule is violated.
-    fn validate_params(&self) -> Result<(), CameraModelError> {
+    /// Returns a [`ParamError`] if any rule is violated.
+    fn validate_params(&self) -> ParamResult<()> {
         self.pinhole.validate()?;
-        self.get_distortion().validate()
+        self.distortion.expect_variant("eucm", "EUCM")?;
+        self.distortion.validate()
     }
 
     /// Returns the pinhole parameters.
@@ -744,17 +748,12 @@ mod tests {
             Vector3::new(-0.4, 0.1, 2.0),
         ]);
         let batch = camera.project_batch(&pts);
-        for i in 0..3 {
-            let col = pts.column(i);
+        assert_eq!(batch.len(), 3);
+        for (i, (col, uv)) in pts.column_iter().zip(&batch).enumerate() {
             let p = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
-            assert!(
-                (batch[(0, i)] - p.x).abs() < 1e-10,
-                "batch u mismatch at col {i}"
-            );
-            assert!(
-                (batch[(1, i)] - p.y).abs() < 1e-10,
-                "batch v mismatch at col {i}"
-            );
+            let uv = (*uv)?;
+            assert!((uv.x - p.x).abs() < 1e-10, "batch u mismatch at col {i}");
+            assert!((uv.y - p.y).abs() < 1e-10, "batch v mismatch at col {i}");
         }
         Ok(())
     }

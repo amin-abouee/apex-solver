@@ -11,9 +11,10 @@
 //! and [`projectaria_tools`](https://github.com/facebookresearch/projectaria_tools).
 //! [`convert_camera`] fits a camera of any model to another.
 
+use apex_error::ErrorLogging;
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
-use nalgebra::{Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
+use nalgebra::{Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
 
 /// Threshold for geometric validity checks (e.g. point in front of camera).
 pub const GEOMETRIC_PRECISION: f64 = 1e-6;
@@ -33,62 +34,13 @@ pub const MIN_DEPTH: f64 = 1e-6;
 /// Convergence threshold for iterative unprojection (e.g. Kannala-Brandt).
 pub const CONVERGENCE_THRESHOLD: f64 = 1e-6;
 
-/// Camera model errors.
-#[derive(thiserror::Error, Debug)]
-pub enum CameraModelError {
-    /// Focal length must be positive: fx={fx}, fy={fy}
-    #[error("Focal length must be positive: fx={fx}, fy={fy}")]
-    FocalLengthNotPositive { fx: f64, fy: f64 },
+pub mod error;
 
-    /// Focal length must be finite: fx={fx}, fy={fy}
-    #[error("Focal length must be finite: fx={fx}, fy={fy}")]
-    FocalLengthNotFinite { fx: f64, fy: f64 },
-
-    /// Principal point must be finite: cx={cx}, cy={cy}
-    #[error("Principal point must be finite: cx={cx}, cy={cy}")]
-    PrincipalPointNotFinite { cx: f64, cy: f64 },
-
-    /// Distortion coefficient must be finite
-    #[error("Distortion coefficient '{name}' must be finite, got {value}")]
-    DistortionNotFinite { name: String, value: f64 },
-
-    /// Parameter out of range
-    #[error("Parameter '{param}' must be in range [{min}, {max}], got {value}")]
-    ParameterOutOfRange {
-        param: String,
-        value: f64,
-        min: f64,
-        max: f64,
-    },
-
-    /// Point behind camera
-    #[error("Point behind camera: z={z} (must be > {min_z})")]
-    PointBehindCamera { z: f64, min_z: f64 },
-
-    /// Point at camera center
-    #[error("Point at camera center: 3D point too close to optical axis")]
-    PointAtCameraCenter,
-
-    /// Projection denominator too small
-    #[error("Projection denominator too small: denom={denom} (threshold={threshold})")]
-    DenominatorTooSmall { denom: f64, threshold: f64 },
-
-    /// Projection outside valid image region
-    #[error("Projection outside valid image region")]
-    ProjectionOutOfBounds,
-
-    /// Point outside image bounds
-    #[error("Point outside image bounds: ({x}, {y}) not in valid region")]
-    PointOutsideImage { x: f64, y: f64 },
-
-    /// Numerical error
-    #[error("Numerical error in {operation}: {details}")]
-    NumericalError { operation: String, details: String },
-
-    /// Generic invalid parameters
-    #[error("Invalid camera parameters: {0}")]
-    InvalidParams(String),
-}
+pub use error::{
+    CameraModelError, CameraModelResult, ConversionError, ConversionResult, EstimationError,
+    EstimationResult, ParamError, ParamResult, ProjectionError, ProjectionResult,
+    UnprojectionError, UnprojectionResult,
+};
 
 /// Linear intrinsic parameters shared by every model except F-Theta.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -105,28 +57,38 @@ pub struct PinholeParams {
 
 impl PinholeParams {
     /// Create new pinhole parameters with validation.
-    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
+    ///
+    /// # Errors
+    ///
+    /// The [`ParamError`] of [`PinholeParams::validate`], logged here.
+    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64) -> ParamResult<Self> {
         let params = Self { fx, fy, cx, cy };
-        params.validate()?;
+        params.validate().map_err(ErrorLogging::log)?;
         Ok(params)
     }
 
-    /// Validate pinhole parameters.
-    pub fn validate(&self) -> Result<(), CameraModelError> {
+    /// Validate pinhole parameters: positive finite focal lengths and a finite
+    /// principal point. Pure check, does not log.
+    ///
+    /// # Errors
+    ///
+    /// [`ParamError::FocalLengthNotPositive`], [`ParamError::FocalLengthNotFinite`]
+    /// or [`ParamError::PrincipalPointNotFinite`].
+    pub fn validate(&self) -> ParamResult<()> {
         if self.fx <= 0.0 || self.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthNotPositive {
+            return Err(ParamError::FocalLengthNotPositive {
                 fx: self.fx,
                 fy: self.fy,
             });
         }
         if !self.fx.is_finite() || !self.fy.is_finite() {
-            return Err(CameraModelError::FocalLengthNotFinite {
+            return Err(ParamError::FocalLengthNotFinite {
                 fx: self.fx,
                 fy: self.fy,
             });
         }
         if !self.cx.is_finite() || !self.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointNotFinite {
+            return Err(ParamError::PrincipalPointNotFinite {
                 cx: self.cx,
                 cy: self.cy,
             });
@@ -185,133 +147,165 @@ pub enum DistortionModel {
     },
 }
 
-fn check_finite(name: &str, value: f64) -> Result<(), CameraModelError> {
+const K_NAMES: [&str; 6] = ["k0", "k1", "k2", "k3", "k4", "k5"];
+const P_NAMES: [&str; 2] = ["p0", "p1"];
+const S_NAMES: [&str; 4] = ["s0", "s1", "s2", "s3"];
+
+fn check_finite(name: &'static str, value: f64) -> ParamResult<()> {
     if !value.is_finite() {
-        return Err(CameraModelError::DistortionNotFinite {
-            name: name.to_string(),
+        return Err(ParamError::DistortionNotFinite { name, value });
+    }
+    Ok(())
+}
+
+fn check_all_finite(names: &[&'static str], values: &[f64]) -> ParamResult<()> {
+    for (name, value) in names.iter().zip(values) {
+        check_finite(name, *value)?;
+    }
+    Ok(())
+}
+
+fn check_range(
+    param: &'static str,
+    value: f64,
+    min: f64,
+    max: f64,
+    valid: bool,
+) -> ParamResult<()> {
+    if !value.is_finite() || !valid {
+        return Err(ParamError::ParameterOutOfRange {
+            param,
             value,
+            min,
+            max,
         });
     }
     Ok(())
 }
 
-fn check_all_finite(prefix: &str, values: &[f64]) -> Result<(), CameraModelError> {
-    for (index, value) in values.iter().enumerate() {
-        check_finite(&format!("{prefix}{index}"), *value)?;
-    }
-    Ok(())
-}
-
 impl DistortionModel {
-    /// Validate distortion parameters for the given model variant.
-    pub fn validate(&self) -> Result<(), CameraModelError> {
+    /// The variant's name, as written after `DistortionModel::`.
+    pub fn variant_name(&self) -> &'static str {
         match self {
+            DistortionModel::None => "None",
+            DistortionModel::Radial { .. } => "Radial",
+            DistortionModel::BrownConrady { .. } => "BrownConrady",
+            DistortionModel::KannalaBrandt { .. } => "KannalaBrandt",
+            DistortionModel::FOV { .. } => "FOV",
+            DistortionModel::UCM { .. } => "UCM",
+            DistortionModel::EUCM { .. } => "EUCM",
+            DistortionModel::DoubleSphere { .. } => "DoubleSphere",
+            DistortionModel::FTheta { .. } => "FTheta",
+            DistortionModel::Fisheye62 { .. } => "Fisheye62",
+            DistortionModel::Fisheye624 { .. } => "Fisheye624",
+        }
+    }
+
+    /// Check that this is the variant `expected` (a [`variant_name`](Self::variant_name))
+    /// that the camera `model` needs.
+    ///
+    /// # Errors
+    ///
+    /// [`ParamError::DistortionVariant`] for any other variant.
+    pub fn expect_variant(&self, model: &'static str, expected: &'static str) -> ParamResult<()> {
+        let actual = self.variant_name();
+        if actual != expected {
+            return Err(ParamError::DistortionVariant {
+                model,
+                expected,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate distortion parameters for the given model variant. Pure
+    /// check, does not log.
+    ///
+    /// # Errors
+    ///
+    /// [`ParamError::DistortionNotFinite`] or [`ParamError::ParameterOutOfRange`].
+    pub fn validate(&self) -> ParamResult<()> {
+        match *self {
             DistortionModel::None => Ok(()),
             DistortionModel::Radial { k1, k2 } => {
-                check_finite("k1", *k1)?;
-                check_finite("k2", *k2)
+                check_finite("k1", k1)?;
+                check_finite("k2", k2)
             }
             DistortionModel::BrownConrady { k1, k2, p1, p2, k3 } => {
-                check_finite("k1", *k1)?;
-                check_finite("k2", *k2)?;
-                check_finite("p1", *p1)?;
-                check_finite("p2", *p2)?;
-                check_finite("k3", *k3)
+                check_finite("k1", k1)?;
+                check_finite("k2", k2)?;
+                check_finite("p1", p1)?;
+                check_finite("p2", p2)?;
+                check_finite("k3", k3)
             }
             DistortionModel::KannalaBrandt { k1, k2, k3, k4 } => {
-                check_finite("k1", *k1)?;
-                check_finite("k2", *k2)?;
-                check_finite("k3", *k3)?;
-                check_finite("k4", *k4)
+                check_finite("k1", k1)?;
+                check_finite("k2", k2)?;
+                check_finite("k3", k3)?;
+                check_finite("k4", k4)
             }
             DistortionModel::FOV { w } => {
-                if !w.is_finite() || *w <= 0.0 || *w > std::f64::consts::PI {
-                    return Err(CameraModelError::ParameterOutOfRange {
-                        param: "w".to_string(),
-                        value: *w,
-                        min: 0.0,
-                        max: std::f64::consts::PI,
-                    });
-                }
-                Ok(())
+                let pi = std::f64::consts::PI;
+                check_range("w", w, 0.0, pi, w > 0.0 && w <= pi)
             }
             DistortionModel::UCM { alpha } => {
-                if !alpha.is_finite() || !(0.0..=1.0).contains(alpha) {
-                    return Err(CameraModelError::ParameterOutOfRange {
-                        param: "alpha".to_string(),
-                        value: *alpha,
-                        min: 0.0,
-                        max: 1.0,
-                    });
-                }
-                Ok(())
+                check_range("alpha", alpha, 0.0, 1.0, (0.0..=1.0).contains(&alpha))
             }
             DistortionModel::EUCM { alpha, beta } => {
-                if !alpha.is_finite() || !(0.0..=1.0).contains(alpha) {
-                    return Err(CameraModelError::ParameterOutOfRange {
-                        param: "alpha".to_string(),
-                        value: *alpha,
-                        min: 0.0,
-                        max: 1.0,
-                    });
-                }
-                if !beta.is_finite() || *beta <= 0.0 {
-                    return Err(CameraModelError::ParameterOutOfRange {
-                        param: "beta".to_string(),
-                        value: *beta,
-                        min: 0.0,
-                        max: f64::INFINITY,
-                    });
-                }
-                Ok(())
+                check_range("alpha", alpha, 0.0, 1.0, (0.0..=1.0).contains(&alpha))?;
+                check_range("beta", beta, 0.0, f64::INFINITY, beta > 0.0)
             }
             DistortionModel::DoubleSphere { xi, alpha } => {
-                if !xi.is_finite() || !(-1.0..=1.0).contains(xi) {
-                    return Err(CameraModelError::ParameterOutOfRange {
-                        param: "xi".to_string(),
-                        value: *xi,
-                        min: -1.0,
-                        max: 1.0,
-                    });
-                }
-                if !alpha.is_finite() || *alpha <= 0.0 || *alpha > 1.0 {
-                    return Err(CameraModelError::ParameterOutOfRange {
-                        param: "alpha".to_string(),
-                        value: *alpha,
-                        min: 0.0,
-                        max: 1.0,
-                    });
-                }
-                Ok(())
+                check_range("xi", xi, -1.0, 1.0, (-1.0..=1.0).contains(&xi))?;
+                check_range("alpha", alpha, 0.0, 1.0, alpha > 0.0 && alpha <= 1.0)
             }
             DistortionModel::FTheta { k1, k2, k3, k4 } => {
-                if !k1.is_finite() || *k1 <= 0.0 {
-                    return Err(CameraModelError::FocalLengthNotPositive { fx: *k1, fy: *k1 });
-                }
-                check_finite("k2", *k2)?;
-                check_finite("k3", *k3)?;
-                check_finite("k4", *k4)
+                check_range("k1", k1, 0.0, f64::INFINITY, k1 > 0.0)?;
+                check_finite("k2", k2)?;
+                check_finite("k3", k3)?;
+                check_finite("k4", k4)
             }
             DistortionModel::Fisheye62 { k, p } => {
-                check_all_finite("k", k)?;
-                check_all_finite("p", p)
+                check_all_finite(&K_NAMES, &k)?;
+                check_all_finite(&P_NAMES, &p)
             }
             DistortionModel::Fisheye624 { k, p, s } => {
-                check_all_finite("k", k)?;
-                check_all_finite("p", p)?;
-                check_all_finite("s", s)
+                check_all_finite(&K_NAMES, &k)?;
+                check_all_finite(&P_NAMES, &p)?;
+                check_all_finite(&S_NAMES, &s)
             }
         }
     }
+}
+
+/// Check that a parameter slice has exactly `expected` entries for `model`.
+pub(crate) fn check_param_count(
+    model: &'static str,
+    expected: usize,
+    params: &[f64],
+) -> ParamResult<()> {
+    if params.len() != expected {
+        return Err(ParamError::ParamCount {
+            model,
+            expected,
+            actual: params.len(),
+        });
+    }
+    Ok(())
 }
 
 /// Returns `Ok(())` if `z >= GEOMETRIC_PRECISION` (1e-6) and
 /// `Err(PointAtCameraCenter)` otherwise. Used to reject points too close to
 /// the optical axis that would cause numerical instability in the
 /// perspective division.
-pub fn validate_point_in_front(z: f64) -> Result<(), CameraModelError> {
+///
+/// # Errors
+///
+/// [`ProjectionError::PointAtCameraCenter`]; not logged (hot path).
+pub fn validate_point_in_front(z: f64) -> ProjectionResult<()> {
     if z < crate::GEOMETRIC_PRECISION {
-        return Err(CameraModelError::PointAtCameraCenter);
+        return Err(ProjectionError::PointAtCameraCenter);
     }
     Ok(())
 }
@@ -382,9 +376,10 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     ///
     /// # Errors
     ///
-    /// Returns `PointBehindCamera`, `PointAtCameraCenter`, `DenominatorTooSmall`,
-    /// or `ProjectionOutOfBounds` depending on the model.
-    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError>;
+    /// A [`ProjectionError`] (`PointBehindCamera`, `DenominatorTooSmall`,
+    /// `OutOfDomain`, ...) depending on the model. These are expected
+    /// outcomes on the hot path: they do not allocate and are not logged.
+    fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector2<f64>>;
 
     /// Unprojects a 2D image point to a normalized 3D ray in camera frame.
     /// Some models use Newton-Raphson for undistortion. See the per-model
@@ -392,9 +387,9 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     ///
     /// # Errors
     ///
-    /// Returns `PointOutsideImage` or `NumericalError` (e.g. when the
-    /// iterative solver fails to converge).
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError>;
+    /// An [`UnprojectionError`] (`PointOutsideImage`, `NotConverged`, ...).
+    /// Like projection errors, these are not allocated or logged.
+    fn unproject(&self, point_2d: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>>;
 
     /// ∂(u,v)/∂(x,y,z) — 2×3 Jacobian of projection w.r.t. the 3D point.
     /// Used for structure optimisation, triangulation, and bundle adjustment.
@@ -506,26 +501,24 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
         (-p_cam.z, Vector3::new(0.0, 0.0, -1.0))
     }
 
-    /// Projects N 3D points in one call. Invalid projections are replaced
-    /// by the sentinel `(1e6, 1e6)`. Models may override with a vectorised
-    /// implementation.
-    fn project_batch(&self, points_cam: &Matrix3xX<f64>) -> Matrix2xX<f64> {
-        let n = points_cam.ncols();
-        let mut result = Matrix2xX::zeros(n);
-        for i in 0..n {
-            let p = Vector3::new(points_cam[(0, i)], points_cam[(1, i)], points_cam[(2, i)]);
-            match self.project(&p) {
-                Ok(uv) => result.set_column(i, &uv),
-                Err(_) => result.set_column(i, &Vector2::new(1e6, 1e6)),
-            }
-        }
-        result
+    /// Projects N 3D points in one call, one result per column. Models may
+    /// override with a vectorised implementation.
+    fn project_batch(&self, points_cam: &Matrix3xX<f64>) -> Vec<ProjectionResult<Vector2<f64>>> {
+        points_cam
+            .column_iter()
+            .map(|p| self.project(&Vector3::new(p[0], p[1], p[2])))
+            .collect()
     }
 
-    /// Validates camera intrinsic and distortion parameters. The exact
-    /// rules are model-specific; see the per-model cookbook page under
-    /// "Validation Rules".
-    fn validate_params(&self) -> Result<(), CameraModelError>;
+    /// Validates camera intrinsic and distortion parameters, including that
+    /// the distortion is the variant the model needs. The exact rules are
+    /// model-specific; see the per-model cookbook page under "Validation
+    /// Rules". Pure check, does not log: the checked constructors log.
+    ///
+    /// # Errors
+    ///
+    /// The first [`ParamError`] found.
+    fn validate_params(&self) -> ParamResult<()>;
 
     /// Returns the linear intrinsics `(f_x, f_y, c_x, c_y)`.
     fn get_pinhole_params(&self) -> PinholeParams;
@@ -542,7 +535,6 @@ pub(crate) use apex_manifolds::util::skew as skew_symmetric;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pinhole::PinholeCamera;
     use apex_manifolds::LieGroup;
     use apex_manifolds::se3::{SE3, SE3Tangent};
 
@@ -784,34 +776,32 @@ mod tests {
         let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
         let camera = PinholeCamera::new(pinhole, DistortionModel::None)?;
 
-        // 3 valid points + 1 invalid (behind camera)
         let pts = Matrix3xX::from_columns(&[
             Vector3::new(0.0, 0.0, 1.0),
             Vector3::new(0.1, 0.2, 1.0),
             Vector3::new(-0.1, 0.1, 2.0),
-            Vector3::new(0.0, 0.0, -1.0), // behind camera → sentinel (1e6, 1e6)
+            Vector3::new(0.0, 0.0, -1.0),
         ]);
 
         let result = camera.project_batch(&pts);
-        assert_eq!(result.ncols(), 4);
-        assert!(result[(0, 0)].is_finite());
-        assert!(result[(1, 0)].is_finite());
-        assert!(
-            (result[(0, 3)] - 1e6).abs() < 1.0,
-            "Invalid projection should be sentinel 1e6, got {}",
-            result[(0, 3)]
-        );
-        assert!(
-            (result[(1, 3)] - 1e6).abs() < 1.0,
-            "Invalid projection should be sentinel 1e6, got {}",
-            result[(1, 3)]
+        assert_eq!(result.len(), 4);
+        for (i, column) in pts.column_iter().take(3).enumerate() {
+            let single = camera.project(&Vector3::new(column[0], column[1], column[2]))?;
+            assert_eq!(result[i], Ok(single));
+        }
+        assert_eq!(
+            result[3],
+            Err(ProjectionError::PointBehindCamera {
+                z: -1.0,
+                min_z: GEOMETRIC_PRECISION
+            })
         );
         Ok(())
     }
 
     #[test]
     fn test_camera_model_error_display_focal_length_not_positive() {
-        let e = CameraModelError::FocalLengthNotPositive {
+        let e = ParamError::FocalLengthNotPositive {
             fx: -1.0,
             fy: 300.0,
         };
@@ -824,7 +814,7 @@ mod tests {
 
     #[test]
     fn test_camera_model_error_display_point_behind_camera() {
-        let e = CameraModelError::PointBehindCamera {
+        let e = ProjectionError::PointBehindCamera {
             z: -0.5,
             min_z: 1e-6,
         };
@@ -834,8 +824,8 @@ mod tests {
 
     #[test]
     fn test_camera_model_error_display_parameter_out_of_range() {
-        let e = CameraModelError::ParameterOutOfRange {
-            param: "alpha".to_string(),
+        let e = ParamError::ParameterOutOfRange {
+            param: "alpha",
             value: 1.5,
             min: 0.0,
             max: 1.0,
@@ -845,5 +835,397 @@ mod tests {
             s.contains("alpha") && s.contains("1.5"),
             "Display should include param and value: {s}"
         );
+    }
+
+    #[test]
+    fn distortion_errors_name_the_coefficient() {
+        let d = DistortionModel::Fisheye624 {
+            k: [0.0; 6],
+            p: [0.0, f64::INFINITY],
+            s: [0.0; 4],
+        };
+        assert_eq!(
+            d.validate(),
+            Err(ParamError::DistortionNotFinite {
+                name: "p1",
+                value: f64::INFINITY
+            })
+        );
+    }
+
+    #[test]
+    fn ftheta_k1_is_a_range_error_not_a_focal_length() {
+        let d = DistortionModel::FTheta {
+            k1: -1.0,
+            k2: 0.0,
+            k3: 0.0,
+            k4: 0.0,
+        };
+        assert!(matches!(
+            d.validate(),
+            Err(ParamError::ParameterOutOfRange { param: "k1", .. })
+        ));
+    }
+
+    #[test]
+    fn expect_variant_reports_both_names() {
+        let d = DistortionModel::UCM { alpha: 0.5 };
+        assert_eq!(d.expect_variant("ucm", "UCM"), Ok(()));
+        assert_eq!(
+            d.expect_variant("eucm", "EUCM"),
+            Err(ParamError::DistortionVariant {
+                model: "eucm",
+                expected: "EUCM",
+                actual: "UCM"
+            })
+        );
+    }
+
+    #[test]
+    fn param_count_must_match_exactly() {
+        assert_eq!(check_param_count("pinhole", 4, &[1.0; 4]), Ok(()));
+        for len in [3, 5] {
+            assert_eq!(
+                check_param_count("pinhole", 4, &vec![1.0; len]),
+                Err(ParamError::ParamCount {
+                    model: "pinhole",
+                    expected: 4,
+                    actual: len
+                })
+            );
+        }
+    }
+
+    /// A slice of the wrong length is rejected whether it is short or long,
+    /// and a non-finite entry anywhere is rejected too.
+    fn check_slice_rules<C>(model: &'static str, valid: &[f64]) -> TestResult
+    where
+        C: CameraModel + for<'a> TryFrom<&'a [f64], Error = ParamError>,
+    {
+        let n = valid.len();
+        C::try_from(valid)?;
+        for len in [n - 1, n + 1] {
+            let mut params = valid.to_vec();
+            params.resize(len, 0.0);
+            assert_eq!(
+                C::try_from(&params).err(),
+                Some(ParamError::ParamCount {
+                    model,
+                    expected: n,
+                    actual: len
+                }),
+                "{model} with {len} values"
+            );
+        }
+        for index in 0..n {
+            let mut params = valid.to_vec();
+            params[index] = f64::NAN;
+            assert!(
+                C::try_from(&params).is_err(),
+                "{model} accepted NaN at index {index}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_model_checks_its_slice_length_and_values() -> TestResult {
+        let pinhole = [500.0, 500.0, 320.0, 240.0];
+        check_slice_rules::<PinholeCamera>("pinhole", &pinhole)?;
+        check_slice_rules::<BALPinholeCameraStrict>("bal_pinhole", &[500.0, 0.1, 0.01])?;
+        check_slice_rules::<RadTanCamera>(
+            "rad_tan",
+            &[500.0, 500.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.001, 0.0],
+        )?;
+        check_slice_rules::<KannalaBrandtCamera>(
+            "kannala_brandt",
+            &[300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.0, 0.0],
+        )?;
+        check_slice_rules::<FovCamera>("fov", &[300.0, 300.0, 320.0, 240.0, 1.0])?;
+        check_slice_rules::<UcmCamera>("ucm", &[300.0, 300.0, 320.0, 240.0, 0.5])?;
+        check_slice_rules::<EucmCamera>("eucm", &[300.0, 300.0, 320.0, 240.0, 0.5, 1.0])?;
+        check_slice_rules::<DoubleSphereCamera>(
+            "double_sphere",
+            &[300.0, 300.0, 320.0, 240.0, -0.2, 0.6],
+        )?;
+        check_slice_rules::<FThetaCamera>("ftheta", &[320.0, 240.0, 500.0, 0.0, 0.0, 0.0])?;
+        let mut f62 = [0.0; 12];
+        f62[..4].copy_from_slice(&pinhole);
+        check_slice_rules::<Fisheye62Camera>("fisheye62", &f62)?;
+        let mut f624 = [0.0; 16];
+        f624[..4].copy_from_slice(&pinhole);
+        check_slice_rules::<Fisheye624Camera>("fisheye624", &f624)?;
+        Ok(())
+    }
+
+    #[test]
+    fn try_from_now_validates_the_values() {
+        // alpha = 1.5 is out of the UCM range; TryFrom used to accept it.
+        assert_eq!(
+            UcmCamera::try_from(&[300.0, 300.0, 320.0, 240.0, 1.5][..]).err(),
+            Some(ParamError::ParameterOutOfRange {
+                param: "alpha",
+                value: 1.5,
+                min: 0.0,
+                max: 1.0
+            })
+        );
+    }
+
+    #[test]
+    fn every_model_rejects_a_wrong_distortion_variant() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let none = DistortionModel::None;
+        let radial = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
+        let checks: [(ParamResult<()>, &str, &str); 11] = [
+            (
+                PinholeCamera::new(pinhole, radial).map(|_| ()),
+                "pinhole",
+                "None",
+            ),
+            (
+                BALPinholeCameraStrict::new(PinholeParams::new(300.0, 300.0, 0.0, 0.0)?, none)
+                    .map(|_| ()),
+                "bal_pinhole",
+                "Radial",
+            ),
+            (
+                RadTanCamera::new(pinhole, none).map(|_| ()),
+                "rad_tan",
+                "BrownConrady",
+            ),
+            (
+                KannalaBrandtCamera::new(pinhole, none).map(|_| ()),
+                "kannala_brandt",
+                "KannalaBrandt",
+            ),
+            (FovCamera::new(pinhole, none).map(|_| ()), "fov", "FOV"),
+            (UcmCamera::new(pinhole, none).map(|_| ()), "ucm", "UCM"),
+            (EucmCamera::new(pinhole, none).map(|_| ()), "eucm", "EUCM"),
+            (
+                DoubleSphereCamera::new(pinhole, none).map(|_| ()),
+                "double_sphere",
+                "DoubleSphere",
+            ),
+            (
+                FThetaCamera::new(320.0, 240.0, none).map(|_| ()),
+                "ftheta",
+                "FTheta",
+            ),
+            (
+                Fisheye62Camera::new(pinhole, none).map(|_| ()),
+                "fisheye62",
+                "Fisheye62",
+            ),
+            (
+                Fisheye624Camera::new(pinhole, none).map(|_| ()),
+                "fisheye624",
+                "Fisheye624",
+            ),
+        ];
+        for (result, model, expected) in checks {
+            let actual = if model == "pinhole" { "Radial" } else { "None" };
+            assert_eq!(
+                result,
+                Err(ParamError::DistortionVariant {
+                    model,
+                    expected,
+                    actual
+                })
+            );
+        }
+        Ok(())
+    }
+
+    /// A struct literal can still hold a mismatched variant. It projects to
+    /// NaN, never to a finite pixel computed with zero distortion.
+    #[test]
+    fn a_mismatched_struct_literal_never_projects_silently() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let none = DistortionModel::None;
+        let point = Vector3::new(0.1, 0.2, 1.0);
+        let finite = |r: ProjectionResult<Vector2<f64>>| r.is_ok_and(|uv| uv.x.is_finite());
+        assert!(!finite(
+            FovCamera {
+                pinhole,
+                distortion: none
+            }
+            .project(&point)
+        ));
+        assert!(!finite(
+            RadTanCamera {
+                pinhole,
+                distortion: none
+            }
+            .project(&point)
+        ));
+        assert!(!finite(
+            KannalaBrandtCamera {
+                pinhole,
+                distortion: none
+            }
+            .project(&point)
+        ));
+        assert!(!finite(
+            Fisheye624Camera {
+                pinhole,
+                distortion: none
+            }
+            .project(&point)
+        ));
+        let ftheta = FThetaCamera {
+            cx: 320.0,
+            cy: 240.0,
+            distortion: none,
+        };
+        assert!(!finite(ftheta.project(&point)));
+        assert_eq!(
+            ftheta.distortion_params(),
+            Err(ParamError::DistortionVariant {
+                model: "ftheta",
+                expected: "FTheta",
+                actual: "None"
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hot_path_errors_name_their_cause() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let behind = Vector3::new(0.0, 0.0, -1.0);
+        let kb = KannalaBrandtCamera::new(
+            pinhole,
+            DistortionModel::KannalaBrandt {
+                k1: 0.0,
+                k2: 0.0,
+                k3: 0.0,
+                k4: 0.0,
+            },
+        )?;
+        assert_eq!(
+            kb.project(&behind),
+            Err(ProjectionError::PointBehindCamera {
+                z: -1.0,
+                min_z: GEOMETRIC_PRECISION
+            })
+        );
+        let far = Vector2::new(320.0 + 300.0 * 2.0, 240.0);
+        assert_eq!(
+            kb.unproject(&far),
+            Err(UnprojectionError::RadiusOutOfDomain {
+                radius: 2.0,
+                max: std::f64::consts::FRAC_PI_2
+            })
+        );
+        assert_eq!(
+            kb.unproject(&Vector2::new(f64::NAN, 0.0)),
+            Err(UnprojectionError::NonFinitePixel)
+        );
+
+        let fov = FovCamera::new(pinhole, DistortionModel::FOV { w: 1.0 })?;
+        assert_eq!(
+            fov.project(&behind),
+            Err(ProjectionError::OutOfDomain {
+                model: "fov",
+                z: -1.0
+            })
+        );
+
+        let ucm = UcmCamera::new(pinhole, DistortionModel::UCM { alpha: 0.8 })?;
+        let outside = Vector2::new(320.0 + 300.0 * 10.0, 240.0);
+        assert!(matches!(
+            ucm.unproject(&outside),
+            Err(UnprojectionError::PointOutsideImage { .. })
+        ));
+
+        let eucm = EucmCamera::new(
+            pinhole,
+            DistortionModel::EUCM {
+                alpha: 0.8,
+                beta: 1.0,
+            },
+        )?;
+        assert!(matches!(
+            eucm.unproject(&outside),
+            Err(UnprojectionError::PointOutsideImage { .. })
+        ));
+
+        let radtan = RadTanCamera::new(
+            pinhole,
+            DistortionModel::BrownConrady {
+                k1: -1.0,
+                k2: 0.0,
+                p1: 0.0,
+                p2: 0.0,
+                k3: 0.0,
+            },
+        )?;
+        assert!(matches!(
+            radtan.project(&Vector3::new(2.0, 0.0, 1.0)),
+            Err(ProjectionError::DistortionFold { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_projection_error_chains_to_the_root() -> TestResult {
+        fn project_one(camera: &PinholeCamera) -> CameraModelResult<Vector2<f64>> {
+            Ok(camera.project(&Vector3::new(0.0, 0.0, -2.0))?)
+        }
+        let camera = PinholeCamera::new(
+            PinholeParams::new(500.0, 500.0, 320.0, 240.0)?,
+            DistortionModel::None,
+        )?;
+        let error = project_one(&camera).err().ok_or("expected an error")?;
+        assert!(matches!(
+            error,
+            CameraModelError::Projection(ProjectionError::PointBehindCamera { .. })
+        ));
+        assert_eq!(
+            apex_error::ErrorChainExt::chain(&error),
+            "point behind camera: z=-2 (must be > 0.000001)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn linear_estimation_rejects_mismatched_point_counts() -> TestResult {
+        let mut ucm = UcmCamera::new(
+            PinholeParams::new(300.0, 300.0, 320.0, 240.0)?,
+            DistortionModel::UCM { alpha: 0.5 },
+        )?;
+        let before = ucm;
+        let points_3d = Matrix3xX::from_columns(&[Vector3::new(0.1, 0.2, 1.0)]);
+        let points_2d = nalgebra::Matrix2xX::from_columns(&[
+            Vector2::new(330.0, 250.0),
+            Vector2::new(331.0, 251.0),
+        ]);
+        assert_eq!(
+            ucm.linear_estimation(&points_3d, &points_2d),
+            Err(EstimationError::PointCountMismatch {
+                points_3d: 1,
+                points_2d: 2
+            })
+        );
+        assert_eq!(ucm, before);
+        let ftheta = FThetaCamera::new(
+            320.0,
+            240.0,
+            DistortionModel::FTheta {
+                k1: 300.0,
+                k2: 0.0,
+                k3: 0.0,
+                k4: 0.0,
+            },
+        )?;
+        assert_eq!(
+            ftheta.linear_estimation(&points_3d, &points_2d).err(),
+            Some(EstimationError::PointCountMismatch {
+                points_3d: 1,
+                points_2d: 2
+            })
+        );
+        Ok(())
     }
 }

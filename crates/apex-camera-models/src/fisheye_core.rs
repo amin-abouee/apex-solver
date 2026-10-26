@@ -10,7 +10,9 @@
 //! columns of [`Core::jacobian_params`]:
 //! `fx fy cx cy k0 k1 k2 k3 k4 k5 p0 p1 s0 s1 s2 s3`.
 
-use crate::{CameraModelError, GEOMETRIC_PRECISION};
+use crate::{
+    GEOMETRIC_PRECISION, ProjectionError, ProjectionResult, UnprojectionError, UnprojectionResult,
+};
 use nalgebra::{Matrix2, SMatrix, Vector2, Vector3};
 
 /// Radial terms `k0..k5`.
@@ -18,6 +20,9 @@ pub(crate) const NUM_K: usize = 6;
 
 /// Newton iterations for the two inversions in `unproject`.
 const MAX_ITERATIONS: usize = 50;
+
+/// Bisection steps of the fallback θ solve.
+const BISECTION_STEPS: usize = 200;
 
 /// A Newton step below this ends an inversion.
 const STEP_TOLERANCE: f64 = 1e-14;
@@ -93,9 +98,9 @@ impl Core {
         (Vector2::new(scale * p.x, scale * p.y), theta, rho)
     }
 
-    pub(crate) fn project(&self, p: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
+    pub(crate) fn project(&self, p: &Vector3<f64>) -> ProjectionResult<Vector2<f64>> {
         if p.z < GEOMETRIC_PRECISION {
-            return Err(CameraModelError::PointBehindCamera {
+            return Err(ProjectionError::PointBehindCamera {
                 z: p.z,
                 min_z: GEOMETRIC_PRECISION,
             });
@@ -109,12 +114,7 @@ impl Core {
     }
 
     /// Solves `R(θ) = target` for θ in `[0, MAX_THETA]`.
-    fn theta_from_radius(&self, target: f64) -> Result<f64, CameraModelError> {
-        let fail = |details: String| CameraModelError::NumericalError {
-            operation: "unprojection".to_string(),
-            details,
-        };
-
+    fn theta_from_radius(&self, target: f64) -> UnprojectionResult<f64> {
         // Newton from θ = target, kept inside the half space.
         let mut theta = target.min(MAX_THETA);
         for _ in 0..MAX_ITERATIONS {
@@ -137,12 +137,14 @@ impl Core {
 
         // Bisection, when the polynomial rises through `target` once.
         let (mut low, mut high) = (0.0, MAX_THETA);
-        if self.radial(high).0 < target {
-            return Err(fail(format!(
-                "radius {target} lies beyond the model's field of view"
-            )));
+        let edge = self.radial(high).0;
+        if edge < target {
+            return Err(UnprojectionError::RadiusOutOfDomain {
+                radius: target,
+                max: edge,
+            });
         }
-        for _ in 0..200 {
+        for _ in 0..BISECTION_STEPS {
             let middle = 0.5 * (low + high);
             if self.radial(middle).0 < target {
                 low = middle;
@@ -151,21 +153,21 @@ impl Core {
             }
         }
         let theta = 0.5 * (low + high);
-        if (self.radial(theta).0 - target).abs() < RESIDUAL_TOLERANCE {
+        let residual = (self.radial(theta).0 - target).abs();
+        if residual < RESIDUAL_TOLERANCE {
             Ok(theta)
         } else {
-            Err(fail(format!("no incidence angle has radius {target}")))
+            Err(UnprojectionError::NotConverged {
+                iterations: BISECTION_STEPS,
+                residual,
+            })
         }
     }
 
-    pub(crate) fn unproject(&self, uv: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
-        let fail = |details: String| CameraModelError::NumericalError {
-            operation: "unprojection".to_string(),
-            details,
-        };
+    pub(crate) fn unproject(&self, uv: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>> {
         let target = Vector2::new((uv.x - self.cx) / self.fx, (uv.y - self.cy) / self.fy);
         if !target.x.is_finite() || !target.y.is_finite() {
-            return Err(fail("pixel is not finite".to_string()));
+            return Err(UnprojectionError::NonFinitePixel);
         }
 
         // Undo the tangential and thin-prism offsets: solve `ξ + o(ξ) = target`.
@@ -175,7 +177,7 @@ impl Core {
             let (offset, jacobian) = self.offsets(xi.x, xi.y);
             let full = Matrix2::identity() + jacobian;
             let Some(inverse) = full.try_inverse() else {
-                return Err(fail("singular distortion Jacobian".to_string()));
+                return Err(UnprojectionError::SingularJacobian);
             };
             let step = inverse * (target - xi - offset);
             xi += step;
@@ -185,8 +187,14 @@ impl Core {
             }
         }
         let (offset, _) = self.offsets(xi.x, xi.y);
-        if !converged && (xi + offset - target).norm() > RESIDUAL_TOLERANCE {
-            return Err(fail("tangential inversion did not converge".to_string()));
+        if !converged {
+            let residual = (xi + offset - target).norm();
+            if residual > RESIDUAL_TOLERANCE {
+                return Err(UnprojectionError::NotConverged {
+                    iterations: MAX_ITERATIONS,
+                    residual,
+                });
+            }
         }
 
         let radius = xi.norm();

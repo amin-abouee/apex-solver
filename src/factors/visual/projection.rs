@@ -9,7 +9,7 @@ use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::{Factor, OptimizeParams};
-use apex_camera_models::{CameraModel, CameraModelError};
+use apex_camera_models::{CameraModel, ProjectionError};
 use apex_manifolds::Tangent;
 use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
@@ -258,7 +258,7 @@ where
             // Project point (includes all validity checks)
             let uv = match camera.project(&p_cam) {
                 Ok(proj) => proj,
-                Err(CameraModelError::PointBehindCamera { z, min_z }) => {
+                Err(ProjectionError::PointBehindCamera { z, min_z }) => {
                     if self.verbose_cheirality {
                         warn!(
                             "Point {} behind camera (z={}, min_z={}): applying cheirality penalty",

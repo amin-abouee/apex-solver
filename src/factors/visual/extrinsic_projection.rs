@@ -7,7 +7,7 @@
 //! that camera — so they belong in the graph as their own variable, where many
 //! observations can determine them.
 
-use apex_camera_models::{CameraModel, CameraModelError};
+use apex_camera_models::{CameraModel, ProjectionError};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
@@ -106,7 +106,7 @@ impl<CAM: CameraModel + Send + Sync + 'static> Factor for ExtrinsicProjectionFac
 
         let projection = match self.camera.project(&p_cam) {
             Ok(uv) => uv,
-            Err(CameraModelError::PointBehindCamera { z, min_z }) => {
+            Err(ProjectionError::PointBehindCamera { z, min_z }) => {
                 if self.verbose_cheirality {
                     warn!("ExtrinsicProjectionFactor: point behind camera (z={z}, min_z={min_z})");
                 }

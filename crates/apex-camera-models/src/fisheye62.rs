@@ -20,9 +20,10 @@
 
 use crate::fisheye_core::{Core, NUM_K};
 use crate::{
-    CameraModel, CameraModelError, DistortionModel, Fisheye624Camera, KannalaBrandtCamera,
-    PinholeParams,
+    CameraModel, DistortionModel, Fisheye624Camera, KannalaBrandtCamera, ParamError, ParamResult,
+    PinholeParams, ProjectionResult, UnprojectionResult, check_param_count,
 };
+use apex_error::ErrorLogging;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Number of intrinsic parameters: `fx fy cx cy k0..k5 p0 p1`.
@@ -35,6 +36,8 @@ const ARIA_DIM: usize = 11;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fisheye62Camera {
     pub pinhole: PinholeParams,
+    /// Must be [`DistortionModel::Fisheye62`]; the checked constructors reject any
+    /// other variant, and a struct literal with one projects to NaN.
     pub distortion: DistortionModel,
 }
 
@@ -43,9 +46,9 @@ impl Fisheye62Camera {
     ///
     /// # Errors
     ///
-    /// [`CameraModelError::InvalidParams`] if `distortion` is not
-    /// [`DistortionModel::Fisheye62`], and the errors of
-    /// [`CameraModel::validate_params`].
+    /// [`ParamError::DistortionVariant`] if `distortion` is not
+    /// [`DistortionModel::Fisheye62`], and the other errors of
+    /// [`CameraModel::validate_params`]; logged here.
     ///
     /// # Example
     ///
@@ -61,20 +64,12 @@ impl Fisheye62Camera {
     /// assert_eq!(camera.get_model_name(), "fisheye62");
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    pub fn new(
-        pinhole: PinholeParams,
-        distortion: DistortionModel,
-    ) -> Result<Self, CameraModelError> {
-        if !matches!(distortion, DistortionModel::Fisheye62 { .. }) {
-            return Err(CameraModelError::InvalidParams(
-                "Fisheye62Camera requires DistortionModel::Fisheye62".to_string(),
-            ));
-        }
+    pub fn new(pinhole: PinholeParams, distortion: DistortionModel) -> ParamResult<Self> {
         let model = Self {
             pinhole,
             distortion,
         };
-        model.validate_params()?;
+        model.validate_params().map_err(ErrorLogging::log)?;
         Ok(model)
     }
 
@@ -83,15 +78,11 @@ impl Fisheye62Camera {
     ///
     /// # Errors
     ///
-    /// [`CameraModelError::InvalidParams`] unless there are exactly 11 entries,
+    /// [`ParamError::ParamCount`] unless there are exactly 11 entries,
     /// and the errors of [`CameraModel::validate_params`].
-    pub fn from_aria_params(params: &[f64]) -> Result<Self, CameraModelError> {
-        if params.len() != ARIA_DIM {
-            return Err(CameraModelError::InvalidParams(format!(
-                "Fisheye62 in Project Aria's layout has {ARIA_DIM} parameters, got {}",
-                params.len()
-            )));
-        }
+    pub fn from_aria_params(params: &[f64]) -> ParamResult<Self> {
+        check_param_count("fisheye62 (Aria layout)", ARIA_DIM, params)
+            .map_err(ErrorLogging::log)?;
         let mut native = [0.0; DIM];
         native[0] = params[0];
         native[1] = params[0];
@@ -104,13 +95,16 @@ impl Fisheye62Camera {
     ///
     /// # Errors
     ///
-    /// [`CameraModelError::InvalidParams`] if `fx` and `fy` differ.
-    pub fn to_aria_params(&self) -> Result<[f64; ARIA_DIM], CameraModelError> {
+    /// [`ParamError::UnequalFocalLengths`], logged, if `fx` and `fy` differ.
+    pub fn to_aria_params(&self) -> ParamResult<[f64; ARIA_DIM]> {
         let (fx, fy) = (self.pinhole.fx, self.pinhole.fy);
         if (fx - fy).abs() > 1e-9 * fx.abs().max(fy.abs()) {
-            return Err(CameraModelError::InvalidParams(format!(
-                "Project Aria's layout has one focal length, but fx={fx} and fy={fy}"
-            )));
+            return Err(ParamError::UnequalFocalLengths {
+                model: "fisheye62 (Aria layout)",
+                fx,
+                fy,
+            }
+            .log());
         }
         let native = <[f64; DIM]>::from(self);
         let mut aria = [0.0; ARIA_DIM];
@@ -122,7 +116,7 @@ impl Fisheye62Camera {
     fn core(&self) -> Core {
         let (k, p) = match self.distortion {
             DistortionModel::Fisheye62 { k, p } => (k, p),
-            _ => ([0.0; NUM_K], [0.0; 2]),
+            _ => ([f64::NAN; NUM_K], [f64::NAN; 2]),
         };
         Core {
             fx: self.pinhole.fx,
@@ -155,20 +149,17 @@ impl From<&Fisheye62Camera> for DVector<f64> {
     }
 }
 
-/// From `[fx, fy, cx, cy, k0..k5, p0, p1]`; at least 12 entries.
+/// From `[fx, fy, cx, cy, k0..k5, p0, p1]`: exactly 12 entries forming a valid
+/// camera. Not logged: the solver decodes intrinsics blocks with it on every
+/// linearization.
 impl TryFrom<&[f64]> for Fisheye62Camera {
-    type Error = CameraModelError;
+    type Error = ParamError;
 
-    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
-        if params.len() < DIM {
-            return Err(CameraModelError::InvalidParams(format!(
-                "Fisheye62Camera requires at least {DIM} parameters, got {}",
-                params.len()
-            )));
-        }
+    fn try_from(params: &[f64]) -> ParamResult<Self> {
+        check_param_count("fisheye62", DIM, params)?;
         let mut k = [0.0; NUM_K];
         k.copy_from_slice(&params[4..10]);
-        Ok(Self {
+        let camera = Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -179,7 +170,9 @@ impl TryFrom<&[f64]> for Fisheye62Camera {
                 k,
                 p: [params[10], params[11]],
             },
-        })
+        };
+        camera.validate_params()?;
+        Ok(camera)
     }
 }
 
@@ -217,15 +210,12 @@ impl From<&KannalaBrandtCamera> for Fisheye62Camera {
 /// Narrowing: allowed only when the thin-prism terms are zero, so that no
 /// distortion is dropped silently.
 impl TryFrom<&Fisheye624Camera> for Fisheye62Camera {
-    type Error = CameraModelError;
+    type Error = ParamError;
 
-    fn try_from(camera: &Fisheye624Camera) -> Result<Self, Self::Error> {
+    fn try_from(camera: &Fisheye624Camera) -> ParamResult<Self> {
         let native = <[f64; 16]>::from(camera);
         if native[12..].iter().any(|s| *s != 0.0) {
-            return Err(CameraModelError::InvalidParams(
-                "Fisheye624 has non-zero thin-prism terms; Fisheye62 cannot represent it exactly"
-                    .to_string(),
-            ));
+            return Err(ParamError::ThinPrismNotZero.log());
         }
         let mut out = [0.0; DIM];
         out.copy_from_slice(&native[..12]);
@@ -238,10 +228,8 @@ impl TryFrom<&Fisheye624Camera> for Fisheye62Camera {
 /// # Errors
 ///
 /// See [`Fisheye62Camera::try_from`] and [`CameraModel::validate_params`].
-pub fn try_from_params(params: &[f64]) -> Result<Fisheye62Camera, CameraModelError> {
-    let camera = Fisheye62Camera::try_from(params)?;
-    camera.validate_params()?;
-    Ok(camera)
+pub fn try_from_params(params: &[f64]) -> ParamResult<Fisheye62Camera> {
+    Fisheye62Camera::try_from(params).map_err(ErrorLogging::log)
 }
 
 impl CameraModel for Fisheye62Camera {
@@ -249,15 +237,15 @@ impl CameraModel for Fisheye62Camera {
     type IntrinsicJacobian = SMatrix<f64, 2, DIM>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
-    /// Projects a camera-frame point; [`CameraModelError::PointBehindCamera`]
+    /// Projects a camera-frame point; [`crate::ProjectionError::PointBehindCamera`]
     /// when `z < GEOMETRIC_PRECISION`.
-    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
+    fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector2<f64>> {
         self.core().project(p_cam)
     }
 
     /// Unprojects a pixel to a unit ray; an error outside the model's domain
     /// or when a Newton inversion does not converge.
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+    fn unproject(&self, point_2d: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>> {
         self.core().unproject(point_2d)
     }
 
@@ -275,8 +263,9 @@ impl CameraModel for Fisheye62Camera {
 
     /// Validation: `fx`, `fy` positive and finite, `cx`, `cy` and every
     /// distortion term finite.
-    fn validate_params(&self) -> Result<(), CameraModelError> {
+    fn validate_params(&self) -> ParamResult<()> {
         self.pinhole.validate()?;
+        self.distortion.expect_variant("fisheye62", "Fisheye62")?;
         self.distortion.validate()
     }
 
@@ -316,7 +305,7 @@ mod tests {
         0.000_361_066_580_790_014,
     ];
 
-    fn camera() -> Result<Fisheye62Camera, CameraModelError> {
+    fn camera() -> Result<Fisheye62Camera, ParamError> {
         try_from_params(&PARAMS)
     }
 
@@ -366,7 +355,7 @@ mod tests {
     fn a_point_behind_the_camera_is_an_error() -> TestResult {
         assert!(matches!(
             camera()?.project(&Vector3::new(0.0, 0.2, -1.0)),
-            Err(CameraModelError::PointBehindCamera { .. })
+            Err(crate::ProjectionError::PointBehindCamera { .. })
         ));
         Ok(())
     }
