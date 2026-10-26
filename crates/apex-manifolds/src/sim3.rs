@@ -29,10 +29,13 @@
 //! - Ethan Eade: "Lie Groups for Computer Vision" - <https://www.ethaneade.com/lie.pdf>
 //! - Sophus library: sophus/sim3.hpp
 
+use crate::util::check_param_block;
+use crate::{ElementError, ElementResult};
 use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
 };
+use apex_error::ErrorLogging;
 use nalgebra::{Matrix3, Matrix4, SMatrix, SVector, UnitQuaternion, Vector3};
 
 // Type aliases for Sim(3) - 7 DOF
@@ -155,19 +158,92 @@ impl Sim3 {
 
     /// Create a new Sim(3) element from translation, rotation, and scale.
     ///
+    /// The scale must be positive and finite; a debug build asserts it and a
+    /// release build stores it unchecked, so an invalid scale produces an
+    /// invalid element. Use [`Self::try_new`] for input that is not already
+    /// trusted.
+    ///
     /// # Arguments
     /// * `translation` - Translation vector [x, y, z]
     /// * `rotation` - Unit quaternion representing rotation
     /// * `scale` - Scale factor (must be positive)
     pub fn new(translation: Vector3<f64>, rotation: UnitQuaternion<f64>, scale: f64) -> Self {
-        assert!(scale > 0.0, "Scale must be positive");
+        debug_assert!(
+            scale.is_finite() && scale > 0.0,
+            "Sim3 scale must be positive and finite"
+        );
         Sim3::from_parts(translation, &SO3::new(rotation), scale)
     }
 
-    /// Create Sim(3) from components.
+    /// Create Sim(3) from components; the scale precondition of [`Self::new`]
+    /// applies, and [`Self::try_from_components`] is the checked form.
     pub fn from_components(translation: Vector3<f64>, rotation: SO3, scale: f64) -> Self {
-        assert!(scale > 0.0, "Scale must be positive");
+        debug_assert!(
+            scale.is_finite() && scale > 0.0,
+            "Sim3 scale must be positive and finite"
+        );
         Sim3::from_parts(translation, &rotation, scale)
+    }
+
+    /// Checked [`Self::new`]: refuses a non-finite translation or scale and a
+    /// scale that is not positive, logging the error once.
+    #[track_caller]
+    pub fn try_new(
+        translation: Vector3<f64>,
+        rotation: UnitQuaternion<f64>,
+        scale: f64,
+    ) -> ElementResult<Self> {
+        Self::check_translation_scale(&translation, scale).map_err(|error| error.log())?;
+        Ok(Sim3::from_parts(translation, &SO3::new(rotation), scale))
+    }
+
+    /// Checked [`Self::from_components`]; same rules as [`Self::try_new`].
+    #[track_caller]
+    pub fn try_from_components(
+        translation: Vector3<f64>,
+        rotation: SO3,
+        scale: f64,
+    ) -> ElementResult<Self> {
+        Self::check_translation_scale(&translation, scale).map_err(|error| error.log())?;
+        Ok(Sim3::from_parts(translation, &rotation, scale))
+    }
+
+    fn check_translation_scale(translation: &Vector3<f64>, scale: f64) -> ElementResult<()> {
+        if !scale.is_finite() || translation.iter().any(|t| !t.is_finite()) {
+            return Err(ElementError::NonFinite { group: Self::NAME });
+        }
+        if scale <= 0.0 {
+            return Err(ElementError::NonPositiveScale { scale });
+        }
+        Ok(())
+    }
+
+    /// Checked [`LieGroup::normalize`]: re-normalises the rotation and fails,
+    /// leaving `self` untouched and logging once, when that is not possible.
+    ///
+    /// Where `normalize` resets a non-positive scale to 1 and leaves a zero
+    /// quaternion as NaN, this returns [`ElementError::NonPositiveScale`] for a
+    /// scale that is not positive, [`ElementError::NonFinite`] for a NaN or
+    /// infinite scale or quaternion and [`ElementError::NonUnitQuaternion`] for
+    /// a zero quaternion.
+    #[track_caller]
+    pub fn try_normalize(&mut self) -> ElementResult<()> {
+        let scale = self.params[7];
+        let norm = self.params.fixed_rows::<4>(3).norm();
+        let error = if !scale.is_finite() || !norm.is_finite() {
+            Some(ElementError::NonFinite { group: Self::NAME })
+        } else if scale <= 0.0 {
+            Some(ElementError::NonPositiveScale { scale })
+        } else if norm <= f64::EPSILON {
+            Some(ElementError::NonUnitQuaternion { norm })
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Err(error.log());
+        }
+        LieGroup::normalize(self);
+        Ok(())
     }
 
     /// Get the translation part as a Vector3.
@@ -414,6 +490,11 @@ impl LieGroup for Sim3 {
         Sim3::from_parts(translation, &rotation, scale)
     }
 
+    /// Re-normalises the rotation quaternion.
+    ///
+    /// Fallback: a scale that is zero or negative is silently reset to 1.0
+    /// (a NaN scale is left as is). Use [`Sim3::try_normalize`] to get an error
+    /// for those inputs instead.
     fn normalize(&mut self) {
         let mut rot = self.rotation_impl();
         rot.normalize();
@@ -450,6 +531,14 @@ impl LieGroup for Sim3 {
         debug_assert_eq!(s.len(), 8);
         Sim3 {
             params: SVector::from_column_slice(s),
+        }
+    }
+
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        check_param_block("Sim3", s, Self::REP_SIZE, Some(3))?;
+        match s.get(7) {
+            Some(&scale) if scale <= 0.0 => Err(ElementError::NonPositiveScale { scale }),
+            _ => Ok(()),
         }
     }
 
@@ -644,7 +733,7 @@ impl Tangent<Sim3> for Sim3Tangent {
             *jac = self.right_jacobian();
         }
 
-        Sim3::from_components(translation, rotation, scale)
+        Sim3::from_parts(translation, &rotation, scale)
     }
 
     /// Right Jacobian for Sim(3).
@@ -889,12 +978,108 @@ mod tests {
         assert!((sim3.scale() - scale).abs() < TOLERANCE);
     }
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    #[should_panic(expected = "Scale must be positive")]
-    fn test_sim3_new_negative_scale() {
-        let translation = Vector3::new(1.0, 2.0, 3.0);
+    fn try_new_accepts_a_positive_scale() -> TestResult {
+        let sim3 = Sim3::try_new(Vector3::new(1.0, 2.0, 3.0), UnitQuaternion::identity(), 2.5)?;
+        assert_eq!(sim3.scale(), 2.5);
+        assert!(sim3.is_valid(TOLERANCE));
+        Ok(())
+    }
+
+    #[test]
+    fn try_new_rejects_a_non_positive_scale() {
+        let translation = Vector3::zeros();
         let rotation = UnitQuaternion::identity();
-        let _sim3 = Sim3::new(translation, rotation, -1.0);
+        for scale in [0.0, -1.0] {
+            assert_eq!(
+                Sim3::try_new(translation, rotation, scale).err(),
+                Some(ElementError::NonPositiveScale { scale })
+            );
+        }
+    }
+
+    #[test]
+    fn try_new_rejects_non_finite_input() {
+        let rotation = UnitQuaternion::identity();
+        let expected = Some(ElementError::NonFinite { group: "Sim3" });
+        assert_eq!(
+            Sim3::try_new(Vector3::zeros(), rotation, f64::NAN).err(),
+            expected
+        );
+        assert_eq!(
+            Sim3::try_new(Vector3::zeros(), rotation, f64::INFINITY).err(),
+            expected
+        );
+        assert_eq!(
+            Sim3::try_new(Vector3::new(0.0, f64::NAN, 0.0), rotation, 1.0).err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn try_from_components_follows_the_same_rules() -> TestResult {
+        let sim3 = Sim3::try_from_components(Vector3::zeros(), SO3::identity(), 3.0)?;
+        assert_eq!(sim3.scale(), 3.0);
+        assert_eq!(
+            Sim3::try_from_components(Vector3::zeros(), SO3::identity(), -3.0).err(),
+            Some(ElementError::NonPositiveScale { scale: -3.0 })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn try_from_param_slice_rejects_a_non_positive_scale() {
+        let mut params = Sim3::identity().as_param_slice().to_vec();
+        params[7] = -0.5;
+        assert_eq!(
+            Sim3::try_from_param_slice(&params).err(),
+            Some(ElementError::NonPositiveScale { scale: -0.5 }.into())
+        );
+        params[7] = 0.0;
+        assert!(Sim3::try_from_param_slice(&params).is_err());
+    }
+
+    #[test]
+    fn try_normalize_rejects_what_normalize_hides() -> TestResult {
+        let mut params = Sim3::identity().as_param_slice().to_vec();
+        params[7] = -2.0;
+        let mut broken = Sim3::from_param_slice(&params);
+        assert_eq!(
+            broken.try_normalize().err(),
+            Some(ElementError::NonPositiveScale { scale: -2.0 })
+        );
+        assert_eq!(broken.scale(), -2.0);
+
+        params[7] = 1.0;
+        params[3..7].fill(0.0);
+        let mut no_rotation = Sim3::from_param_slice(&params);
+        assert_eq!(
+            no_rotation.try_normalize().err(),
+            Some(ElementError::NonUnitQuaternion { norm: 0.0 })
+        );
+
+        let mut scaled = Sim3::identity();
+        scaled.as_param_slice_mut()[3] = 2.0;
+        scaled.try_normalize()?;
+        assert!(scaled.is_valid(TOLERANCE));
+        Ok(())
+    }
+
+    #[test]
+    fn normalize_resets_a_non_positive_scale_to_one() {
+        let mut params = Sim3::identity().as_param_slice().to_vec();
+        params[7] = -2.0;
+        let mut sim3 = Sim3::from_param_slice(&params);
+        sim3.normalize();
+        assert_eq!(sim3.scale(), 1.0);
+    }
+
+    #[test]
+    fn exp_of_a_very_negative_log_scale_does_not_panic() {
+        let tangent = Sim3Tangent::new(Vector3::zeros(), Vector3::zeros(), -800.0);
+        assert!(tangent.exp(None).scale().is_finite());
     }
 
     #[test]

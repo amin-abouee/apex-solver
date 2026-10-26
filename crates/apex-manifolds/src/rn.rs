@@ -21,7 +21,7 @@
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
-use crate::{Interpolatable, LieGroup, Tangent};
+use crate::{ElementError, ElementResult, Interpolatable, LieGroup, Tangent};
 use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use std::{
     fmt,
@@ -378,6 +378,14 @@ impl LieGroup for Rn {
 
     fn from_param_slice(s: &[f64]) -> Self {
         Rn::from_slice(s)
+    }
+
+    /// Any length is a valid `Rn`; only NaN and infinite values are rejected.
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        if s.iter().any(|value| !value.is_finite()) {
+            return Err(ElementError::NonFinite { group: Self::NAME });
+        }
+        Ok(())
     }
 
     /// Check if the element is approximately equal to another element.

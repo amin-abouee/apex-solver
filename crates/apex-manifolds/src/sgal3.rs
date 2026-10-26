@@ -26,6 +26,8 @@
 //! - manif C++ library: include/manif/impl/sgal3/
 //! - "All About the Galilean Group SGal(3)" (arXiv:2312.07555)
 
+use crate::ElementResult;
+use crate::util::check_param_block;
 use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
@@ -486,6 +488,10 @@ impl LieGroup for SGal3 {
         SGal3 {
             params: SVector::from_column_slice(s),
         }
+    }
+
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        check_param_block("SGal3", s, Self::REP_SIZE, Some(3))
     }
 
     fn vee(&self) -> Self::TangentVector {

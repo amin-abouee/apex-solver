@@ -10,6 +10,8 @@
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
+use crate::ElementResult;
+use crate::util::check_param_block;
 use crate::{LieGroup, Tangent};
 use nalgebra::{Matrix1, Matrix2, Matrix3, UnitComplex, Vector2, Vector3};
 use std::{
@@ -191,6 +193,10 @@ impl LieGroup for SO2 {
     fn from_param_slice(s: &[f64]) -> Self {
         debug_assert_eq!(s.len(), 1);
         SO2 { theta: s[0] }
+    }
+
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        check_param_block("SO2", s, Self::REP_SIZE, None)
     }
 }
 

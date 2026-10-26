@@ -22,6 +22,8 @@
 //! - manif C++ library: include/manif/impl/se_2_3/
 //! - "A micro Lie theory for state estimation in robotics" - Solà et al.
 
+use crate::ElementResult;
+use crate::util::check_param_block;
 use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
@@ -403,6 +405,10 @@ impl LieGroup for SE23 {
         SE23 {
             params: SVector::from_column_slice(s),
         }
+    }
+
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        check_param_block("SE23", s, Self::REP_SIZE, Some(3))
     }
 
     fn vee(&self) -> Self::TangentVector {

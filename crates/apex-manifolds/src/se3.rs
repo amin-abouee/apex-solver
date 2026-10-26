@@ -27,6 +27,8 @@
 //! amplifying errors at large rotations. Composition chains drift multiplicatively —
 //! re-project periodically for long chains.
 
+use crate::ElementResult;
+use crate::util::check_param_block;
 use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
@@ -425,6 +427,10 @@ impl LieGroup for SE3 {
         SE3 {
             params: SVector::from_column_slice(s),
         }
+    }
+
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        check_param_block("SE3", s, Self::REP_SIZE, Some(3))
     }
 
     /// Vee operator: log(g)^∨.

@@ -288,7 +288,29 @@ pub trait LieGroup: Clone + PartialEq {
     fn as_param_slice_mut(&mut self) -> &mut [f64];
 
     /// Constructs from a raw parameter slice (same layout as `as_param_slice`).
+    ///
+    /// Infallible and unchecked: `s` must hold exactly the group's parameter
+    /// count (a debug build asserts it, a release build may panic inside
+    /// nalgebra on a short slice) and describe a valid element. Use
+    /// [`Self::try_from_param_slice`] for input that is not already trusted.
     fn from_param_slice(s: &[f64]) -> Self;
+
+    /// Checks that `s` is a valid parameter block of this group: the right
+    /// length, all finite, a unit quaternion where the group has one and a
+    /// positive scale for `Sim3`. Does not log.
+    fn validate_params(s: &[f64]) -> ElementResult<()>;
+
+    /// Checked [`Self::from_param_slice`]: validates `s`, logs the error once
+    /// and returns it instead of building a corrupt element.
+    ///
+    /// The quaternion tolerance is [`so3::SO3::QUATERNION_NORM_TOLERANCE`].
+    #[track_caller]
+    fn try_from_param_slice(s: &[f64]) -> ManifoldResult<Self> {
+        match Self::validate_params(s) {
+            Ok(()) => Ok(Self::from_param_slice(s)),
+            Err(error) => Err(error.log().into()),
+        }
+    }
 
     // Manifold plus/minus operations
 
@@ -604,7 +626,29 @@ pub trait Tangent<Group: LieGroup>: Clone + PartialEq {
     fn as_slice(&self) -> &[f64];
 
     /// Constructs from a raw slice (same layout as `as_slice`).
+    ///
+    /// Infallible and unchecked: `s` must hold exactly [`Self::DIM`] values
+    /// (any count for the dynamic `RnTangent`). Use [`Self::try_from_slice`] for
+    /// input that is not already trusted.
     fn from_slice(s: &[f64]) -> Self;
+
+    /// Checked [`Self::from_slice`]: rejects a wrong length or a NaN/infinite
+    /// value, logging the error once.
+    #[track_caller]
+    fn try_from_slice(s: &[f64]) -> TangentResult<Self> {
+        if !Self::is_dynamic() && s.len() != Self::DIM {
+            return Err(TangentError::TangentLength {
+                group: Group::NAME,
+                expected: Self::DIM,
+                actual: s.len(),
+            }
+            .log());
+        }
+        if s.iter().any(|value| !value.is_finite()) {
+            return Err(TangentError::NonFinite { group: Group::NAME }.log());
+        }
+        Ok(Self::from_slice(s))
+    }
 }
 
 /// Trait for Lie groups that support interpolation.
@@ -626,9 +670,15 @@ pub trait Interpolatable: LieGroup {
 mod tests {
     use crate::LieGroup;
     use crate::Tangent;
+    use crate::rn::{Rn, RnTangent};
+    use crate::se2::SE2;
+    use crate::se3::SE3;
+    use crate::se23::SE23;
+    use crate::sgal3::SGal3;
+    use crate::sim3::Sim3;
     use crate::so2::{SO2, SO2Tangent};
     use crate::so3::{SO3, SO3Tangent};
-    use crate::{ManifoldError, ManifoldType, ManifoldTypeError};
+    use crate::{ElementError, ManifoldError, ManifoldType, ManifoldTypeError, TangentError};
     use nalgebra::Matrix1;
 
     fn make_so2(angle: f64) -> SO2 {
@@ -637,6 +687,162 @@ mod tests {
 
     fn make_so2_tangent(angle: f64) -> SO2Tangent {
         SO2Tangent::new(angle)
+    }
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn param_length_error(group: &'static str, expected: usize, actual: usize) -> ManifoldError {
+        ElementError::ParamLength {
+            group,
+            expected,
+            actual,
+        }
+        .into()
+    }
+
+    /// Round trip, wrong length and NaN on a fixed-size group.
+    fn check_checked_param_slice<G: LieGroup>() -> TestResult {
+        let group = G::random();
+        let params = group.as_param_slice().to_vec();
+        let len = params.len();
+
+        let back = G::try_from_param_slice(&params)?;
+        assert!(group.is_approx(&back, 1e-12));
+
+        assert_eq!(
+            G::try_from_param_slice(&params[..len - 1]).err(),
+            Some(param_length_error(G::NAME, len, len - 1))
+        );
+        let mut longer = params.clone();
+        longer.push(0.0);
+        assert_eq!(
+            G::try_from_param_slice(&longer).err(),
+            Some(param_length_error(G::NAME, len, len + 1))
+        );
+        assert_eq!(
+            G::try_from_param_slice(&[]).err(),
+            Some(param_length_error(G::NAME, len, 0))
+        );
+
+        let mut nan = params.clone();
+        nan[0] = f64::NAN;
+        assert_eq!(
+            G::try_from_param_slice(&nan).err(),
+            Some(ElementError::NonFinite { group: G::NAME }.into())
+        );
+        let mut inf = params;
+        inf[len - 1] = f64::INFINITY;
+        assert!(G::try_from_param_slice(&inf).is_err());
+        Ok(())
+    }
+
+    /// A quaternion starting at `at` that is scaled off unit norm is refused.
+    fn check_non_unit_quaternion<G: LieGroup>(at: usize) {
+        let mut params = G::random().as_param_slice().to_vec();
+        for component in &mut params[at..at + 4] {
+            *component *= 2.0;
+        }
+        assert!(matches!(
+            G::try_from_param_slice(&params).err(),
+            Some(ManifoldError::Element(ElementError::NonUnitQuaternion { norm }))
+                if (norm - 2.0).abs() < 1e-12
+        ));
+    }
+
+    #[test]
+    fn try_from_param_slice_checks_every_fixed_size_group() -> TestResult {
+        check_checked_param_slice::<SO2>()?;
+        check_checked_param_slice::<SE2>()?;
+        check_checked_param_slice::<SO3>()?;
+        check_checked_param_slice::<SE3>()?;
+        check_checked_param_slice::<SE23>()?;
+        check_checked_param_slice::<SGal3>()?;
+        check_checked_param_slice::<Sim3>()?;
+        Ok(())
+    }
+
+    #[test]
+    fn try_from_param_slice_rejects_a_non_unit_quaternion_in_every_group() {
+        check_non_unit_quaternion::<SO3>(0);
+        check_non_unit_quaternion::<SE3>(3);
+        check_non_unit_quaternion::<SE23>(3);
+        check_non_unit_quaternion::<SGal3>(3);
+        check_non_unit_quaternion::<Sim3>(3);
+    }
+
+    #[test]
+    fn rn_try_from_param_slice_accepts_any_length_but_not_nan() -> TestResult {
+        for dim in [0, 1, 3, 7] {
+            let params = vec![0.5; dim];
+            assert_eq!(Rn::try_from_param_slice(&params)?.as_param_slice(), params);
+        }
+        assert_eq!(
+            Rn::try_from_param_slice(&[1.0, f64::NAN]).err(),
+            Some(ElementError::NonFinite { group: "Rn" }.into())
+        );
+        Ok(())
+    }
+
+    /// `try_from_slice` on a fixed tangent: round trip, wrong length, NaN.
+    fn check_checked_tangent_slice<G: LieGroup>() -> TestResult {
+        let tangent = G::TangentVector::random();
+        let values = tangent.as_slice().to_vec();
+        let len = values.len();
+
+        assert!(tangent.is_approx(&G::TangentVector::try_from_slice(&values)?, 1e-12));
+        assert_eq!(
+            G::TangentVector::try_from_slice(&values[..len - 1]).err(),
+            Some(TangentError::TangentLength {
+                group: G::NAME,
+                expected: len,
+                actual: len - 1
+            })
+        );
+        let mut nan = values;
+        nan[0] = f64::NAN;
+        assert_eq!(
+            G::TangentVector::try_from_slice(&nan).err(),
+            Some(TangentError::NonFinite { group: G::NAME })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tangent_try_from_slice_checks_every_fixed_size_group() -> TestResult {
+        check_checked_tangent_slice::<SO2>()?;
+        check_checked_tangent_slice::<SE2>()?;
+        check_checked_tangent_slice::<SO3>()?;
+        check_checked_tangent_slice::<SE3>()?;
+        check_checked_tangent_slice::<SE23>()?;
+        check_checked_tangent_slice::<SGal3>()?;
+        check_checked_tangent_slice::<Sim3>()?;
+        Ok(())
+    }
+
+    #[test]
+    fn rn_tangent_try_from_slice_accepts_any_length() -> TestResult {
+        assert_eq!(
+            RnTangent::try_from_slice(&[1.0, 2.0])?.as_slice(),
+            [1.0, 2.0]
+        );
+        assert_eq!(
+            RnTangent::try_from_slice(&[f64::INFINITY]).err(),
+            Some(TangentError::NonFinite { group: "Rn" })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_checked_constructor_error_reaches_the_root_with_a_one_line_chain() -> TestResult {
+        use apex_error::ErrorChainExt;
+        let error = SE3::try_from_param_slice(&[0.0; 3])
+            .err()
+            .ok_or("expected an error")?;
+        assert_eq!(
+            error.chain(),
+            "SE3 parameter block has 3 values, expected 7"
+        );
+        Ok(())
     }
 
     #[test]

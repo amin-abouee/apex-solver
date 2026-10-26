@@ -32,7 +32,10 @@
 //! - Nurlanov et al. (2021): "Exploring SO(3) logarithmic map: degeneracies and derivatives"
 //! - Sophus library: <https://github.com/strasdat/Sophus/issues/179>
 
+use crate::util::{check_param_block, check_unit_quaternion};
+use crate::{ElementError, ElementResult, ManifoldResult};
 use crate::{LieGroup, Tangent};
+use apex_error::ErrorLogging;
 use nalgebra::{Matrix3, Matrix4, Quaternion, SVector, Unit, UnitQuaternion, Vector3};
 use std::{
     fmt,
@@ -136,7 +139,8 @@ impl SO3 {
 
     /// Create SO(3) from `[w, x, y, z]`, refusing a non-unit or non-finite input.
     ///
-    /// Returns `None` instead of silently normalising: a quaternion far from
+    /// Returns [`ElementError::NonUnitQuaternion`] or [`ElementError::NonFinite`]
+    /// (logged once) instead of silently normalising: a quaternion far from
     /// unit norm means the columns were read in the wrong order or the data is
     /// corrupt, and repairing it hides both. For unchecked input use
     /// [`Self::from_quaternion_wxyz`], which normalises.
@@ -146,12 +150,31 @@ impl SO3 {
     /// * `x` - i component of quaternion
     /// * `y` - j component of quaternion
     /// * `z` - k component of quaternion
-    pub fn try_from_quaternion_wxyz(w: f64, x: f64, y: f64, z: f64) -> Option<Self> {
-        let norm = (w * w + x * x + y * y + z * z).sqrt();
-        if !norm.is_finite() || (norm - 1.0).abs() > Self::QUATERNION_NORM_TOLERANCE {
-            return None;
+    #[track_caller]
+    pub fn try_from_quaternion_wxyz(w: f64, x: f64, y: f64, z: f64) -> ManifoldResult<Self> {
+        match check_unit_quaternion(Self::NAME, &[w, x, y, z]) {
+            Ok(()) => Ok(Self::from_quaternion_wxyz(w, x, y, z)),
+            Err(error) => Err(error.log().into()),
         }
-        Some(Self::from_quaternion_wxyz(w, x, y, z))
+    }
+
+    /// Create SO(3) from a rotation axis and angle, refusing a zero-length or
+    /// non-finite axis.
+    ///
+    /// [`Self::from_axis_angle`] normalises the axis and yields NaN for a zero
+    /// one; this returns [`ElementError::ZeroAxis`] (logged once) instead. The
+    /// axis need not be unit length.
+    #[track_caller]
+    pub fn try_from_axis_angle(axis: &Vector3<f64>, angle: f64) -> ElementResult<Self> {
+        if !angle.is_finite() || axis.iter().any(|c| !c.is_finite()) {
+            return Err(ElementError::NonFinite { group: Self::NAME }.log());
+        }
+        match Unit::try_new(*axis, f64::EPSILON) {
+            Some(unit_axis) => Ok(Self::from_unit_quaternion(UnitQuaternion::from_axis_angle(
+                &unit_axis, angle,
+            ))),
+            None => Err(ElementError::ZeroAxis.log()),
+        }
     }
 
     /// Create SO(3) from Euler angles (roll, pitch, yaw).
@@ -474,6 +497,10 @@ impl LieGroup for SO3 {
         SO3 {
             params: SVector::from_column_slice(s),
         }
+    }
+
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        check_param_block("SO3", s, Self::REP_SIZE, Some(0))
     }
 
     /// Vee operator: log(g)^∨.
@@ -807,7 +834,10 @@ impl Tangent<SO3> for SO3Tangent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TangentError;
     use std::f64::consts::PI;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     const TOLERANCE: f64 = 1e-12;
 
@@ -1886,43 +1916,140 @@ mod tests {
     /// Checked constructor: a norm slightly inside the tolerance is accepted
     /// (and stored normalised, like every other constructor).
     #[test]
-    fn try_from_quaternion_wxyz_accepts_a_near_unit_norm() {
+    fn try_from_quaternion_wxyz_accepts_a_near_unit_norm() -> TestResult {
         // Norm 1 + 5e-7, inside the 1e-6 tolerance.
         let scale = (1.0f64 + 5e-7).sqrt();
-        let q = match SO3::try_from_quaternion_wxyz(scale, 0.0, 0.0, 0.0) {
-            Some(q) => q,
-            None => panic!("a norm within tolerance must be accepted"),
-        };
+        let q = SO3::try_from_quaternion_wxyz(scale, 0.0, 0.0, 0.0)?;
         assert!((q.w() - 1.0).abs() < 1e-9);
+        Ok(())
     }
 
     /// Checked constructor: a far-from-unit quaternion is refused, not
     /// silently normalised — a wrong column order looks exactly like this.
     #[test]
     fn try_from_quaternion_wxyz_rejects_a_non_unit_norm() {
-        assert!(SO3::try_from_quaternion_wxyz(2.0, 0.0, 0.0, 0.0).is_none());
-        assert!(SO3::try_from_quaternion_wxyz(0.0, 0.0, 0.0, 0.0).is_none());
+        assert_eq!(
+            SO3::try_from_quaternion_wxyz(2.0, 0.0, 0.0, 0.0).err(),
+            Some(ElementError::NonUnitQuaternion { norm: 2.0 }.into())
+        );
+        assert_eq!(
+            SO3::try_from_quaternion_wxyz(0.0, 0.0, 0.0, 0.0).err(),
+            Some(ElementError::NonUnitQuaternion { norm: 0.0 }.into())
+        );
     }
 
     /// Checked constructor: a non-finite component is refused.
     #[test]
     fn try_from_quaternion_wxyz_rejects_a_non_finite_component() {
-        assert!(SO3::try_from_quaternion_wxyz(f64::NAN, 0.0, 0.0, 0.0).is_none());
-        assert!(SO3::try_from_quaternion_wxyz(f64::INFINITY, 0.0, 0.0, 0.0).is_none());
+        let expected: ManifoldResult<SO3> = Err(ElementError::NonFinite { group: "SO3" }.into());
+        assert_eq!(
+            SO3::try_from_quaternion_wxyz(f64::NAN, 0.0, 0.0, 0.0),
+            expected
+        );
+        assert_eq!(
+            SO3::try_from_quaternion_wxyz(f64::INFINITY, 0.0, 0.0, 0.0),
+            expected
+        );
     }
 
     /// Checked and unchecked constructors agree on valid input.
     #[test]
-    fn try_from_quaternion_wxyz_matches_the_unchecked_constructor() {
-        let q = match SO3::try_from_quaternion_wxyz(144. / 205., 96. / 205., 72. / 205., 83. / 205.)
-        {
-            Some(q) => q,
-            None => panic!("a unit-norm quaternion must be accepted"),
-        };
+    fn try_from_quaternion_wxyz_matches_the_unchecked_constructor() -> TestResult {
+        let q = SO3::try_from_quaternion_wxyz(144. / 205., 96. / 205., 72. / 205., 83. / 205.)?;
         assert!(q.is_approx(
             &SO3::from_quaternion_wxyz(144. / 205., 96. / 205., 72. / 205., 83. / 205.),
             1e-15
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn try_from_param_slice_round_trips_a_valid_rotation() -> TestResult {
+        let r = SO3::from_euler_angles(0.1, -0.4, 0.8);
+        let back = SO3::try_from_param_slice(r.as_param_slice())?;
+        assert!(r.is_approx(&back, 1e-15));
+        Ok(())
+    }
+
+    #[test]
+    fn try_from_param_slice_rejects_a_wrong_length() {
+        assert_eq!(
+            SO3::try_from_param_slice(&[1.0, 0.0, 0.0]).err(),
+            Some(
+                ElementError::ParamLength {
+                    group: "SO3",
+                    expected: 4,
+                    actual: 3
+                }
+                .into()
+            )
+        );
+        assert!(SO3::try_from_param_slice(&[1.0, 0.0, 0.0, 0.0, 0.0]).is_err());
+        assert!(SO3::try_from_param_slice(&[]).is_err());
+    }
+
+    #[test]
+    fn try_from_param_slice_rejects_a_non_unit_quaternion() {
+        assert_eq!(
+            SO3::try_from_param_slice(&[0.5, 0.0, 0.0, 0.0]).err(),
+            Some(ElementError::NonUnitQuaternion { norm: 0.5 }.into())
+        );
+    }
+
+    #[test]
+    fn try_from_param_slice_rejects_nan() {
+        assert_eq!(
+            SO3::try_from_param_slice(&[1.0, f64::NAN, 0.0, 0.0]).err(),
+            Some(ElementError::NonFinite { group: "SO3" }.into())
+        );
+    }
+
+    #[test]
+    fn try_from_axis_angle_matches_the_unchecked_constructor() -> TestResult {
+        let axis = Vector3::new(0.0, 2.0, 0.0);
+        let r = SO3::try_from_axis_angle(&axis, 0.7)?;
+        assert!(r.is_approx(&SO3::from_axis_angle(&axis, 0.7), 1e-15));
+        Ok(())
+    }
+
+    #[test]
+    fn try_from_axis_angle_rejects_a_zero_axis() {
+        assert_eq!(
+            SO3::try_from_axis_angle(&Vector3::zeros(), 1.0).err(),
+            Some(ElementError::ZeroAxis)
+        );
+    }
+
+    #[test]
+    fn try_from_axis_angle_rejects_non_finite_input() {
+        let expected = Err(ElementError::NonFinite { group: "SO3" });
+        assert_eq!(
+            SO3::try_from_axis_angle(&Vector3::new(f64::NAN, 0.0, 1.0), 1.0),
+            expected
+        );
+        assert_eq!(
+            SO3::try_from_axis_angle(&Vector3::x(), f64::INFINITY),
+            expected
+        );
+    }
+
+    #[test]
+    fn tangent_try_from_slice_checks_length_and_values() -> TestResult {
+        let t = SO3Tangent::try_from_slice(&[0.1, 0.2, 0.3])?;
+        assert_eq!(t.as_slice(), &[0.1, 0.2, 0.3]);
+        assert_eq!(
+            SO3Tangent::try_from_slice(&[0.1, 0.2]).err(),
+            Some(TangentError::TangentLength {
+                group: "SO3",
+                expected: 3,
+                actual: 2
+            })
+        );
+        assert_eq!(
+            SO3Tangent::try_from_slice(&[0.1, f64::NAN, 0.3]).err(),
+            Some(TangentError::NonFinite { group: "SO3" })
+        );
+        Ok(())
     }
 
     #[test]
