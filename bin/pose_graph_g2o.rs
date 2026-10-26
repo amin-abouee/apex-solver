@@ -425,7 +425,7 @@ fn test_se2_dataset(
 
     let load_start = Instant::now();
     let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset_name);
-    let mut graph = G2oLoader::load(&dataset_path)?;
+    let mut graph = G2oLoader::load(&dataset_path).map_err(apex_io::IoError::from)?;
     let load_time = load_start.elapsed();
 
     if args.profile {
@@ -447,12 +447,9 @@ fn test_se2_dataset(
     let initial_metrics = compute_se2_cost_metrics(&graph);
 
     if num_vertices == 0 {
-        return Err(apex_io::IoError::UnsupportedFormat(format!(
-            "No SE2 vertices found in dataset {}",
-            dataset_name
-        ))
-        .log()
-        .into());
+        return Err(
+            apex_io::IoError::from(apex_io::GraphError::NoVertices { kind: "SE2" }.log()).into(),
+        );
     }
 
     let setup_start = Instant::now();
@@ -734,20 +731,13 @@ fn test_se2_dataset(
 
         // Create output directory if it doesn't exist
         if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                apex_io::IoError::log_with_source(
-                    apex_io::IoError::FileCreationFailed {
-                        path: parent.display().to_string(),
-                        reason: "Failed to create directory".to_string(),
-                    },
-                    e,
-                )
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| apex_io::IoError::from(apex_io::GraphError::write(parent, e).log()))?;
         }
 
         // Write updated graph to file (graph already updated in-place above)
         use apex_solver::apex_io::GraphLoader;
-        G2oLoader::write(&graph, &output_path)?;
+        G2oLoader::write(&graph, &output_path).map_err(apex_io::IoError::from)?;
 
         info!("Saved optimized graph to: {}", output_path.display());
     }
@@ -820,7 +810,7 @@ fn test_se3_dataset(
     );
 
     let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset_name);
-    let mut graph = G2oLoader::load(&dataset_path)?;
+    let mut graph = G2oLoader::load(&dataset_path).map_err(apex_io::IoError::from)?;
 
     let num_vertices = graph.vertices_se3.len();
     let num_edges = graph.edges_se3.len();
@@ -834,12 +824,9 @@ fn test_se3_dataset(
     let initial_metrics = compute_se3_cost_metrics(&graph);
 
     if num_vertices == 0 {
-        return Err(apex_io::IoError::UnsupportedFormat(format!(
-            "No SE3 vertices found in dataset {}",
-            dataset_name
-        ))
-        .log()
-        .into());
+        return Err(
+            apex_io::IoError::from(apex_io::GraphError::NoVertices { kind: "SE3" }.log()).into(),
+        );
     }
 
     let mut problem = Problem::new(JacobianMode::Sparse);
@@ -1089,20 +1076,13 @@ fn test_se3_dataset(
 
         // Create output directory if it doesn't exist
         if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                apex_io::IoError::log_with_source(
-                    apex_io::IoError::FileCreationFailed {
-                        path: parent.display().to_string(),
-                        reason: "Failed to create directory".to_string(),
-                    },
-                    e,
-                )
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| apex_io::IoError::from(apex_io::GraphError::write(parent, e).log()))?;
         }
 
         // Write updated graph to file (graph already updated in-place above)
         use apex_solver::apex_io::GraphLoader;
-        G2oLoader::write(&graph, &output_path)?;
+        G2oLoader::write(&graph, &output_path).map_err(apex_io::IoError::from)?;
 
         info!("Saved optimized graph to: {}", output_path.display());
     }

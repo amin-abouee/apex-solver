@@ -1,36 +1,42 @@
-use super::{EdgeSE2, EdgeSE3, Graph, GraphLoader, IoError, VertexSE2, VertexSE3};
+use super::error::{parse_field, require_fields};
+use super::{EdgeSE2, EdgeSE3, Graph, GraphError, GraphLoader, GraphResult, VertexSE2, VertexSE3};
+use apex_error::ErrorLogging;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::{fs::File, io::Write, path::Path};
+use tracing::warn;
+
+/// Files with more lines than this are parsed in parallel.
+const MIN_LINES_FOR_PARALLEL: usize = 1000;
 
 /// High-performance G2O file loader
 pub struct G2oLoader;
 
 impl GraphLoader for G2oLoader {
-    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
+    fn load<P: AsRef<Path>>(path: P) -> GraphResult<Graph> {
         let path_ref = path.as_ref();
-        let content = std::fs::read_to_string(path_ref).map_err(|e| {
-            IoError::Io(e).log_with_source(format!("Failed to read G2O file: {:?}", path_ref))
-        })?;
+        let content =
+            std::fs::read_to_string(path_ref).map_err(|e| GraphError::read(path_ref, e).log())?;
 
         Self::parse_content(&content)
     }
 
-    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), IoError> {
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> GraphResult<()> {
         let path_ref = path.as_ref();
-        let mut file = File::create(path_ref).map_err(|e| {
-            IoError::Io(e).log_with_source(format!("Failed to create G2O file: {:?}", path_ref))
-        })?;
+        Self::write_to(graph, path_ref).map_err(|e| GraphError::write(path_ref, e).log())
+    }
+}
 
-        // Write header comment
-        writeln!(file, "# G2O file written by Apex Solver")
-            .map_err(|e| IoError::Io(e).log_with_source("Failed to write G2O header"))?;
+impl G2oLoader {
+    fn write_to(graph: &Graph, path: &Path) -> std::io::Result<()> {
+        let mut file = std::io::BufWriter::new(File::create(path)?);
+
+        writeln!(file, "# G2O file written by Apex Solver")?;
         writeln!(
             file,
             "# Timestamp: {}",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        )
-        .map_err(|e| IoError::Io(e).log_with_source("Failed to write G2O timestamp"))?;
+        )?;
         writeln!(
             file,
             "# SE2 vertices: {}, SE3 vertices: {}, SE2 edges: {}, SE3 edges: {}",
@@ -38,17 +44,15 @@ impl GraphLoader for G2oLoader {
             graph.vertices_se3.len(),
             graph.edges_se2.len(),
             graph.edges_se3.len()
-        )
-        .map_err(|e| IoError::Io(e).log_with_source("Failed to write G2O statistics"))?;
-        writeln!(file)
-            .map_err(|e| IoError::Io(e).log_with_source("Failed to write G2O header newline"))?;
+        )?;
+        writeln!(file)?;
 
-        // Write SE2 vertices (sorted by ID)
         let mut se2_ids: Vec<_> = graph.vertices_se2.keys().collect();
         se2_ids.sort();
-
         for id in se2_ids {
-            let vertex = &graph.vertices_se2[id];
+            let Some(vertex) = graph.vertices_se2.get(id) else {
+                continue;
+            };
             writeln!(
                 file,
                 "VERTEX_SE2 {} {:.17e} {:.17e} {:.17e}",
@@ -56,31 +60,24 @@ impl GraphLoader for G2oLoader {
                 vertex.x(),
                 vertex.y(),
                 vertex.theta()
-            )
-            .map_err(|e| {
-                IoError::Io(e).log_with_source(format!("Failed to write SE2 vertex {}", vertex.id))
-            })?;
+            )?;
         }
 
-        // Write SE3 vertices (sorted by ID)
         let mut se3_ids: Vec<_> = graph.vertices_se3.keys().collect();
         se3_ids.sort();
-
         for id in se3_ids {
-            let vertex = &graph.vertices_se3[id];
+            let Some(vertex) = graph.vertices_se3.get(id) else {
+                continue;
+            };
             let trans = vertex.translation();
             let quat = vertex.rotation();
             writeln!(
                 file,
                 "VERTEX_SE3:QUAT {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
                 vertex.id, trans.x, trans.y, trans.z, quat.i, quat.j, quat.k, quat.w
-            )
-            .map_err(|e| {
-                IoError::Io(e).log_with_source(format!("Failed to write SE3 vertex {}", vertex.id))
-            })?;
+            )?;
         }
 
-        // Write SE2 edges
         for edge in &graph.edges_se2 {
             let meas = &edge.measurement;
             let info = &edge.information;
@@ -100,64 +97,48 @@ impl GraphLoader for G2oLoader {
                 info[(2, 2)],
                 info[(0, 2)],
                 info[(1, 2)]
-            )
-            .map_err(|e| {
-                IoError::Io(e).log_with_source(format!(
-                    "Failed to write SE2 edge {} -> {}",
-                    edge.from, edge.to
-                ))
-            })?;
+            )?;
         }
 
-        // Write SE3 edges
         for edge in &graph.edges_se3 {
             let trans = edge.measurement.translation();
             let quat = edge.measurement.rotation_quaternion();
             let info = &edge.information;
 
-            // Write EDGE_SE3:QUAT with full 6x6 upper triangular information matrix (21 values)
             write!(
                 file,
                 "EDGE_SE3:QUAT {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
                 edge.from, edge.to, trans.x, trans.y, trans.z, quat.i, quat.j, quat.k, quat.w
-            )
-            .map_err(|e| {
-                IoError::Io(e).log_with_source(format!(
-                    "Failed to write SE3 edge {} -> {}",
-                    edge.from, edge.to
-                ))
-            })?;
-
-            // Write upper triangular information matrix (21 values)
+            )?;
+            // Upper triangle of the 6x6 information matrix, row by row (21 values).
             for i in 0..6 {
                 for j in i..6 {
-                    write!(file, " {:.17e}", info[(i, j)]).map_err(|e| {
-                        IoError::Io(e).log_with_source(format!(
-                            "Failed to write SE3 edge {} -> {} information matrix",
-                            edge.from, edge.to
-                        ))
-                    })?;
+                    write!(file, " {:.17e}", info[(i, j)])?;
                 }
             }
-            writeln!(file).map_err(|e| {
-                IoError::Io(e).log_with_source(format!(
-                    "Failed to write SE3 edge {} -> {} newline",
-                    edge.from, edge.to
-                ))
-            })?;
+            writeln!(file)?;
         }
 
-        Ok(())
+        file.flush()
     }
-}
 
-impl G2oLoader {
-    /// Parse G2O content with performance optimizations
-    fn parse_content(content: &str) -> Result<Graph, IoError> {
+    /// Parse G2O text; files above [`MIN_LINES_FOR_PARALLEL`] lines parse in parallel.
+    ///
+    /// The per-line parsers build their errors without logging; the first
+    /// error found is logged here, once, where the load is aborted.
+    fn parse_content(content: &str) -> GraphResult<Graph> {
         let lines: Vec<&str> = content.lines().collect();
-        let minimum_lines_for_parallel = 1000;
+        fn parse<'a>((index, line): (usize, &&'a str)) -> GraphResult<Option<Record<'a>>> {
+            G2oLoader::parse_record(line, index + 1)
+        }
+        let records: GraphResult<Vec<Option<Record<'_>>>> = if lines.len() > MIN_LINES_FOR_PARALLEL
+        {
+            lines.par_iter().enumerate().map(parse).collect()
+        } else {
+            lines.iter().enumerate().map(parse).collect()
+        };
+        let records = records.map_err(|e| e.log())?;
 
-        // Pre-allocate collections based on estimated size
         let estimated_vertices = lines.len() / 4;
         let estimated_edges = estimated_vertices * 3;
         let mut graph = Graph {
@@ -166,245 +147,88 @@ impl G2oLoader {
             edges_se2: Vec::with_capacity(estimated_edges),
             edges_se3: Vec::with_capacity(estimated_edges),
         };
+        let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
 
-        // For large files, use parallel processing
-        if lines.len() > minimum_lines_for_parallel {
-            Self::parse_parallel(&lines, &mut graph)?;
-        } else {
-            Self::parse_sequential(&lines, &mut graph)?;
+        for record in records.into_iter().flatten() {
+            match record {
+                Record::VertexSE2(vertex) => {
+                    let id = vertex.id;
+                    if graph.vertices_se2.insert(id, vertex).is_some() {
+                        return Err(GraphError::DuplicateVertex { id }.log());
+                    }
+                }
+                Record::VertexSE3(vertex) => {
+                    let id = vertex.id;
+                    if graph.vertices_se3.insert(id, vertex).is_some() {
+                        return Err(GraphError::DuplicateVertex { id }.log());
+                    }
+                }
+                Record::EdgeSE2(edge) => graph.edges_se2.push(edge),
+                Record::EdgeSE3(edge) => graph.edges_se3.push(*edge),
+                Record::Unknown(tag) => *skipped.entry(tag).or_insert(0) += 1,
+            }
+        }
+
+        for (record, count) in skipped {
+            warn!(
+                record,
+                count, "skipped g2o records of a type this loader does not read"
+            );
         }
 
         Ok(graph)
     }
 
-    /// Sequential parsing for smaller files
-    fn parse_sequential(lines: &[&str], graph: &mut Graph) -> Result<(), IoError> {
-        for (line_num, line) in lines.iter().enumerate() {
-            Self::parse_line(line, line_num + 1, graph)?;
-        }
-        Ok(())
-    }
-
-    /// Parallel parsing for larger files
-    fn parse_parallel(lines: &[&str], graph: &mut Graph) -> Result<(), IoError> {
-        // Collect parse results in parallel
-        let results: Result<Vec<_>, IoError> = lines
-            .par_iter()
-            .enumerate()
-            .map(|(line_num, line)| Self::parse_line_to_enum(line, line_num + 1))
-            .collect();
-
-        let parsed_items = results?;
-
-        // Sequential insertion to avoid concurrent modification
-        for item in parsed_items.into_iter().flatten() {
-            match item {
-                ParsedItem::VertexSE2(vertex) => {
-                    let id = vertex.id;
-                    if graph.vertices_se2.insert(id, vertex).is_some() {
-                        return Err(IoError::DuplicateVertex { id });
-                    }
-                }
-                ParsedItem::VertexSE3(vertex) => {
-                    let id = vertex.id;
-                    if graph.vertices_se3.insert(id, vertex).is_some() {
-                        return Err(IoError::DuplicateVertex { id });
-                    }
-                }
-                ParsedItem::EdgeSE2(edge) => {
-                    graph.edges_se2.push(edge);
-                }
-                ParsedItem::EdgeSE3(edge) => {
-                    graph.edges_se3.push(*edge);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Parse a single line (for sequential processing)
-    fn parse_line(line: &str, line_num: usize, graph: &mut Graph) -> Result<(), IoError> {
+    /// Parse one line; comments and blank lines give `None`.
+    fn parse_record(line: &str, line_num: usize) -> GraphResult<Option<Record<'_>>> {
         let line = line.trim();
-
-        // Skip empty lines and comments
-        if line.is_empty() || line.starts_with('#') {
-            return Ok(());
-        }
-
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            return Ok(());
-        }
-
-        match parts[0] {
-            "VERTEX_SE2" => {
-                let vertex = Self::parse_vertex_se2(&parts, line_num)?;
-                let id = vertex.id;
-                if graph.vertices_se2.insert(id, vertex).is_some() {
-                    return Err(IoError::DuplicateVertex { id });
-                }
-            }
-            "VERTEX_SE3:QUAT" => {
-                let vertex = Self::parse_vertex_se3(&parts, line_num)?;
-                let id = vertex.id;
-                if graph.vertices_se3.insert(id, vertex).is_some() {
-                    return Err(IoError::DuplicateVertex { id });
-                }
-            }
-            "EDGE_SE2" => {
-                let edge = Self::parse_edge_se2(&parts, line_num)?;
-                graph.edges_se2.push(edge);
-            }
-            "EDGE_SE3:QUAT" => {
-                let edge = Self::parse_edge_se3(&parts, line_num)?;
-                graph.edges_se3.push(edge);
-            }
-            _ => {
-                // Skip unknown types silently for compatibility
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Parse a single line to enum (for parallel processing)
-    fn parse_line_to_enum(line: &str, line_num: usize) -> Result<Option<ParsedItem>, IoError> {
-        let line = line.trim();
-
-        // Skip empty lines and comments
         if line.is_empty() || line.starts_with('#') {
             return Ok(None);
         }
 
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
+        let Some(&tag) = parts.first() else {
             return Ok(None);
-        }
-
-        let item = match parts[0] {
-            "VERTEX_SE2" => Some(ParsedItem::VertexSE2(Self::parse_vertex_se2(
-                &parts, line_num,
-            )?)),
-            "VERTEX_SE3:QUAT" => Some(ParsedItem::VertexSE3(Self::parse_vertex_se3(
-                &parts, line_num,
-            )?)),
-            "EDGE_SE2" => Some(ParsedItem::EdgeSE2(Self::parse_edge_se2(&parts, line_num)?)),
-            "EDGE_SE3:QUAT" => Some(ParsedItem::EdgeSE3(Box::new(Self::parse_edge_se3(
-                &parts, line_num,
-            )?))),
-            _ => None, // Skip unknown types
         };
 
-        Ok(item)
+        let record = match tag {
+            "VERTEX_SE2" => Record::VertexSE2(Self::parse_vertex_se2(&parts, line_num)?),
+            "VERTEX_SE3:QUAT" => Record::VertexSE3(Self::parse_vertex_se3(&parts, line_num)?),
+            "EDGE_SE2" => Record::EdgeSE2(Self::parse_edge_se2(&parts, line_num)?),
+            "EDGE_SE3:QUAT" => Record::EdgeSE3(Box::new(Self::parse_edge_se3(&parts, line_num)?)),
+            other => Record::Unknown(other),
+        };
+        Ok(Some(record))
     }
 
     /// Parse VERTEX_SE2 line
-    pub fn parse_vertex_se2(parts: &[&str], line_num: usize) -> Result<VertexSE2, IoError> {
-        if parts.len() < 5 {
-            return Err(IoError::MissingFields { line: line_num });
-        }
-
-        let id = parts[1]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[1].to_string(),
-            })?;
-
-        let x = parts[2]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[2].to_string(),
-            })?;
-
-        let y = parts[3]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[3].to_string(),
-            })?;
-
-        let theta = parts[4]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[4].to_string(),
-            })?;
-
+    pub fn parse_vertex_se2(parts: &[&str], line_num: usize) -> GraphResult<VertexSE2> {
+        const RECORD: &str = "VERTEX_SE2";
+        require_fields(parts, 5, line_num, RECORD)?;
+        let id = parse_field::<usize>(parts, 1, line_num, RECORD)?;
+        let x = parse_field::<f64>(parts, 2, line_num, RECORD)?;
+        let y = parse_field::<f64>(parts, 3, line_num, RECORD)?;
+        let theta = parse_field::<f64>(parts, 4, line_num, RECORD)?;
         Ok(VertexSE2::new(id, x, y, theta))
     }
 
     /// Parse VERTEX_SE3:QUAT line
-    pub fn parse_vertex_se3(parts: &[&str], line_num: usize) -> Result<VertexSE3, IoError> {
-        if parts.len() < 9 {
-            return Err(IoError::MissingFields { line: line_num });
+    pub fn parse_vertex_se3(parts: &[&str], line_num: usize) -> GraphResult<VertexSE3> {
+        const RECORD: &str = "VERTEX_SE3:QUAT";
+        require_fields(parts, 9, line_num, RECORD)?;
+        let id = parse_field::<usize>(parts, 1, line_num, RECORD)?;
+        let mut values = [0.0; 7];
+        for (offset, value) in values.iter_mut().enumerate() {
+            *value = parse_field::<f64>(parts, 2 + offset, line_num, RECORD)?;
         }
-
-        let id = parts[1]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[1].to_string(),
-            })?;
-
-        let x = parts[2]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[2].to_string(),
-            })?;
-
-        let y = parts[3]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[3].to_string(),
-            })?;
-
-        let z = parts[4]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[4].to_string(),
-            })?;
-
-        let qx = parts[5]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[5].to_string(),
-            })?;
-
-        let qy = parts[6]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[6].to_string(),
-            })?;
-
-        let qz = parts[7]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[7].to_string(),
-            })?;
-
-        let qw = parts[8]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[8].to_string(),
-            })?;
+        let [x, y, z, qx, qy, qz, qw] = values;
 
         let translation = nalgebra::Vector3::new(x, y, z);
         let quaternion = nalgebra::Quaternion::new(qw, qx, qy, qz);
 
-        // Validate quaternion normalization
         let quat_norm = (qw * qw + qx * qx + qy * qy + qz * qz).sqrt();
-        if (quat_norm - 1.0).abs() > 0.01 {
-            return Err(IoError::InvalidQuaternion {
+        if !quat_norm.is_finite() || (quat_norm - 1.0).abs() > 0.01 {
+            return Err(GraphError::InvalidQuaternion {
                 line: line_num,
                 norm: quat_norm,
             });
@@ -421,205 +245,69 @@ impl G2oLoader {
     }
 
     /// Parse EDGE_SE2 line
-    fn parse_edge_se2(parts: &[&str], line_num: usize) -> Result<EdgeSE2, IoError> {
-        if parts.len() < 12 {
-            return Err(IoError::MissingFields { line: line_num });
+    fn parse_edge_se2(parts: &[&str], line_num: usize) -> GraphResult<EdgeSE2> {
+        const RECORD: &str = "EDGE_SE2";
+        require_fields(parts, 12, line_num, RECORD)?;
+        let from = parse_field::<usize>(parts, 1, line_num, RECORD)?;
+        let to = parse_field::<usize>(parts, 2, line_num, RECORD)?;
+        // Measurement (dx, dy, dtheta), then the upper triangle of the
+        // information matrix: i11, i12, i13, i22, i23, i33.
+        let mut values = [0.0; 9];
+        for (offset, value) in values.iter_mut().enumerate() {
+            *value = parse_field::<f64>(parts, 3 + offset, line_num, RECORD)?;
         }
+        let [dx, dy, dtheta, i11, i12, i13, i22, i23, i33] = values;
 
-        let from = parts[1]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[1].to_string(),
-            })?;
-
-        let to = parts[2]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[2].to_string(),
-            })?;
-
-        // Parse measurement (dx, dy, dtheta)
-        let dx = parts[3]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[3].to_string(),
-            })?;
-        let dy = parts[4]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[4].to_string(),
-            })?;
-        let dtheta = parts[5]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[5].to_string(),
-            })?;
-
-        // Parse information matrix (upper triangular: i11, i12, i13, i22, i23, i33)
-        let info_values: Result<Vec<f64>, _> =
-            parts[6..12].iter().map(|s| s.parse::<f64>()).collect();
-
-        let info_values = info_values.map_err(|_| IoError::Parse {
-            line: line_num,
-            message: "Invalid information matrix values".to_string(),
-        })?;
-
-        let information = nalgebra::Matrix3::new(
-            info_values[0],
-            info_values[1],
-            info_values[2],
-            info_values[1],
-            info_values[3],
-            info_values[4],
-            info_values[2],
-            info_values[4],
-            info_values[5],
-        );
+        let information = nalgebra::Matrix3::new(i11, i12, i13, i12, i22, i23, i13, i23, i33);
 
         Ok(EdgeSE2::new(from, to, dx, dy, dtheta, information))
     }
 
-    /// Parse EDGE_SE3:QUAT line (placeholder implementation)
-    fn parse_edge_se3(parts: &[&str], line_num: usize) -> Result<EdgeSE3, IoError> {
-        // EDGE_SE3:QUAT from_id to_id tx ty tz qx qy qz qw [information matrix values]
-        if parts.len() < 10 {
-            return Err(IoError::MissingFields { line: line_num });
+    /// Parse EDGE_SE3:QUAT line: ids, translation, quaternion and the 21-value
+    /// upper triangle of the information matrix.
+    fn parse_edge_se3(parts: &[&str], line_num: usize) -> GraphResult<EdgeSE3> {
+        const RECORD: &str = "EDGE_SE3:QUAT";
+        require_fields(parts, 10, line_num, RECORD)?;
+        let from = parse_field::<usize>(parts, 1, line_num, RECORD)?;
+        let to = parse_field::<usize>(parts, 2, line_num, RECORD)?;
+        let mut pose = [0.0; 7];
+        for (offset, value) in pose.iter_mut().enumerate() {
+            *value = parse_field::<f64>(parts, 3 + offset, line_num, RECORD)?;
         }
-
-        // Parse vertex IDs
-        let from = parts[1]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[1].to_string(),
-            })?;
-
-        let to = parts[2]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[2].to_string(),
-            })?;
-
-        // Parse translation (tx, ty, tz)
-        let tx = parts[3]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[3].to_string(),
-            })?;
-
-        let ty = parts[4]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[4].to_string(),
-            })?;
-
-        let tz = parts[5]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[5].to_string(),
-            })?;
+        let [tx, ty, tz, qx, qy, qz, qw] = pose;
 
         let translation = nalgebra::Vector3::new(tx, ty, tz);
-
-        // Parse rotation quaternion (qx, qy, qz, qw)
-        let qx = parts[6]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[6].to_string(),
-            })?;
-
-        let qy = parts[7]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[7].to_string(),
-            })?;
-
-        let qz = parts[8]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[8].to_string(),
-            })?;
-
-        let qw = parts[9]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[9].to_string(),
-            })?;
-
         let rotation =
             nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(qw, qx, qy, qz));
 
-        // Parse information matrix (upper triangular: i11, i12, i13, i14, i15, i16, i22, i23, i24, i25, i26, i33, i34, i35, i36, i44, i45, i46, i55, i56, i66)
-        let info_values: Result<Vec<f64>, _> =
-            parts[10..31].iter().map(|s| s.parse::<f64>()).collect();
+        require_fields(parts, 31, line_num, RECORD)?;
+        let mut upper = [0.0; 21];
+        for (offset, value) in upper.iter_mut().enumerate() {
+            *value = parse_field::<f64>(parts, 10 + offset, line_num, RECORD)?;
+        }
 
-        let info_values = info_values.map_err(|_| IoError::Parse {
-            line: line_num,
-            message: "Invalid information matrix values".to_string(),
-        })?;
-
-        let information = nalgebra::Matrix6::new(
-            info_values[0],
-            info_values[1],
-            info_values[2],
-            info_values[3],
-            info_values[4],
-            info_values[5],
-            info_values[1],
-            info_values[6],
-            info_values[7],
-            info_values[8],
-            info_values[9],
-            info_values[10],
-            info_values[2],
-            info_values[7],
-            info_values[11],
-            info_values[12],
-            info_values[13],
-            info_values[14],
-            info_values[3],
-            info_values[8],
-            info_values[12],
-            info_values[15],
-            info_values[16],
-            info_values[17],
-            info_values[4],
-            info_values[9],
-            info_values[13],
-            info_values[16],
-            info_values[18],
-            info_values[19],
-            info_values[5],
-            info_values[10],
-            info_values[14],
-            info_values[17],
-            info_values[19],
-            info_values[20],
-        );
+        let mut information = nalgebra::Matrix6::zeros();
+        let mut next = 0;
+        for i in 0..6 {
+            for j in i..6 {
+                information[(i, j)] = upper[next];
+                information[(j, i)] = upper[next];
+                next += 1;
+            }
+        }
 
         Ok(EdgeSE3::new(from, to, translation, rotation, information))
     }
 }
 
-/// Enum for parsed items (used in parallel processing)
-enum ParsedItem {
+/// One parsed G2O line.
+enum Record<'a> {
     VertexSE2(VertexSE2),
     VertexSE3(VertexSE3),
     EdgeSE2(EdgeSE2),
     EdgeSE3(Box<EdgeSE3>),
+    /// A record type this loader does not read, e.g. `FIX` or `VERTEX_XY`.
+    Unknown(&'a str),
 }
 
 #[cfg(test)]
@@ -671,12 +359,12 @@ mod tests {
         // Test invalid number
         let parts = vec!["VERTEX_SE2", "invalid", "1.0", "2.0", "0.5"];
         let result = G2oLoader::parse_vertex_se2(&parts, 1);
-        assert!(matches!(result, Err(IoError::InvalidNumber { .. })));
+        assert!(matches!(result, Err(GraphError::InvalidNumber { .. })));
 
         // Test missing fields
         let parts = vec!["VERTEX_SE2", "0"];
         let result = G2oLoader::parse_vertex_se2(&parts, 1);
-        assert!(matches!(result, Err(IoError::MissingFields { .. })));
+        assert!(matches!(result, Err(GraphError::MissingFields { .. })));
     }
 
     #[test]
@@ -784,7 +472,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidQuaternion { .. })),
+            matches!(result, Err(GraphError::InvalidQuaternion { .. })),
             "far-from-unit quaternion should return InvalidQuaternion"
         );
         Ok(())
@@ -854,7 +542,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid x in VERTEX_SE2 should return InvalidNumber"
         );
         Ok(())
@@ -867,7 +555,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid y in VERTEX_SE2 should return InvalidNumber"
         );
         Ok(())
@@ -880,7 +568,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid theta in VERTEX_SE2 should return InvalidNumber"
         );
         Ok(())
@@ -893,7 +581,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::MissingFields { .. })),
+            matches!(result, Err(GraphError::MissingFields { .. })),
             "VERTEX_SE2 with too few fields should return MissingFields"
         );
         Ok(())
@@ -907,7 +595,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::DuplicateVertex { id: 3 })),
+            matches!(result, Err(GraphError::DuplicateVertex { id: 3 })),
             "duplicate VERTEX_SE2 ID should return DuplicateVertex"
         );
         Ok(())
@@ -924,7 +612,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::MissingFields { .. })),
+            matches!(result, Err(GraphError::MissingFields { .. })),
             "VERTEX_SE3:QUAT with too few fields should return MissingFields"
         );
         Ok(())
@@ -937,7 +625,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid translation in VERTEX_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -950,7 +638,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid quaternion field should return InvalidNumber"
         );
         Ok(())
@@ -964,7 +652,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::DuplicateVertex { id: 7 })),
+            matches!(result, Err(GraphError::DuplicateVertex { id: 7 })),
             "duplicate VERTEX_SE3:QUAT ID should return DuplicateVertex"
         );
         Ok(())
@@ -977,7 +665,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid id in VERTEX_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -990,7 +678,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid y in VERTEX_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1003,7 +691,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid z in VERTEX_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1016,7 +704,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid qy in VERTEX_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1029,7 +717,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid qz in VERTEX_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1042,7 +730,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid qw in VERTEX_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1059,7 +747,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::MissingFields { .. })),
+            matches!(result, Err(GraphError::MissingFields { .. })),
             "EDGE_SE2 with too few fields should return MissingFields"
         );
         Ok(())
@@ -1075,7 +763,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid from-ID in EDGE_SE2 should return InvalidNumber"
         );
         Ok(())
@@ -1104,7 +792,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid to-ID in EDGE_SE2 should return InvalidNumber"
         );
         Ok(())
@@ -1160,7 +848,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::MissingFields { .. })),
+            matches!(result, Err(GraphError::MissingFields { .. })),
             "EDGE_SE3:QUAT with too few fields should return MissingFields"
         );
         Ok(())
@@ -1174,7 +862,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid translation in EDGE_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1194,7 +882,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid quaternion field in EDGE_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1213,7 +901,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid from-id in EDGE_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1232,7 +920,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid to-id in EDGE_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1245,7 +933,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid ty in EDGE_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1258,7 +946,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid tz in EDGE_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1271,7 +959,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid qx in EDGE_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1284,7 +972,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid qy in EDGE_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1303,7 +991,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid qw in EDGE_SE3:QUAT should return InvalidNumber"
         );
         Ok(())
@@ -1435,7 +1123,7 @@ mod tests {
         f.flush()?;
         let result = G2oLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::DuplicateVertex { id: 0 })),
+            matches!(result, Err(GraphError::DuplicateVertex { id: 0 })),
             "duplicate vertex in parallel parse should return DuplicateVertex"
         );
         Ok(())
@@ -1452,6 +1140,49 @@ mod tests {
         f.flush()?;
         let graph = G2oLoader::load(f.path())?;
         assert_eq!(graph.vertices_se2.len(), 1000);
+        Ok(())
+    }
+
+    #[test]
+    fn test_edge_se3_with_a_short_information_matrix_is_an_error() -> TestResult {
+        // 10 to 30 tokens used to pass the length check and then panic on the
+        // information-matrix slice.
+        for extra in [0usize, 1, 20] {
+            let values = vec!["1.0"; extra].join(" ");
+            let line = format!("EDGE_SE3:QUAT 0 1 0.0 0.0 0.0 0.0 0.0 0.0 1.0 {values}");
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let result = G2oLoader::parse_edge_se3(&parts, 7);
+            assert!(
+                matches!(
+                    result,
+                    Err(GraphError::MissingFields {
+                        line: 7,
+                        expected: 31,
+                        ..
+                    })
+                ),
+                "{} tokens must be refused, got {:?}",
+                parts.len(),
+                result.err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_short_edge_se3_in_a_parallel_parse_is_an_error() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        for id in 0..MIN_LINES_FOR_PARALLEL + 10 {
+            writeln!(f, "VERTEX_SE2 {id} 0.0 0.0 0.0")?;
+        }
+        writeln!(f, "EDGE_SE3:QUAT 0 1 0.0 0.0 0.0 0.0 0.0 0.0 1.0 1.0 2.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(GraphError::MissingFields { .. })),
+            "got {:?}",
+            result.err()
+        );
         Ok(())
     }
 }

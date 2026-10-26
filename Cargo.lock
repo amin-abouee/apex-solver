@@ -299,6 +299,7 @@ dependencies = [
 name = "apex-io"
 version = "0.5.0"
 dependencies = [
+ "apex-error",
  "apex-manifolds",
  "byteorder",
  "bytes",

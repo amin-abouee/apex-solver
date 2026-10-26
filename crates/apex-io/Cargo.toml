@@ -130,6 +130,7 @@ path = "tests/ros2_cdr_alignment_tests.rs"
 required-features = ["rosbag"]
 
 [dependencies]
+apex-error.workspace = true
 apex-manifolds.workspace = true
 nalgebra.workspace = true
 rayon.workspace = true

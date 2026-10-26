@@ -1,40 +1,46 @@
-use super::{EdgeSE2, Graph, GraphLoader, IoError, VertexSE2};
+use super::error::{parse_field, require_fields};
+use super::{EdgeSE2, Graph, GraphError, GraphLoader, GraphResult, VertexSE2};
+use apex_error::ErrorLogging;
+use std::collections::BTreeMap;
 use std::{fs, io::Write, path::Path};
+use tracing::warn;
 
 /// TORO format loader
 pub struct ToroLoader;
 
 impl GraphLoader for ToroLoader {
-    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
+    fn load<P: AsRef<Path>>(path: P) -> GraphResult<Graph> {
         let path_ref = path.as_ref();
-        let content = fs::read_to_string(path_ref).map_err(|e| {
-            IoError::Io(e).log_with_source(format!("Failed to read TORO file: {:?}", path_ref))
-        })?;
+        let content =
+            fs::read_to_string(path_ref).map_err(|e| GraphError::read(path_ref, e).log())?;
 
         Self::parse_content(&content)
     }
 
-    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), IoError> {
-        // TORO only supports SE2
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> GraphResult<()> {
         if !graph.vertices_se3.is_empty() || !graph.edges_se3.is_empty() {
-            return Err(IoError::UnsupportedFormat(
-                "TORO format only supports SE2 (2D) graphs. Use G2O format for SE3 data."
-                    .to_string(),
-            )
+            return Err(GraphError::ToroSe3 {
+                vertices: graph.vertices_se3.len(),
+                edges: graph.edges_se3.len(),
+            }
             .log());
         }
 
         let path_ref = path.as_ref();
-        let mut file = fs::File::create(path_ref).map_err(|e| {
-            IoError::Io(e).log_with_source(format!("Failed to create TORO file: {:?}", path_ref))
-        })?;
+        Self::write_to(graph, path_ref).map_err(|e| GraphError::write(path_ref, e).log())
+    }
+}
 
-        // Write SE2 vertices (sorted by ID)
+impl ToroLoader {
+    fn write_to(graph: &Graph, path: &Path) -> std::io::Result<()> {
+        let mut file = std::io::BufWriter::new(fs::File::create(path)?);
+
         let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().collect();
         vertex_ids.sort();
-
         for id in vertex_ids {
-            let vertex = &graph.vertices_se2[id];
+            let Some(vertex) = graph.vertices_se2.get(id) else {
+                continue;
+            };
             writeln!(
                 file,
                 "VERTEX2 {} {:.17e} {:.17e} {:.17e}",
@@ -42,13 +48,9 @@ impl GraphLoader for ToroLoader {
                 vertex.x(),
                 vertex.y(),
                 vertex.theta()
-            )
-            .map_err(|e| {
-                IoError::Io(e).log_with_source(format!("Failed to write TORO vertex {}", vertex.id))
-            })?;
+            )?;
         }
 
-        // Write SE2 edges
         // TORO format: EDGE2 <id1> <id2> <dx> <dy> <dtheta> <i11> <i12> <i22> <i33> <i13> <i23>
         for edge in &graph.edges_se2 {
             let meas = &edge.measurement;
@@ -68,183 +70,93 @@ impl GraphLoader for ToroLoader {
                 info[(2, 2)], // i33
                 info[(0, 2)], // i13
                 info[(1, 2)]  // i23
-            )
-            .map_err(|e| {
-                IoError::Io(e).log_with_source(format!(
-                    "Failed to write TORO edge {} -> {}",
-                    edge.from, edge.to
-                ))
-            })?;
+            )?;
         }
 
-        Ok(())
+        file.flush()
     }
-}
 
-impl ToroLoader {
-    fn parse_content(content: &str) -> Result<Graph, IoError> {
-        let lines: Vec<&str> = content.lines().collect();
+    /// Parse TORO text. A line error is logged here, once, where the load stops.
+    fn parse_content(content: &str) -> GraphResult<Graph> {
         let mut graph = Graph::new();
+        let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
 
-        for (line_num, line) in lines.iter().enumerate() {
-            Self::parse_line(line, line_num + 1, &mut graph)?;
+        for (index, line) in content.lines().enumerate() {
+            Self::parse_line(line, index + 1, &mut graph, &mut skipped).map_err(|e| e.log())?;
+        }
+
+        for (record, count) in skipped {
+            warn!(
+                record,
+                count, "skipped TORO records of a type this loader does not read"
+            );
         }
 
         Ok(graph)
     }
 
-    fn parse_line(line: &str, line_num: usize, graph: &mut Graph) -> Result<(), IoError> {
+    fn parse_line<'a>(
+        line: &'a str,
+        line_num: usize,
+        graph: &mut Graph,
+        skipped: &mut BTreeMap<&'a str, usize>,
+    ) -> GraphResult<()> {
         let line = line.trim();
-
-        // Skip empty lines and comments
         if line.is_empty() || line.starts_with('#') {
             return Ok(());
         }
 
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
+        let Some(&tag) = parts.first() else {
             return Ok(());
-        }
+        };
 
-        match parts[0] {
+        match tag {
             "VERTEX2" => {
                 let vertex = Self::parse_vertex2(&parts, line_num)?;
                 let id = vertex.id;
                 if graph.vertices_se2.insert(id, vertex).is_some() {
-                    return Err(IoError::DuplicateVertex { id });
+                    return Err(GraphError::DuplicateVertex { id });
                 }
             }
             "EDGE2" => {
                 let edge = Self::parse_edge2(&parts, line_num)?;
                 graph.edges_se2.push(edge);
             }
-            _ => {
-                // Skip unknown types silently for compatibility
-            }
+            other => *skipped.entry(other).or_insert(0) += 1,
         }
 
         Ok(())
     }
 
-    fn parse_vertex2(parts: &[&str], line_num: usize) -> Result<VertexSE2, IoError> {
-        if parts.len() < 5 {
-            return Err(IoError::MissingFields { line: line_num });
-        }
-
-        let id = parts[1]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[1].to_string(),
-            })?;
-
-        let x = parts[2]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[2].to_string(),
-            })?;
-
-        let y = parts[3]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[3].to_string(),
-            })?;
-
-        let theta = parts[4]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[4].to_string(),
-            })?;
-
+    fn parse_vertex2(parts: &[&str], line_num: usize) -> GraphResult<VertexSE2> {
+        const RECORD: &str = "VERTEX2";
+        require_fields(parts, 5, line_num, RECORD)?;
+        let id = parse_field::<usize>(parts, 1, line_num, RECORD)?;
+        let x = parse_field::<f64>(parts, 2, line_num, RECORD)?;
+        let y = parse_field::<f64>(parts, 3, line_num, RECORD)?;
+        let theta = parse_field::<f64>(parts, 4, line_num, RECORD)?;
         Ok(VertexSE2::new(id, x, y, theta))
     }
 
-    fn parse_edge2(parts: &[&str], line_num: usize) -> Result<EdgeSE2, IoError> {
-        if parts.len() < 12 {
-            return Err(IoError::MissingFields { line: line_num });
+    fn parse_edge2(parts: &[&str], line_num: usize) -> GraphResult<EdgeSE2> {
+        const RECORD: &str = "EDGE2";
+        require_fields(parts, 12, line_num, RECORD)?;
+        let from = parse_field::<usize>(parts, 1, line_num, RECORD)?;
+        let to = parse_field::<usize>(parts, 2, line_num, RECORD)?;
+        // Measurement (dx, dy, dtheta), then TORO's information order:
+        // I11, I12, I22, I33, I13, I23.
+        let mut values = [0.0; 9];
+        for (offset, value) in values.iter_mut().enumerate() {
+            *value = parse_field::<f64>(parts, 3 + offset, line_num, RECORD)?;
         }
-
-        let from = parts[1]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[1].to_string(),
-            })?;
-
-        let to = parts[2]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[2].to_string(),
-            })?;
-
-        // Parse measurement (dx, dy, dtheta)
-        let dx = parts[3]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[3].to_string(),
-            })?;
-        let dy = parts[4]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[4].to_string(),
-            })?;
-        let dtheta = parts[5]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[5].to_string(),
-            })?;
-
-        // Parse TORO information matrix (I11, I12, I22, I33, I13, I23)
-        let i11 = parts[6]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[6].to_string(),
-            })?;
-        let i12 = parts[7]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[7].to_string(),
-            })?;
-        let i22 = parts[8]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[8].to_string(),
-            })?;
-        let i33 = parts[9]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[9].to_string(),
-            })?;
-        let i13 = parts[10]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[10].to_string(),
-            })?;
-        let i23 = parts[11]
-            .parse::<f64>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[11].to_string(),
-            })?;
+        let [dx, dy, dtheta, i11, i12, i22, i33, i13, i23] = values;
 
         let information = nalgebra::Matrix3::new(i11, i12, i13, i12, i22, i23, i13, i23, i33);
 
         Ok(EdgeSE2::new(from, to, dx, dy, dtheta, information))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,7 +233,7 @@ mod tests {
         let f = NamedTempFile::new()?;
         let result = ToroLoader::write(&graph, f.path());
         assert!(
-            matches!(result, Err(IoError::UnsupportedFormat(_))),
+            matches!(result, Err(GraphError::ToroSe3 { .. })),
             "should reject graph with SE3 vertices"
         );
         Ok(())
@@ -340,7 +252,7 @@ mod tests {
         let f = NamedTempFile::new()?;
         let result = ToroLoader::write(&graph, f.path());
         assert!(
-            matches!(result, Err(IoError::UnsupportedFormat(_))),
+            matches!(result, Err(GraphError::ToroSe3 { .. })),
             "should reject graph with SE3 edges"
         );
         Ok(())
@@ -352,7 +264,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::DuplicateVertex { id: 5 })),
+            matches!(result, Err(GraphError::DuplicateVertex { id: 5 })),
             "duplicate vertex ID should return DuplicateVertex error"
         );
         Ok(())
@@ -444,7 +356,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid id in VERTEX2 should return InvalidNumber"
         );
         Ok(())
@@ -456,7 +368,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid y in VERTEX2 should return InvalidNumber"
         );
         Ok(())
@@ -468,7 +380,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid theta in VERTEX2 should return InvalidNumber"
         );
         Ok(())
@@ -484,7 +396,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid from-id in EDGE2 should return InvalidNumber"
         );
         Ok(())
@@ -496,7 +408,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid to-id in EDGE2 should return InvalidNumber"
         );
         Ok(())
@@ -508,7 +420,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid dx in EDGE2 should return InvalidNumber"
         );
         Ok(())
@@ -520,7 +432,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid dy in EDGE2 should return InvalidNumber"
         );
         Ok(())
@@ -532,7 +444,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid dtheta in EDGE2 should return InvalidNumber"
         );
         Ok(())
@@ -544,7 +456,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid i11 in EDGE2 should return InvalidNumber"
         );
         Ok(())
@@ -556,7 +468,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid i12 in EDGE2 should return InvalidNumber"
         );
         Ok(())
@@ -568,7 +480,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid i22 in EDGE2 should return InvalidNumber"
         );
         Ok(())
@@ -580,7 +492,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid i33 in EDGE2 should return InvalidNumber"
         );
         Ok(())
@@ -592,7 +504,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid i13 in EDGE2 should return InvalidNumber"
         );
         Ok(())
@@ -604,7 +516,7 @@ mod tests {
         let f = write_toro_content(content)?;
         let result = ToroLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(GraphError::InvalidNumber { .. })),
             "invalid i23 in EDGE2 should return InvalidNumber"
         );
         Ok(())

@@ -31,12 +31,48 @@
 //!          dataset.cameras.len(),
 //!          dataset.points.len(),
 //!          dataset.observations.len());
-//! # Ok::<(), apex_io::IoError>(())
+//! # Ok::<(), apex_io::BalError>(())
 //! ```
 
-use super::IoError;
+use apex_error::ErrorLogging;
 use nalgebra::Vector3;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Result of reading a BAL file.
+pub type BalResult<T> = Result<T, BalError>;
+
+/// A BAL file that cannot be read or parsed.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BalError {
+    #[error("failed to read BAL file {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("BAL file has no header line")]
+    MissingHeader,
+
+    #[error("line {line}: BAL {block} line has {actual} fields, expected {expected}")]
+    FieldCount {
+        line: usize,
+        block: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+
+    #[error("line {line}: not a valid number: {value}")]
+    InvalidNumber { line: usize, value: String },
+
+    #[error("BAL file ends inside the {block} block, at entry {index} of {count}")]
+    UnexpectedEnd {
+        block: &'static str,
+        index: usize,
+        count: usize,
+    },
+}
 
 /// Represents a camera using Snavely's 9-parameter camera model.
 ///
@@ -123,7 +159,7 @@ impl BalLoader {
     /// # Returns
     ///
     /// Returns a `BalDataset` containing all cameras, points, and observations,
-    /// or an `IoError` if parsing fails.
+    /// or a [`BalError`] if the file cannot be read or parsed.
     ///
     /// # Example
     ///
@@ -133,66 +169,37 @@ impl BalLoader {
     /// let dataset = BalLoader::load("data/bundle_adjustment/problem-21-11315-pre.txt")?;
     /// assert_eq!(dataset.cameras.len(), 21);
     /// assert_eq!(dataset.points.len(), 11315);
-    /// # Ok::<(), apex_io::IoError>(())
+    /// # Ok::<(), apex_io::BalError>(())
     /// ```
-    pub fn load(path: impl AsRef<Path>) -> Result<BalDataset, IoError> {
+    pub fn load(path: impl AsRef<Path>) -> BalResult<BalDataset> {
         let path_ref = path.as_ref();
-        let content = std::fs::read_to_string(path_ref).map_err(|e| {
-            IoError::Io(e).log_with_source(format!("Failed to read BAL file: {:?}", path_ref))
+        let content = std::fs::read_to_string(path_ref).map_err(|source| {
+            BalError::Read {
+                path: path_ref.to_path_buf(),
+                source,
+            }
+            .log()
         })?;
+        Self::parse(&content).map_err(|e| e.log())
+    }
 
-        // Create line iterator (skip empty lines, trim whitespace)
+    /// Parse BAL text. Errors are returned unlogged; [`BalLoader::load`] logs them.
+    fn parse(content: &str) -> BalResult<BalDataset> {
         let mut lines = content
             .lines()
             .enumerate()
             .map(|(idx, line)| (idx + 1, line.trim()))
             .filter(|(_, line)| !line.is_empty());
 
-        // Parse header
         let (num_cameras, num_points, num_observations) = Self::parse_header(&mut lines)?;
 
-        // Parse observations
-        let observations = Self::parse_observations(&mut lines, num_observations)?;
+        // The header counts are untrusted: no block can hold more entries than
+        // the file has lines, so that bounds every pre-allocation.
+        let line_count = content.lines().count();
 
-        // Parse cameras
-        let cameras = Self::parse_cameras(&mut lines, num_cameras)?;
-
-        // Parse points
-        let points = Self::parse_points(&mut lines, num_points)?;
-
-        // Validate counts match header
-        if cameras.len() != num_cameras {
-            return Err(IoError::Parse {
-                line: 0,
-                message: format!(
-                    "Camera count mismatch: header says {}, got {}",
-                    num_cameras,
-                    cameras.len()
-                ),
-            });
-        }
-
-        if points.len() != num_points {
-            return Err(IoError::Parse {
-                line: 0,
-                message: format!(
-                    "Point count mismatch: header says {}, got {}",
-                    num_points,
-                    points.len()
-                ),
-            });
-        }
-
-        if observations.len() != num_observations {
-            return Err(IoError::Parse {
-                line: 0,
-                message: format!(
-                    "Observation count mismatch: header says {}, got {}",
-                    num_observations,
-                    observations.len()
-                ),
-            });
-        }
+        let observations = Self::parse_observations(&mut lines, num_observations, line_count)?;
+        let cameras = Self::parse_cameras(&mut lines, num_cameras, line_count)?;
+        let points = Self::parse_points(&mut lines, num_points, line_count)?;
 
         Ok(BalDataset {
             cameras,
@@ -204,92 +211,56 @@ impl BalLoader {
     /// Parses the header line containing dataset dimensions.
     fn parse_header<'a>(
         lines: &mut impl Iterator<Item = (usize, &'a str)>,
-    ) -> Result<(usize, usize, usize), IoError> {
-        let (line_num, header_line) = lines.next().ok_or(IoError::Parse {
-            line: 1,
-            message: "Missing header line".to_string(),
-        })?;
+    ) -> BalResult<(usize, usize, usize)> {
+        let (line_num, header_line) = lines.next().ok_or(BalError::MissingHeader)?;
 
         let parts: Vec<&str> = header_line.split_whitespace().collect();
-        if parts.len() != 3 {
-            return Err(IoError::MissingFields { line: line_num });
-        }
-
-        let num_cameras = parts[0]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
+        let [cameras, points, observations] = parts.as_slice() else {
+            return Err(BalError::FieldCount {
                 line: line_num,
-                value: parts[0].to_string(),
-            })?;
+                block: "header",
+                expected: 3,
+                actual: parts.len(),
+            });
+        };
 
-        let num_points = parts[1]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[1].to_string(),
-            })?;
-
-        let num_observations = parts[2]
-            .parse::<usize>()
-            .map_err(|_| IoError::InvalidNumber {
-                line: line_num,
-                value: parts[2].to_string(),
-            })?;
-
-        Ok((num_cameras, num_points, num_observations))
+        Ok((
+            parse_number(cameras, line_num)?,
+            parse_number(points, line_num)?,
+            parse_number(observations, line_num)?,
+        ))
     }
 
     /// Parses the observations block.
     fn parse_observations<'a>(
         lines: &mut impl Iterator<Item = (usize, &'a str)>,
         num_observations: usize,
-    ) -> Result<Vec<BalObservation>, IoError> {
-        let mut observations = Vec::with_capacity(num_observations);
+        line_count: usize,
+    ) -> BalResult<Vec<BalObservation>> {
+        let mut observations = Vec::with_capacity(num_observations.min(line_count));
 
-        for _ in 0..num_observations {
-            let (line_num, line) = lines.next().ok_or(IoError::Parse {
-                line: 0,
-                message: "Unexpected end of file in observations section".to_string(),
+        for index in 0..num_observations {
+            let (line_num, line) = lines.next().ok_or(BalError::UnexpectedEnd {
+                block: "observations",
+                index,
+                count: num_observations,
             })?;
 
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() != 4 {
-                return Err(IoError::MissingFields { line: line_num });
-            }
-
-            let camera_index = parts[0]
-                .parse::<usize>()
-                .map_err(|_| IoError::InvalidNumber {
+            let [camera, point, x, y] = parts.as_slice() else {
+                return Err(BalError::FieldCount {
                     line: line_num,
-                    value: parts[0].to_string(),
-                })?;
-
-            let point_index = parts[1]
-                .parse::<usize>()
-                .map_err(|_| IoError::InvalidNumber {
-                    line: line_num,
-                    value: parts[1].to_string(),
-                })?;
-
-            let x = parts[2]
-                .parse::<f64>()
-                .map_err(|_| IoError::InvalidNumber {
-                    line: line_num,
-                    value: parts[2].to_string(),
-                })?;
-
-            let y = parts[3]
-                .parse::<f64>()
-                .map_err(|_| IoError::InvalidNumber {
-                    line: line_num,
-                    value: parts[3].to_string(),
-                })?;
+                    block: "observations",
+                    expected: 4,
+                    actual: parts.len(),
+                });
+            };
 
             observations.push(BalObservation {
-                camera_index,
-                point_index,
-                x,
-                y,
+                camera_index: parse_number(camera, line_num)?,
+                point_index: parse_number(point, line_num)?,
+                x: parse_number(x, line_num)?,
+                y: parse_number(y, line_num)?,
             });
         }
 
@@ -306,39 +277,19 @@ impl BalLoader {
     fn parse_cameras<'a>(
         lines: &mut impl Iterator<Item = (usize, &'a str)>,
         num_cameras: usize,
-    ) -> Result<Vec<BalCamera>, IoError> {
-        let mut cameras = Vec::with_capacity(num_cameras);
+        line_count: usize,
+    ) -> BalResult<Vec<BalCamera>> {
+        let mut cameras = Vec::with_capacity(num_cameras.min(line_count / 9));
 
-        for camera_idx in 0..num_cameras {
-            let mut params = Vec::with_capacity(9);
-
-            // Read 9 consecutive lines for camera parameters
-            for param_idx in 0..9 {
-                let (line_num, line) = lines.next().ok_or(IoError::Parse {
-                    line: 0,
-                    message: format!(
-                        "Unexpected end of file in camera {} parameter {}",
-                        camera_idx, param_idx
-                    ),
-                })?;
-
-                let value = line
-                    .trim()
-                    .parse::<f64>()
-                    .map_err(|_| IoError::InvalidNumber {
-                        line: line_num,
-                        value: line.to_string(),
-                    })?;
-
-                params.push(value);
-            }
-
+        for index in 0..num_cameras {
+            let [rx, ry, rz, tx, ty, tz, f, k1, k2] =
+                Self::parse_values::<9>(lines, "cameras", index, num_cameras)?;
             cameras.push(BalCamera {
-                rotation: Vector3::new(params[0], params[1], params[2]),
-                translation: Vector3::new(params[3], params[4], params[5]),
-                focal_length: BalCamera::normalize_focal_length(params[6]),
-                k1: params[7],
-                k2: params[8],
+                rotation: Vector3::new(rx, ry, rz),
+                translation: Vector3::new(tx, ty, tz),
+                focal_length: BalCamera::normalize_focal_length(f),
+                k1,
+                k2,
             });
         }
 
@@ -351,40 +302,48 @@ impl BalLoader {
     fn parse_points<'a>(
         lines: &mut impl Iterator<Item = (usize, &'a str)>,
         num_points: usize,
-    ) -> Result<Vec<BalPoint>, IoError> {
-        let mut points = Vec::with_capacity(num_points);
+        line_count: usize,
+    ) -> BalResult<Vec<BalPoint>> {
+        let mut points = Vec::with_capacity(num_points.min(line_count / 3));
 
-        for point_idx in 0..num_points {
-            let mut coords = Vec::with_capacity(3);
-
-            // Read 3 consecutive lines for point coordinates
-            for coord_idx in 0..3 {
-                let (line_num, line) = lines.next().ok_or(IoError::Parse {
-                    line: 0,
-                    message: format!(
-                        "Unexpected end of file in point {} coordinate {}",
-                        point_idx, coord_idx
-                    ),
-                })?;
-
-                let value = line
-                    .trim()
-                    .parse::<f64>()
-                    .map_err(|_| IoError::InvalidNumber {
-                        line: line_num,
-                        value: line.to_string(),
-                    })?;
-
-                coords.push(value);
-            }
-
+        for index in 0..num_points {
+            let [x, y, z] = Self::parse_values::<3>(lines, "points", index, num_points)?;
             points.push(BalPoint {
-                position: Vector3::new(coords[0], coords[1], coords[2]),
+                position: Vector3::new(x, y, z),
             });
         }
 
         Ok(points)
     }
+
+    /// Read `N` consecutive one-value lines for entry `index` of `block`.
+    fn parse_values<'a, const N: usize>(
+        lines: &mut impl Iterator<Item = (usize, &'a str)>,
+        block: &'static str,
+        index: usize,
+        count: usize,
+    ) -> BalResult<[f64; N]> {
+        let mut values = [0.0; N];
+        for value in &mut values {
+            let (line_num, line) = lines.next().ok_or(BalError::UnexpectedEnd {
+                block,
+                index,
+                count,
+            })?;
+            *value = parse_number(line, line_num)?;
+        }
+        Ok(values)
+    }
+}
+
+fn parse_number<T: std::str::FromStr>(token: &str, line: usize) -> BalResult<T> {
+    token
+        .trim()
+        .parse::<T>()
+        .map_err(|_| BalError::InvalidNumber {
+            line,
+            value: token.to_string(),
+        })
 }
 
 #[cfg(test)]
@@ -629,7 +588,7 @@ mod tests {
         f.flush()?;
         let result = BalLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(BalError::InvalidNumber { .. })),
             "invalid num_cameras should return InvalidNumber"
         );
         Ok(())
@@ -642,7 +601,7 @@ mod tests {
         f.flush()?;
         let result = BalLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(BalError::InvalidNumber { .. })),
             "invalid num_observations should return InvalidNumber"
         );
         Ok(())
@@ -660,7 +619,7 @@ mod tests {
         f.flush()?;
         let result = BalLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::MissingFields { .. })),
+            matches!(result, Err(BalError::FieldCount { .. })),
             "observation with too few fields should return MissingFields"
         );
         Ok(())
@@ -674,7 +633,7 @@ mod tests {
         f.flush()?;
         let result = BalLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(BalError::InvalidNumber { .. })),
             "invalid camera_index in observation should return InvalidNumber"
         );
         Ok(())
@@ -688,7 +647,7 @@ mod tests {
         f.flush()?;
         let result = BalLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(BalError::InvalidNumber { .. })),
             "invalid point_index in observation should return InvalidNumber"
         );
         Ok(())
@@ -702,7 +661,7 @@ mod tests {
         f.flush()?;
         let result = BalLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(BalError::InvalidNumber { .. })),
             "invalid y in observation should return InvalidNumber"
         );
         Ok(())
@@ -721,7 +680,7 @@ mod tests {
         f.flush()?;
         let result = BalLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(BalError::InvalidNumber { .. })),
             "invalid camera parameter should return InvalidNumber"
         );
         Ok(())
@@ -759,8 +718,29 @@ mod tests {
         f.flush()?;
         let result = BalLoader::load(f.path());
         assert!(
-            matches!(result, Err(IoError::InvalidNumber { .. })),
+            matches!(result, Err(BalError::InvalidNumber { .. })),
             "invalid point coordinate should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_huge_header_counts_fail_without_allocating() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "{} {} {}", usize::MAX / 2, usize::MAX / 2, usize::MAX)?;
+        writeln!(f, "0 0 1.0 1.0")?;
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(
+            matches!(
+                result,
+                Err(BalError::UnexpectedEnd {
+                    block: "observations",
+                    index: 1,
+                    ..
+                })
+            ),
+            "a header claiming more entries than the file holds must fail, got {result:?}"
         );
         Ok(())
     }
