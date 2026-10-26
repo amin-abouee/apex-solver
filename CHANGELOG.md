@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking Changes
+
+- Errors are hierarchical and structured: `CoreError`, `FactorError`,
+  `LinearizerError`, `LinAlgError`, `CovarianceError`, `OptimizerError`,
+  `MarginalizationError` and `ObserverError` carry named fields instead of
+  strings, are `#[non_exhaustive]`, and keep wrapped errors as `source()`
+  behind a short context message. `ApexSolverError` also wraps
+  `MarginalizationError`, `CovarianceError` and `PreintegrationError`.
+- `Optimizer::optimize` (and `OptimizeResult`) return `OptimizerError`
+  instead of `ApexSolverError`; `?` still converts at the API boundary.
+- `Problem::add_residual_block`, `add_residual_block_with_noise`,
+  `fix_variable` and `set_variable_bounds` return `CoreResult` instead of
+  panicking; the `try_` variants are removed. `Problem::try_add_variable`
+  validates parameters through the manifold's checked constructor.
+- `Factor::validate_variables` returns `FactorResult<()>`, and factor
+  constructors return `FactorResult`.
+- `ErrorLogging` and `ErrorChainExt` come from `apex-error` and are
+  re-exported from `apex_solver::error`; `ApexSolverError::chain` is the
+  `ErrorChainExt` method.
+- Removed the never-produced `OptimizerError` variants and
+  `OptimizationStatus::Failed`, and the deprecated `linalg::utils`,
+  `create_jacobi_scaling`, `process_jacobian`, `create_linear_solver`,
+  `enable_visualization` / `with_visualization` and
+  `DogLegConfig::min_step_quality`.
+
+### Fixed
+
+- Linear-solve and Schur-setup errors are logged once where they occur, not
+  again by the optimizers; the observers no longer re-log their errors.
+- A NaN or infinite residual at a linearization point is reported as
+  `LinearizerError::NonFiniteResidual` instead of poisoning the system.
+- Jacobi scaling no longer falls back to the unscaled Jacobian (paired with
+  a scaled step) when the pattern copy fails.
+- Parameter steps are checked against the variables before any is moved;
+  `ProjectionFactor` no longer asserts inside `linearize`.
+- Singular preconditioner blocks replaced by the identity are warned about
+  at a rate limit.
+
 ## [1.5.0] - 2026-09-29
 
 ### Breaking Changes

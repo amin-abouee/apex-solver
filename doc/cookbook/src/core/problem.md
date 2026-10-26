@@ -57,36 +57,25 @@ frozen coordinates).
 ## 4. Residual blocks
 
 ```rust
-let block = problem.add_residual_block(&[a, b], Box::new(MyFactor{..}), None);
-let block = problem.add_residual_block_with_noise(&[a, b], Box::new(MyFactor{..}), None, noise);
-let block = problem.try_add_residual_block(&[a, b], Box::new(MyFactor{..}), None)?;   // typed
+let block = problem.add_residual_block(&[a, b], Box::new(MyFactor{..}), None)?;
+let block = problem.add_residual_block_with_noise(&[a, b], Box::new(MyFactor{..}), None, noise)?;
 ```
 
 The arguments are the variables the factor touches, the factor, an optional
 robust loss, and (in the `_with_noise` forms) the measurement's noise model.
 
-Two registration paths exist on purpose:
+Registration returns `CoreResult<FactorKey>` and never panics. Before the
+block is stored:
 
-- `add_residual_block` **panics** on an invalid registration. It is the
-  ergonomic path for code whose validity is a compile-time-ish fact.
-- `try_add_residual_block` returns `CoreResult`, and it validates more:
-  - the factor's `validate_variables` hook runs, so a shape mismatch (a
-    landmark whose parameter count disagrees with the factor's observations)
-    is a typed error rather than a panic inside the parallel assembly;
-  - unknown variable keys are rejected — otherwise they would be *silently
-    skipped* during linearization, and the block would quietly measure
-    nothing.
+- the factor's `validate_variables` hook runs, so a shape mismatch (a
+  landmark whose parameter count disagrees with the factor's observations)
+  is a typed `CoreError::Factor` rather than a panic inside the parallel
+  assembly;
+- unknown variable keys are rejected — otherwise they would be *silently
+  skipped* during linearization, and the block would quietly measure
+  nothing.
 
-<div class="apx-warning">
-<span class="apx-title">Warning — the panicking path is a footgun in a library</span>
-
-`add_residual_block` is convenient and, in a library, hostile: a consumer's
-bad factor crashes the consumer's process. Use the `try_` forms in anything
-that builds a graph from configuration or from another crate's data, and keep
-the panicking forms for statically-guaranteed registrations inside the crate
-itself.
-
-</div>
+A rejected registration adds nothing to the problem.
 
 ### What registration validates
 
@@ -96,8 +85,8 @@ itself.
 | Check | Failure |
 |---|---|
 | the noise model's dimension equals `residual_dim()` | `CoreError::DimensionMismatch` |
-| an internally-whitening factor is registered with `NoiseModel::Null` | `CoreError::InvalidInput` |
-| the factor validates against the variables it names | the factor's own message |
+| an internally-whitening factor is registered with `NoiseModel::Null` | `CoreError::DoubleWhitening` |
+| the factor validates against the variables it names | `CoreError::Factor(FactorError::VariableCount / VariableSize / VariableManifold / VariableDof)` |
 
 </div>
 
@@ -132,7 +121,7 @@ point per variable.
 ```rust
 let key = problem.add_variable(ManifoldType::SE3, pose_params);
 let noise = NoiseModel::from_sigmas(&[0.05, 0.05, 0.02])?;
-let block = problem.try_add_residual_block_with_noise(
+let block = problem.add_residual_block_with_noise(
     &[key],
     Box::new(BearingFactor { bearing, sigma }),
     Some(Box::new(HuberLoss::new(1.345)?)),
@@ -153,11 +142,11 @@ standard deviations; the loss then thresholds the *whitened* residual, so the
 
 | Group | Methods |
 |---|---|
-| building | `new(jacobian_mode)`, `add_variable`, `add_residual_block`, `add_residual_block_with_noise`, `try_add_residual_block`, `try_add_residual_block_with_noise` |
+| building | `new(jacobian_mode)`, `add_variable`, `try_add_variable`, `add_residual_block`, `add_residual_block_with_noise` |
 | removing | `remove_residual_block`, `remove_residual_blocks`, `try_remove_variable` |
 | inspecting | `variable`, `variable_params`, `manifold_type`, `variable_keys`, `num_variables`, `num_residual_blocks`, `total_residual_dimension` |
 | setting values | `set_variable_params`, `update_values_from` |
-| constraining | `fix_variable`, `try_fix_variable`, `unfix_variable`, `set_variable_bounds`, `try_set_variable_bounds`, `remove_variable_bounds`, `apply_constraints_to_variables` |
+| constraining | `fix_variable`, `unfix_variable`, `set_variable_bounds`, `remove_variable_bounds`, `apply_constraints_to_variables` |
 | the policy | `jacobian_evaluation`, `set_jacobian_evaluation` |
 | the FEJ points | `freeze_linearization_point`, `set_linearization_point`, `clear_linearization_point`, `is_linearization_point_frozen` |
 | the elimination | `mark_for_elimination` (`mark_as_schur_landmark` is the deprecated spelling) |
@@ -167,12 +156,12 @@ standard deviations; the loss then thresholds the *whitened* residual, so the
 
 </div>
 
-Two asymmetries are worth noticing. The *panicking* and *typed* forms come in
-pairs for the two mutating operations that can fail — registering a block
-and fixing a variable (`fix_variable` / `try_fix_variable`) or bounding it
-(`set_variable_bounds` / `try_set_variable_bounds`) — and the typed forms
-return `CoreResult`. The *non-mutating* accessors are all `Option`-returning
-rather than panicking, because a stale key is an expected condition, not a
+Two asymmetries are worth noticing. The mutating operations that can fail —
+registering a block, fixing a variable, bounding it — return `CoreResult`
+and never panic; `add_variable` stays infallible for parameters known to be
+valid, with `try_add_variable` checking them through the manifold's checked
+constructor. The *non-mutating* accessors are all `Option`-returning rather
+than panicking, because a stale key is an expected condition, not a
 programming error.
 
 ## 7. Solving and inspection

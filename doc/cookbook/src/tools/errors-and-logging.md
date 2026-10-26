@@ -5,84 +5,84 @@ say what it does instead. This chapter is that contract: the error hierarchy,
 the propagation convention, the logging helpers, and the prelude that a
 consumer normally imports.
 
-## 1. The three-layer hierarchy
+## 1. The hierarchy
 
 <div class="apx apx-table">
-<span class="apx-title">The layers</span>
+<span class="apx-title">The errors</span>
 
-| Layer | Kind | Types | Rule |
-|---|---|---|---|
-| **A** — top / API | exposed to end users | `ApexSolverError` | the only type a consumer's `?` should meet |
-| **B** — logic | wraps Layer C with context | `OptimizerError`, `ObserverError` | adds *where* it happened |
-| **C** — deep / math | module-specific | `CoreError`, `LinAlgError`, `ManifoldError`, `FactorError`, `LinearizerError`, `MarginalizationError`, `CovarianceError`, `PreintegrationError` | must **never** return `ApexSolverError` directly |
+| Type | Module | Wraps |
+|---|---|---|
+| `ApexSolverError` | crate root | every module error below, transparently |
+| `CoreError` | `core` | `FactorError`, `ManifoldError`, `LinearizerError` |
+| `FactorError` | `factors` | `CameraModelError`, `ManifoldError`, `PreintegrationError` |
+| `LinearizerError` | `linearizer` | the faer failure behind a pattern copy |
+| `LinAlgError` | `linalg` | the faer failure behind a factorization |
+| `OptimizerError` | `optimizer` | `LinAlgError`, `CoreError`, `LinearizerError` |
+| `MarginalizationError` | `core::marginalization` | `FactorError`, `LinearizerError`, `CoreError` |
+| `CovarianceError` | `linalg::covariance` | `LinAlgError`, `LinearizerError` |
+| `ObserverError` | `observers` | the Rerun error |
+| `PreintegrationError` | `factors::imu` | — |
 
 </div>
 
-The rule that makes the hierarchy work: a deep module returns *its own* error
-type, and the `?` operator plus `#[from]` attributes convert at each layer
-boundary. The example chain the source gives:
+A module returns *its own* error — the optimizers return `OptimizerError`, not
+the root — and `#[from]` converts at each boundary, so `?` is all a caller
+writes. Every enum is `#[non_exhaustive]` and carries structured fields
+(`VariableCount { factor, expected, actual }`), not strings.
+
+A module error that wraps another adds a short context message and keeps the
+original as its `source()`; the root wraps transparently. The chain therefore
+names each hop once:
 
 ```text
-LinAlgError::SingularMatrix
-  → OptimizerError::LinAlg        (via #[from] at Layer B)
-    → ApexSolverError::Optimizer   (via #[from] at Layer A)
+linear solve failed
+  → factorization of the normal equations failed, the matrix is singular or not positive definite
+  → NonPositivePivot { index: 3 }
 ```
 
-`ApexSolverResult<T>` is the alias for `Result<T, ApexSolverError>`.
+`ApexSolverResult<T>` is the alias for `Result<T, ApexSolverError>`; each
+module has its own (`CoreResult`, `FactorResult`, `OptimizerResult`, ...).
 
-## 2. The dual path for `LinAlgError`
+## 2. Reading the chain
 
-`LinAlgError` reaches the top level by two routes, and the crate is explicit
-about which to use:
-
-1. **Direct** — `LinAlgError → ApexSolverError::LinearAlgebra(…)` — for
-   standalone linear-algebra usage, where no optimization context exists;
-2. **Through the optimizer** — `LinAlgError → OptimizerError::LinAlg →
-   ApexSolverError::Optimizer(…)` — during an optimization, where the
-   optimizer's context is worth keeping.
-
-A linear-algebra error that happens *inside* an optimizer should take the
-second path, because the context ("the solve failed in iteration 7 of a
-window solve") is what makes the report useful.
-
-## 3. Reading the chain
-
-`ApexSolverError` implements `std::error::Error`, so the standard chain
-access works:
+`ErrorChainExt` (re-exported from `apex_solver::error`, implemented for every
+`std::error::Error`) renders the chain:
 
 ```rust
-if let Err(e) = solver_optimize() {
-    tracing::warn!("Error: {}", e);
-    tracing::warn!("Full chain: {}", e.chain());
+use apex_solver::ErrorChainExt;
+
+if let Err(e) = solver.optimize(&mut problem) {
+    tracing::warn!("{}", e.chain());         // one line per hop
+    tracing::warn!("{}", e.chain_compact()); // "a → b → c"
 }
 ```
 
-For a single line, `chain_compact()` joins the chain with `" → "`:
+`Display` on its own prints only the outermost message, so report the chain at
+the boundary that gives up.
 
-```text
-Optimizer error → Linear algebra error → Singular matrix
-```
+## 3. Logging once
 
-## 4. `ErrorLogging`
-
-The crate's one ergonomic addition to the error story:
+`ErrorLogging` (also re-exported from `apex_solver::error`) logs an error at
+`error` level with the caller's file and line, and returns it:
 
 ```rust
-pub trait ErrorLogging: Sized + Display {
-    fn log(self) -> Self;                       // tracing::error! then self
-    fn log_with_source(self, source: &dyn Debug) -> Self;
-}
+return Err(CoreError::UnknownVariable { key }.log());
 ```
 
-`log` returns `self`, so it composes with `?`:
+The rule is *log at origin*: the function that detects the failure builds the
+error and calls `.log()` (or `.log_with_source(e)` when a third-party error
+has no `#[from]` edge); every caller above propagates with a bare `?` and does
+not log again. Expected per-residual outcomes — a point that does not project,
+a scan point outside a distance field — are returned unlogged, because the
+caller decides whether they matter.
 
-```rust
-let result = do_something().map_err(|e| e.log())?;
-```
+## 4. Registration never panics
 
-The point is that a failure is *reported at the point it happens*, with its
-context, and the error still propagates — the crate never swallows a failure
-to make a caller's life easier.
+`Problem::add_residual_block`, `add_residual_block_with_noise`,
+`fix_variable` and `set_variable_bounds` return `CoreResult`; there is no
+panicking form. `try_add_variable` validates a parameter vector through the
+manifold's checked constructor; `add_variable` remains for parameters known
+to be valid.
 
 ## 5. The logger
 
@@ -131,7 +131,7 @@ that appear in nearly any graph".
 | the solvers | `GaussNewton`, `LevenbergMarquardt`, `LevenbergMarquardtConfig`, `DogLeg`, `Optimizer` |
 | the linear algebra | `JacobianMode`, `LinearSolverType` |
 | the manifolds (re-exported from `apex-manifolds`) | `LieGroup`, `ManifoldType`, `Tangent`, `SE3`, `SE2`, `SE23`, `SGal3`, `SO2`, `SO3`, `Rn` |
-| the errors | `ApexSolverError`, `ApexSolverResult` |
+| the errors | `ApexSolverError`, `ApexSolverResult` (`ErrorChainExt`, `ErrorLogging` at the crate root) |
 
 The deliberate omissions are as informative as the list. The *other* factor
 families are not in the prelude, because a factor lives under a module named
@@ -170,19 +170,19 @@ A consumer that wants to know *why* a window solve failed:
 
 ```rust
 match optimizer.optimize(&mut problem) {
-    Ok(result) => println!("cost {}", result.final_cost),
+    Ok(result) => tracing::info!("cost {}", result.final_cost),
     Err(e) => {
         tracing::error!("{}", e.chain_compact());
-        // the chain names the layer: "Optimizer error → Linear algebra error
-        // → Singular matrix"
+        // "linear solve failed → factorization of the normal equations
+        //  failed, the matrix is singular or not positive definite → …"
     }
 }
 ```
 
 The chain tells the story in one line: the *optimizer* failed, because the
-*linear algebra* failed, because the *matrix was singular*. The three layers
-are not bureaucracy — they are the difference between "the solve failed" and
-"the factorization of a rank-deficient normal matrix failed".
+*linear algebra* failed, because the *matrix was singular*. The hops are the
+difference between "the solve failed" and "the factorization of a
+rank-deficient normal matrix failed".
 
 ## 9. The catch
 

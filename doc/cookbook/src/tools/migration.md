@@ -135,6 +135,28 @@ what it said, and every removal says what to do instead. The `radius`
 deprecations are the clearest case — LM has no trust region, and a `radius`
 field on an LM configuration is a lie with a default value.
 
+The error-propagation pass then removed the deprecated items that the crate
+itself still had to silence with `#[allow(deprecated)]`: `linalg::utils`,
+`create_jacobi_scaling`, `process_jacobian`, `create_linear_solver`, the
+`enable_visualization` fields and `with_visualization` builders of the
+Gauss-Newton and Dog Leg configs, and `DogLegConfig::min_step_quality`
+(`with_step_quality_thresholds` now takes the poor and good thresholds only).
+
+<div class="apx-table">
+<span class="apx-title">The error-propagation changes</span>
+
+| Change | Migration |
+|---|---|
+| `add_residual_block`, `add_residual_block_with_noise`, `fix_variable`, `set_variable_bounds` return `CoreResult`; the `try_` forms are gone | add `?`; rename `try_add_residual_block*`, `try_fix_variable`, `try_set_variable_bounds` to the plain names |
+| `Factor::validate_variables` returns `FactorResult<()>` | return a `FactorError` (the `expect_*` helpers in `factors::common::validate` build them) |
+| factor constructors return `FactorResult` | match `FactorError`; `?` still converts into `CoreError` and `ApexSolverError` |
+| `Optimizer::optimize` returns `OptimizerError` | `?` into `ApexSolverError` still works; a field typed `ApexSolverError` that is filled from `optimize()` needs `.into()` or an `OptimizerError` field |
+| string variants (`CoreError::Variable(String)`, `InvalidInput(String)`, `LinAlgError::SingularMatrix(String)`, ...) are structured | match the named fields |
+| `OptimizerError::{MaxIterationsReached, LinearSolveFailed, ...}` and `OptimizationStatus::Failed` were never produced and are gone | match `OptimizationStatus::MaxIterationsReached` on the result instead |
+| `ErrorLogging` is `apex_error::ErrorLogging` (bounded on `std::error::Error`); `chain()` / `chain_compact()` come from `ErrorChainExt` | `use apex_solver::{ErrorChainExt, ErrorLogging};` |
+
+</div>
+
 ## 4. A migration checklist
 
 <div class="apx apx-check">

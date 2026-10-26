@@ -1,41 +1,38 @@
-//! Error types for the apex-solver library
+//! Error types of the apex-solver library.
 //!
-//! This module provides the main error and result types used throughout the library.
-//! All errors use the `thiserror` crate for automatic trait implementations.
+//! [`ApexSolverError`] is the root. Each variant transparently wraps the error
+//! of one module, so `?` lifts a module error to the root with no wrapper text
+//! and [`std::error::Error::source`] walks down from there:
 //!
-//! # Error Hierarchy
+//! - `CoreError`: problem construction, registration and variable
+//!   bookkeeping; wraps `FactorError`, `ManifoldError` and `LinearizerError`.
+//! - `FactorError`: factor construction and `Factor::validate_variables`.
+//! - `LinearizerError`: residual and Jacobian assembly, including a
+//!   non-finite residual at a linearization point.
+//! - `LinAlgError`: factorizations and Schur solvers, with the faer failure
+//!   as its source.
+//! - `OptimizerError`: the optimizers; wraps `LinAlgError`, `CoreError` and
+//!   `LinearizerError`.
+//! - `MarginalizationError`, `CovarianceError`, `PreintegrationError`,
+//!   `ObserverError`, plus the dependency roots `ManifoldError`, `IoError` and
+//!   `CameraModelError`.
 //!
-//! The library uses a strict three-layer error hierarchy with bubble-up propagation
-//! using the `?` operator:
-//!
-//! - **Layer A (Top/API)**: `ApexSolverError` — exposed to end-users, wraps all module errors
-//! - **Layer B (Logic)**: `OptimizerError`, `ObserverError` — wrap Layer C errors with context
-//! - **Layer C (Deep/Math)**: `CoreError`, `LinAlgError`, `ManifoldError`, `FactorError` —
-//!   module-specific errors that must **never** return `ApexSolverError` directly
-//!
-//! # Error Propagation Convention
-//!
-//! Deep modules (Layer C) must return their own module-specific error type
-//! (e.g., `Result<T, CoreError>`, not `Result<T, ApexSolverError>`). The `?` operator
-//! and `#[from]` attributes handle automatic conversions at each layer boundary.
-//!
-//! Example error chain (Layer C → B → A):
+//! Modules return their own error, never the root. A module error that wraps
+//! another adds a short context message ("linear solve failed") and keeps the
+//! wrapped one as its source, so [`ErrorChainExt::chain`] prints every hop
+//! exactly once:
 //!
 //! ```text
-//! LinAlgError::SingularMatrix
-//!   → OptimizerError::LinAlg (via #[from] at Layer B)
-//!     → ApexSolverError::Optimizer (via #[from] at Layer A)
+//! linear solve failed
+//!   → factorization of the normal equations failed, the matrix is singular or not positive definite
+//!   → NonPositivePivot { index: 3 }
 //! ```
 //!
-//! # Dual-Path Convention for LinAlgError
-//!
-//! `LinAlgError` can convert to `ApexSolverError` via two paths:
-//! 1. Direct: `LinAlgError → ApexSolverError::LinearAlgebra(...)` — for standalone linalg usage
-//! 2. Through optimizer: `LinAlgError → OptimizerError::LinAlg → ApexSolverError::Optimizer(...)` — during optimization
-//!
-//! When a `LinAlgError` occurs inside the optimizer, it should propagate through the
-//! optimizer layer (path 2) to preserve optimization context. Standalone linalg usage
-//! should use path 1 directly.
+//! Errors are logged once, where they are built, with
+//! [`ErrorLogging::log`]; everything above propagates them with a bare `?`.
+//! Expected per-residual outcomes (a point that does not project, a scan point
+//! outside a distance field) are the exception: they are returned unlogged
+//! and the caller decides.
 
 use crate::{
     core::CoreError, core::marginalization::MarginalizationError, factors::FactorError,

@@ -125,10 +125,7 @@ non-null noise model:
 
 ```rust
 if factor.whitens_internally() && !matches!(noise, NoiseModel::Null) {
-    return Err(CoreError::InvalidInput(
-        "this factor applies its own square-root information; register it with \
-         NoiseModel::null(). Supplying a noise model as well would whiten the \
-         residual twice."));
+    return Err(CoreError::DoubleWhitening.log());
 }
 ```
 

@@ -157,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[k_from, k_to],
             Box::new(BetweenFactor::new(edge.measurement.clone())),
             None,  // Optional: add HuberLoss for robustness
-        );
+        )?;  // registration validates the factor against its variables
     }
 
     // Configure and run optimizer
@@ -372,8 +372,8 @@ self-calibration bundle adjustment.
 ```rust
 use apex_solver::core::loss_functions::HuberLoss;
 
-let loss = HuberLoss::new(1.345);  // 95% efficiency threshold
-problem.add_residual_block(Box::new(factor), Some(Box::new(loss)));
+let loss = HuberLoss::new(1.345)?;  // 95% efficiency threshold
+problem.add_residual_block(&[key], Box::new(factor), Some(Box::new(loss)))?;
 ```
 
 ### Optimization Algorithms
