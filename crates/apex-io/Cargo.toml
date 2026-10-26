@@ -228,7 +228,7 @@ default = ["download", "cli"]
 # CLI parsing for the clap-based bins. Opt-out with `--no-default-features`.
 cli = ["dep:clap"]
 visualization = ["dep:rerun"]
-dds = ["dep:rustdds", "dep:tokio", "dep:futures"]
+dds = ["rosbag", "dep:rustdds", "dep:tokio", "dep:futures"]
 asl-async = ["dep:tokio"]
 # ROS1/ROS2 bag reading & writing (SQLite3 + MCAP, CDR, message catalog).
 # Opt-in: pulls rusqlite (bundled SQLite, compiles C), mcap, zstd, lz4_flex.
