@@ -60,7 +60,7 @@ $$
 $$
 
 **Validity.** If $r_d < \epsilon_g$ the ray is exactly $(0, 0, 1)$. A vanishing
-derivative $|d'(\theta)| < \varepsilon_{\text{machine}}$ raises `NumericalError`.
+derivative $|d'(\theta)| < \varepsilon_{\text{machine}}$ raises `UnprojectionError::SingularJacobian`.
 
 <a id="jacobians"></a>
 ## Point Jacobian

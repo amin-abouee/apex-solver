@@ -5,7 +5,7 @@ Comprehensive camera projection models for bundle adjustment, SLAM, and Structur
 ## What's new in 0.4.0 — validation & domain geometry
 
 - **`KannalaBrandtCamera::unproject` rejects out-of-domain and non-converged rays**
-  (`CameraModelError::NumericalError`) instead of silently clamping, matching the
+  (an `UnprojectionError`) instead of silently clamping, matching the
   validation the f-theta model already performed.
 - **`projection_deficit`** — the signed depth deficit of a camera-frame point outside a
   model's projection domain, with its gradient; per-model domain geometry (z-forward
@@ -232,31 +232,30 @@ family, which uses the Bundler convention (`-Z` forward).
 
 - **Type-Safe Parameter Management**
 - **Unified CameraModel Trait**
-- **Structured Error Handling**: Unified `CameraModelError` enum with typed variants containing actual parameter values (e.g., `FocalLengthNotPositive { fx, fy }`, `PointBehindCamera { z, min_z }`)
+- **Structured Error Handling**: a root `CameraModelError` over per-concern enums with typed variants containing actual parameter values (e.g., `ParamError::FocalLengthNotPositive { fx, fy }`, `ProjectionError::PointBehindCamera { z, min_z }`)
 - **Comprehensive Validation**: Runtime checks for focal length finiteness, principal point validity, and model-specific parameter ranges (UCM α∈[0,1], Double Sphere α∈[0,1], EUCM β>0, etc.)
 - **Zero-cost abstractions**
 
 ## Error Handling
 
-All camera models use a unified `CameraModelError` enum with structured variants that include actual parameter values for debugging:
+`CameraModelError` is the root error. Each variant transparently wraps one
+per-concern enum, so `?` lifts any of them to the root and `source()` walks the
+chain. Every variant carries typed fields, never a `String`:
 
-### Parameter Validation Errors
-- `FocalLengthNotPositive { fx, fy }` - Focal lengths must be > 0
-- `FocalLengthNotFinite { fx, fy }` - Focal lengths must be finite (no NaN/Inf)
-- `PrincipalPointNotFinite { cx, cy }` - Principal point must be finite
-- `DistortionNotFinite { name, value }` - Distortion coefficient must be finite
-- `ParameterOutOfRange { param, value, min, max }` - Parameter outside valid range
+| Enum | Returned by | Variants |
+|---|---|---|
+| `ParamError` | `new`, `try_from_params`, `TryFrom<&[f64]>`, `validate_params` | `FocalLengthNotPositive`, `FocalLengthNotFinite`, `PrincipalPointNotFinite`, `DistortionNotFinite`, `ParameterOutOfRange`, `ParamCount { model, expected, actual }`, `DistortionVariant { model, expected, actual }`, `UnequalFocalLengths`, `PrincipalPointNotZero`, `ThinPrismNotZero` |
+| `ProjectionError` | `project`, `project_batch` (per point) | `PointBehindCamera { z, min_z }`, `PointAtCameraCenter`, `DenominatorTooSmall`, `OutOfDomain { model, z }`, `DistortionFold { radial }` |
+| `UnprojectionError` | `unproject` | `PointOutsideImage { x, y }`, `RadiusOutOfDomain`, `NotConverged { iterations, residual }`, `Diverged { theta }`, `SingularJacobian`, `DenominatorTooSmall`, `NonFinitePixel` |
+| `EstimationError` | `linear_estimation` | `PointCountMismatch`, `TooFewPoints`, `DegenerateFocalLength`, `SvdSolve`, `InvalidEstimate(ParamError)` |
+| `ConversionError` | `convert_camera` | `TooFewRays`, `InvalidInitial(ParamError)`, `InitialCannotProject` |
 
-### Projection Errors
-- `PointBehindCamera { z, min_z }` - Point behind camera (z too small)
-- `PointAtCameraCenter` - Point too close to optical axis
-- `DenominatorTooSmall { denom, threshold }` - Numerical instability in projection
-- `ProjectionOutOfBounds` - Projection outside valid image region
-
-### Other Errors
-- `PointOutsideImage { x, y }` - 2D point outside valid unprojection region
-- `NumericalError { operation, details }` - Numerical computation failure
-- `InvalidParams(String)` - Generic parameter error (fallback)
+Projection and unprojection errors are expected outcomes on the hot path: they
+are `Copy`, never allocate and are not logged. The checked constructors,
+`linear_estimation` and `convert_camera` log their error once with
+`tracing::error!` where they reject the input. `TryFrom<&[f64]>` checks the
+exact length and validates but does not log, since solvers decode intrinsics
+blocks with it on every linearization.
 
 ## Installation
 
@@ -308,12 +307,12 @@ println!("Unprojected ray: ({:.3}, {:.3}, {:.3})", ray.x, ray.y, ray.z);
 ### Parameter Validation
 
 ```rust
-use apex_camera_models::{PinholeParams, CameraModelError};
+use apex_camera_models::{PinholeParams, ParamError};
 
 // Creating pinhole parameters with validation
 match PinholeParams::new(500.0, 500.0, 320.0, 240.0) {
     Ok(params) => println!("Valid parameters: fx={}, fy={}", params.fx, params.fy),
-    Err(CameraModelError::FocalLengthNotPositive { fx, fy }) => {
+    Err(ParamError::FocalLengthNotPositive { fx, fy }) => {
         println!("Invalid focal lengths: fx={}, fy={}", fx, fy)
     }
     Err(e) => println!("Validation error: {}", e),

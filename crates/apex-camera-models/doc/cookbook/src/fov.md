@@ -35,7 +35,7 @@ and the pixel is $u = f_x \, r_d \, x + c_x$, $v = f_y \, r_d \, y + c_y$ (note
 $r_d$ already carries the $1/r$ factor, so it multiplies $x$ and $y$ directly).
 
 **Validity.** The depth must satisfy $z \ge \epsilon_g$, else
-`ProjectionOutOfBounds`. The parameter is constrained to $0 < \omega \le \pi$
+`ProjectionError::OutOfDomain`. The parameter is constrained to $0 < \omega \le \pi$
 (the map degenerates at $\omega = 0$ and saturates beyond $\pi$); the on-axis
 case $r < \epsilon_g$ uses the finite limit above.
 

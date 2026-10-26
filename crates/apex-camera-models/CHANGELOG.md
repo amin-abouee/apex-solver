@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Hierarchical errors**: `CameraModelError` is now a root over `ParamError`, `ProjectionError`,
+  `UnprojectionError`, `EstimationError` and `ConversionError` (all `#[non_exhaustive]`, typed fields, no
+  `String`). `project` returns `ProjectionResult`, `unproject` `UnprojectionResult`, `validate_params`, `new`,
+  `try_from_params` and `TryFrom<&[f64]>` (`Error = ParamError`) a `ParamResult`, `linear_estimation` an
+  `EstimationResult`, `convert_camera` a `ConversionResult`. `NumericalError`, `InvalidParams` and
+  `ProjectionOutOfBounds` are gone (replaced by specific variants).
+- `project_batch` returns one `ProjectionResult` per point instead of a matrix with `(1e6, 1e6)` sentinels.
+- `FThetaCamera::distortion_params` returns a `ParamResult` instead of panicking on a mismatched variant.
+- Constructors, `linear_estimation` and `convert_camera` log their error once (`apex-error`); projection and
+  unprojection errors are not logged.
+
+### Fixed
+- `TryFrom<&[f64]>` rejects slices longer than the model's parameter count and validates the values.
+- `validate_params` rejects a distortion variant that does not match the model; a struct literal with one
+  projects to NaN instead of silently using zero distortion (FOV divided by zero).
+- `convert_camera` keeps the validation error of an invalid initial camera as its source.
+- `FThetaCamera::linear_estimation` checks that the 2D and 3D point counts match instead of indexing past them.
+- A bad f-theta `k1` is reported as `ParameterOutOfRange`, not as a focal-length error.
+- `linear_estimation` no longer leaves the camera modified when the estimate is invalid.
+
 ### Added
 - **`Fisheye62Camera`** (12 params) and **`Fisheye624Camera`** (16 params): Project Aria's fisheye models, the
   latter being LaMAria's `RAD_TAN_THIN_PRISM_FISHEYE`. Six radial terms in the incidence angle, two tangential, and

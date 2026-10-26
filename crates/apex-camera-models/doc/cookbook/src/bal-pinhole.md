@@ -37,7 +37,7 @@ There is no $c_x, c_y$ offset — the principal point sits at the image origin.
 
 **Validity.** The point must be in front of the camera under the BAL convention:
 $z < -\epsilon_g$ (`MIN_DEPTH`); a depth failing this raises
-`ProjectionOutOfBounds`.
+`ProjectionError::OutOfDomain`.
 
 <a id="unprojection"></a>
 ## Inverse Projection
