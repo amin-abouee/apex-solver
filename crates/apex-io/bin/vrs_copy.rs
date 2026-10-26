@@ -1,4 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Console output is this CLI's user interface (progress, summary).
 
 //! Copy, trim or re-compress a VRS file.
@@ -11,6 +10,7 @@
 
 use apex_io::vrs::{Compression, CopyOptions, StreamId, VrsReader, copy_filtered};
 use clap::Parser;
+use std::io::Write as _;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -88,12 +88,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let t0 = std::time::Instant::now();
     let summary = copy_filtered(&mut src, &args.output, &options)?;
-    println!(
+    writeln!(
+        std::io::stdout().lock(),
         "Copied {} records ({:.1} MiB) -> {} in {:.2}s",
         summary.records,
         summary.bytes as f64 / (1024.0 * 1024.0),
         summary.path.display(),
         t0.elapsed().as_secs_f64()
-    );
+    )?;
     Ok(())
 }

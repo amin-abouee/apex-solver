@@ -31,7 +31,9 @@ fn make_ros1_bag(path: &Path) {
         .add_connection(&ros1_conn(
             "/imu",
             "sensor_msgs/Imu",
-            catalog_definition("sensor_msgs/Imu", Dialect::Ros1).unwrap(),
+            catalog_definition("sensor_msgs/Imu", Dialect::Ros1)
+                .unwrap()
+                .unwrap(),
         ))
         .unwrap();
     let string = w

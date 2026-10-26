@@ -8,10 +8,12 @@
 //! byte arrays (images, point clouds) without touching their elements.
 
 mod catalog;
+pub mod error;
 pub mod msgdef;
 mod plan;
 
 pub use catalog::catalog;
+pub use error::{TranscodeError, TranscodeResult};
 pub use msgdef::{Dialect, Registry, dialect_type_name, normalize_type_name};
 pub use plan::Transcoder;
 
@@ -29,20 +31,31 @@ pub struct TopicPlan {
 
 /// Definition text for `message_type` in `dialect` from the built-in catalog,
 /// or `None` for types outside it.
-pub fn catalog_definition(message_type: &str, dialect: Dialect) -> Option<String> {
+///
+/// # Errors
+///
+/// A catalog that does not parse, or a catalog type that does not render.
+pub fn catalog_definition(message_type: &str, dialect: Dialect) -> TranscodeResult<Option<String>> {
     let root = normalize_type_name(message_type);
-    let cat = catalog().ok()?;
+    let cat = catalog()?;
     if !cat.contains(&root) {
-        return None;
+        return Ok(None);
     }
-    cat.render(&root, dialect).ok()
+    cat.render(&root, dialect).map(Some)
 }
 
-/// ROS1 md5sum of a type from the built-in catalog.
-pub fn catalog_md5(message_type: &str) -> Option<String> {
+/// ROS1 md5sum of a type from the built-in catalog, `None` for types outside it.
+///
+/// # Errors
+///
+/// A catalog that does not parse, or a catalog type whose md5 cannot be computed.
+pub fn catalog_md5(message_type: &str) -> TranscodeResult<Option<String>> {
     let root = normalize_type_name(message_type);
-    let cat = catalog().ok()?;
-    cat.contains(&root).then(|| cat.md5(&root).ok()).flatten()
+    let cat = catalog()?;
+    if !cat.contains(&root) {
+        return Ok(None);
+    }
+    cat.md5(&root).map(Some)
 }
 
 /// Payload dialect named by a connection's `serialization_format`.
@@ -56,45 +69,41 @@ pub fn dialect_of(serialization_format: &str) -> Option<Dialect> {
 
 /// Build the conversion of `conn` into dialect `to`.
 ///
-/// `Err` carries the human-readable reason the topic cannot be converted
-/// (callers log it and skip the topic).
-pub fn plan_topic(conn: &Connection, to: Dialect) -> std::result::Result<TopicPlan, String> {
+/// `Err` says why the topic cannot be converted (callers log it and skip
+/// the topic); it is not logged here.
+pub fn plan_topic(conn: &Connection, to: Dialect) -> TranscodeResult<TopicPlan> {
     let from = dialect_of(&conn.serialization_format).ok_or_else(|| {
-        format!(
-            "unsupported payload encoding '{}'",
-            conn.serialization_format
-        )
+        TranscodeError::UnsupportedEncoding {
+            format: conn.serialization_format.clone(),
+        }
     })?;
     let root = normalize_type_name(&conn.message_type);
 
     let mut reg = if conn.message_definition.data.trim().is_empty() {
         Registry::default()
     } else {
-        Registry::parse(&root, &conn.message_definition.data).map_err(|e| e.to_string())?
+        Registry::parse(&root, &conn.message_definition.data)?
     };
     if !reg.contains(&root) || !reg.missing_from(&root).is_empty() {
-        let cat = catalog().map_err(|e| format!("built-in catalog unavailable: {e}"))?;
-        reg.fill_missing_from(cat);
+        reg.fill_missing_from(catalog()?);
     }
     if !reg.contains(&root) {
-        return Err(format!(
-            "no message definition for '{}' (not in the bag, not a standard type)",
-            conn.message_type
-        ));
+        return Err(TranscodeError::NoDefinition {
+            message_type: conn.message_type.clone(),
+        });
     }
     let missing = reg.missing_from(&root);
     if !missing.is_empty() {
-        return Err(format!(
-            "'{}' depends on undefined type(s): {}",
-            conn.message_type,
-            missing.join(", ")
-        ));
+        return Err(TranscodeError::UndefinedDependencies {
+            message_type: conn.message_type.clone(),
+            missing,
+        });
     }
 
-    let transcoder = Transcoder::compile(&reg, &root, from, to).map_err(|e| e.to_string())?;
-    let definition = reg.render(&root, to).map_err(|e| e.to_string())?;
+    let transcoder = Transcoder::compile(&reg, &root, from, to)?;
+    let definition = reg.render(&root, to)?;
     let type_hash = match to {
-        Dialect::Ros1 => reg.md5(&root).map_err(|e| e.to_string())?,
+        Dialect::Ros1 => reg.md5(&root)?,
         Dialect::Ros2 => String::new(),
     };
     Ok(TopicPlan {
@@ -121,8 +130,8 @@ pub struct Unsupported {
     pub topic: String,
     /// Message type as stored in the source bag.
     pub message_type: String,
-    /// Human-readable reason.
-    pub reason: String,
+    /// Why it cannot be converted.
+    pub reason: TranscodeError,
 }
 
 /// Plan every connection in `connections` for dialect `to`.
@@ -143,7 +152,8 @@ pub fn plan_connections(
                 tracing::warn!(
                     topic = %c.topic,
                     message_type = %c.message_type,
-                    "skipping topic: {reason}"
+                    %reason,
+                    "skipping a topic that cannot be converted"
                 );
                 unsupported.push(Unsupported {
                     topic: c.topic.clone(),
@@ -213,7 +223,13 @@ mod tests {
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].0.topic, "/ok");
         assert_eq!(unsupported.len(), 2);
-        assert!(unsupported[0].reason.contains("no message definition"));
-        assert!(unsupported[1].reason.contains("payload encoding"));
+        assert!(matches!(
+            unsupported[0].reason,
+            TranscodeError::NoDefinition { .. }
+        ));
+        assert!(matches!(
+            unsupported[1].reason,
+            TranscodeError::UnsupportedEncoding { .. }
+        ));
     }
 }

@@ -9,7 +9,7 @@
 //! - variable arrays: `u32 length + elements`,
 //! - fixed arrays: elements only.
 
-use crate::rosbag::error::{BagError, Result};
+use super::error::{Ros1Error, Ros1Result as Result};
 
 /// Cursor-based deserializer for the ROS1 wire format.
 pub struct Ros1Deserializer<'a> {
@@ -35,11 +35,11 @@ impl<'a> Ros1Deserializer<'a> {
 
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.remaining() < n {
-            return Err(BagError::invalid_message_data(format!(
-                "ros1: needed {n} bytes at offset {}, have {}",
-                self.pos,
-                self.remaining()
-            )));
+            return Err(Ros1Error::MessageTruncated {
+                position: self.pos,
+                need: n,
+                available: self.remaining(),
+            });
         }
         let s = &self.buf[self.pos..self.pos + n];
         self.pos += n;
@@ -138,7 +138,7 @@ impl<'a> Ros1Deserializer<'a> {
     where
         F: FnMut(&mut Self) -> Result<T>,
     {
-        let mut out = Vec::with_capacity(len);
+        let mut out = Vec::with_capacity(len.min(self.remaining()));
         for _ in 0..len {
             out.push(read_elem(self)?);
         }

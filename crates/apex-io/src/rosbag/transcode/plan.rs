@@ -6,8 +6,8 @@
 //! structs: runs of fixed-size fields and primitive arrays (image and cloud
 //! payloads) are copied as byte slices.
 
+use super::error::{TranscodeError, TranscodeResult as Result};
 use super::msgdef::{ArrayKind, Dialect, FieldType, Registry};
-use crate::rosbag::error::{BagError, Result};
 
 /// Maximum nesting depth while compiling (guards recursive definitions).
 const MAX_DEPTH: usize = 32;
@@ -58,12 +58,13 @@ fn compile_fields(
     depth: usize,
 ) -> Result<Vec<Op>> {
     if depth > MAX_DEPTH {
-        return Err(BagError::schema_validation(format!(
-            "message '{name}' nests deeper than {MAX_DEPTH} levels"
-        )));
+        return Err(TranscodeError::TooDeep {
+            name: name.to_string(),
+            max: MAX_DEPTH,
+        });
     }
-    let def = reg.get(name).ok_or_else(|| {
-        BagError::schema_validation(format!("message type '{name}' is not defined"))
+    let def = reg.get(name).ok_or_else(|| TranscodeError::UndefinedType {
+        name: name.to_string(),
     })?;
     let mut ops = Vec::new();
     for field in &def.fields {
@@ -151,7 +152,11 @@ impl<'a> Input<'a> {
             .pos
             .checked_add(n)
             .filter(|&e| e <= self.buf.len())
-            .ok_or_else(|| BagError::invalid_message_data("message truncated"))?;
+            .ok_or(TranscodeError::Truncated {
+                position: self.pos,
+                need: n,
+                available: self.buf.len().saturating_sub(self.pos),
+            })?;
         let s = &self.buf[self.pos..end];
         self.pos = end;
         Ok(s)
@@ -197,15 +202,14 @@ fn run(ops: &[Op], inp: &mut Input<'_>, out: &mut Output<'_>) -> Result<()> {
             }
             Op::Str => {
                 let len = inp.u32()? as usize;
+                let start = inp.pos;
                 let raw = inp.take(len)?;
                 let text = if inp.aligned {
                     // CDR: length counts the terminating NUL.
                     match raw.split_last() {
                         Some((0, rest)) => rest,
                         Some(_) => {
-                            return Err(BagError::invalid_message_data(
-                                "CDR string missing NUL terminator",
-                            ));
+                            return Err(TranscodeError::MissingNul { position: start });
                         }
                         None => &[][..],
                     }
@@ -247,9 +251,10 @@ fn run(ops: &[Op], inp: &mut Input<'_>, out: &mut Output<'_>) -> Result<()> {
                 }
                 if let Some(size) = scalar {
                     inp.align(*size);
-                    let total = n
-                        .checked_mul(*size)
-                        .ok_or_else(|| BagError::invalid_message_data("array size overflow"))?;
+                    let total = n.checked_mul(*size).ok_or(TranscodeError::ArrayOverflow {
+                        count: n,
+                        size: *size,
+                    })?;
                     let bytes = inp.take(total)?;
                     out.align(*size);
                     out.buf.extend_from_slice(bytes);
@@ -283,12 +288,8 @@ impl Transcoder {
         let origin_in = if in_aligned {
             match input {
                 [_, 1, _, _, ..] => 4,
-                [_, 0, _, _, ..] => {
-                    return Err(BagError::invalid_message_data(
-                        "big-endian CDR payloads are not supported",
-                    ));
-                }
-                _ => return Err(BagError::invalid_message_data("CDR payload too short")),
+                [_, 0, _, _, ..] => return Err(TranscodeError::BigEndian),
+                _ => return Err(TranscodeError::PayloadTooShort { len: input.len() }),
             }
         } else {
             0
@@ -313,9 +314,7 @@ impl Transcoder {
         let trailing = input.len() - inp.pos.min(input.len());
         let allowed = if in_aligned { 3 } else { 0 };
         if trailing > allowed {
-            return Err(BagError::invalid_message_data(format!(
-                "{trailing} unread bytes after message (definition mismatch?)"
-            )));
+            return Err(TranscodeError::TrailingBytes { count: trailing });
         }
         Ok(())
     }

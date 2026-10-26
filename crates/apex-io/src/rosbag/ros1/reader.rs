@@ -5,10 +5,11 @@
 //! filtering, without re-parsing every chunk.  Chunks are decompressed lazily
 //! on demand and only the few most recently used payloads are retained.
 
-use crate::rosbag::error::{BagError, Result};
+use super::error::{Ros1Error, Ros1Result as Result};
 use crate::rosbag::types::{
     Connection, Message, MessageDefinition, MessageDefinitionFormat, RawMessage, TopicInfo,
 };
+use apex_error::ErrorLogging;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -16,9 +17,13 @@ use std::path::PathBuf;
 
 use super::format::{MAGIC, OpCode, Ros1Compression};
 use super::record::{
-    RecordHeader, parse_header, read_record, read_record_prefix, read_record_skip_data,
-    record_data_slice, scan_header_fields,
+    RecordHeader, parse_header, read_bounded, read_record, read_record_prefix,
+    read_record_skip_data, record_data_slice, scan_header_fields,
 };
+
+/// Cap on the capacity reserved up front for an inflated chunk; the header's
+/// size field is untrusted, so a larger chunk grows the buffer as it inflates.
+const MAX_CHUNK_PREALLOC: usize = 1 << 28;
 
 /// One indexed message: which connection, when, where to find it.
 #[derive(Debug, Clone, Copy)]
@@ -81,7 +86,7 @@ impl Ros1Reader {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         if !path.exists() {
-            return Err(BagError::BagNotFound { path });
+            return Err(Ros1Error::BagNotFound { path }.log());
         }
         Ok(Self {
             path,
@@ -102,10 +107,17 @@ impl Ros1Reader {
     /// this costs the same for a 20 GB bag as for a 20 MB one; the
     /// per-message index is built on demand by the read calls.
     pub fn open(&mut self) -> Result<()> {
+        self.open_unlogged().map_err(ErrorLogging::log)
+    }
+
+    fn open_unlogged(&mut self) -> Result<()> {
         if self.is_open {
-            return Err(BagError::BagAlreadyOpen);
+            return Err(Ros1Error::AlreadyOpen);
         }
-        let file = File::open(&self.path)?;
+        let file = File::open(&self.path).map_err(|source| Ros1Error::Open {
+            path: self.path.clone(),
+            source,
+        })?;
         let mut reader = BufReader::with_capacity(READ_BUFFER, file);
 
         // Magic line.
@@ -115,31 +127,32 @@ impl Ros1Reader {
             let found = String::from_utf8_lossy(&magic_buf).to_string();
             // Accept a few format variants by checking only the version part.
             if !magic_buf.starts_with(b"#ROSBAG ") {
-                return Err(BagError::Ros1InvalidMagic { found });
+                return Err(Ros1Error::InvalidMagic { found });
             }
             if &magic_buf[8..] != b"V2.0\n" {
-                return Err(BagError::Ros1UnsupportedVersion {
+                return Err(Ros1Error::UnsupportedVersion {
                     found: found.trim_end().to_string(),
                 });
             }
         }
 
         // Bag header record.
-        let bag_header =
-            read_record(&mut reader)?.ok_or_else(|| BagError::Ros1MalformedRecord {
-                reason: "missing bag header record".into(),
-            })?;
-        if bag_header.header.op()? != OpCode::BagHeader {
-            return Err(BagError::Ros1MalformedRecord {
-                reason: "expected bag header record".into(),
+        let header_pos = MAGIC.len() as u64;
+        let bag_header = read_record(&mut reader)?.ok_or(Ros1Error::MissingRecord {
+            what: "bag header record",
+            position: header_pos,
+        })?;
+        let op = bag_header.header.op()?;
+        if op != OpCode::BagHeader {
+            return Err(Ros1Error::UnexpectedRecord {
+                expected: OpCode::BagHeader,
+                found: op,
+                position: header_pos,
             });
         }
         let index_pos = bag_header.header.get_u64("index_pos")?;
         if index_pos == 0 {
-            return Err(BagError::Ros1IndexCorrupt {
-                reason: "bag header reports index_pos = 0 (writer may not have called close())"
-                    .into(),
-            });
+            return Err(Ros1Error::Unfinished);
         }
         let header_conn_count = bag_header.header.get_u32("conn_count")?;
         let header_chunk_count = bag_header.header.get_u32("chunk_count")?;
@@ -162,19 +175,17 @@ impl Ros1Reader {
         chunks.sort_by_key(|c| c.pos);
 
         if header_chunk_count != 0 && chunks.len() as u32 != header_chunk_count {
-            return Err(BagError::Ros1IndexCorrupt {
-                reason: format!(
-                    "bag header claims {header_chunk_count} chunks but the tail holds {}",
-                    chunks.len()
-                ),
+            return Err(Ros1Error::CountMismatch {
+                what: "chunks",
+                claimed: header_chunk_count,
+                found: chunks.len(),
             });
         }
         if header_conn_count != 0 && connections.len() as u32 != header_conn_count {
-            return Err(BagError::Ros1IndexCorrupt {
-                reason: format!(
-                    "bag header claims {header_conn_count} connections but the tail holds {}",
-                    connections.len()
-                ),
+            return Err(Ros1Error::CountMismatch {
+                what: "connections",
+                claimed: header_conn_count,
+                found: connections.len(),
             });
         }
 
@@ -233,7 +244,7 @@ impl Ros1Reader {
         start_ns: Option<u64>,
         stop_ns: Option<u64>,
     ) -> Result<Vec<IndexEntry>> {
-        let file = self.file.as_mut().ok_or(BagError::BagNotOpen)?;
+        let file = self.file.as_mut().ok_or(Ros1Error::NotOpen)?;
         let mut entries = Vec::new();
         let mut header = Vec::new();
         let mut data = Vec::new();
@@ -251,22 +262,26 @@ impl Ros1Reader {
 
             file.seek(SeekFrom::Start(chunk.pos))?;
             let (chunk_header, _) =
-                read_record_skip_data(file)?.ok_or_else(|| BagError::Ros1IndexCorrupt {
-                    reason: format!("chunk at {} truncated", chunk.pos),
+                read_record_skip_data(file)?.ok_or(Ros1Error::MissingRecord {
+                    what: "chunk record",
+                    position: chunk.pos,
                 })?;
-            if chunk_header.op()? != OpCode::Chunk {
-                return Err(BagError::Ros1IndexCorrupt {
-                    reason: format!("expected chunk record at {}", chunk.pos),
+            let op = chunk_header.op()?;
+            if op != OpCode::Chunk {
+                return Err(Ros1Error::UnexpectedRecord {
+                    expected: OpCode::Chunk,
+                    found: op,
+                    position: chunk.pos,
                 });
             }
 
             // One IndexData record per connection follows the chunk.
             for _ in 0..chunk.counts.len() {
-                let data_len = read_record_prefix(file, &mut header)?.ok_or_else(|| {
-                    BagError::Ros1IndexCorrupt {
-                        reason: format!("index of chunk at {} truncated", chunk.pos),
-                    }
-                })? as usize;
+                let data_len =
+                    read_record_prefix(file, &mut header)?.ok_or(Ros1Error::MissingRecord {
+                        what: "IndexData record",
+                        position: chunk.pos,
+                    })? as usize;
                 let (mut op, mut conn, mut ver, mut count) = (None, None, None, None);
                 scan_header_fields(&header, |k, v| match (k, v.len()) {
                     (b"op", 1) => op = Some(v[0]),
@@ -276,27 +291,28 @@ impl Ros1Reader {
                     _ => {}
                 })?;
                 if op != Some(OpCode::IndexData.as_u8()) {
-                    return Err(BagError::Ros1IndexCorrupt {
-                        reason: format!("expected IndexData after chunk at {}", chunk.pos),
+                    let found = op.ok_or(Ros1Error::missing_field("op")).and_then(|op| {
+                        OpCode::from_u8(op).ok_or(Ros1Error::UnknownOpCode { op })
+                    })?;
+                    return Err(Ros1Error::UnexpectedRecord {
+                        expected: OpCode::IndexData,
+                        found,
+                        position: chunk.pos,
                     });
                 }
                 let (Some(conn), Some(ver), Some(count)) = (conn, ver, count) else {
-                    return Err(BagError::Ros1IndexCorrupt {
-                        reason: "IndexData record missing conn/ver/count".into(),
-                    });
+                    return Err(Ros1Error::IndexDataFields { chunk: chunk.pos });
                 };
                 // The bag 2.0 spec fixes IndexData `ver` at 1.
                 if ver != 1 {
-                    return Err(BagError::Ros1IndexCorrupt {
-                        reason: format!("unsupported IndexData version {ver} (want 1)"),
-                    });
+                    return Err(Ros1Error::IndexDataVersion { version: ver });
                 }
                 let count = count as usize;
                 if count.checked_mul(12).is_none_or(|n| n > data_len) {
-                    return Err(BagError::Ros1IndexCorrupt {
-                        reason: format!(
-                            "IndexData conn={conn} truncated: {count} entries in {data_len} bytes"
-                        ),
+                    return Err(Ros1Error::IndexDataTruncated {
+                        conn,
+                        count,
+                        len: data_len,
                     });
                 }
                 if !wanted.is_none_or(|w| w.contains(&conn)) {
@@ -310,15 +326,12 @@ impl Ros1Reader {
                     .find(|(c, _)| *c == conn)
                     .is_none_or(|(_, n)| *n as usize != count)
                 {
-                    return Err(BagError::Ros1IndexCorrupt {
-                        reason: format!(
-                            "chunk at {} lists a different message count for conn {conn}",
-                            chunk.pos
-                        ),
+                    return Err(Ros1Error::ChunkCountMismatch {
+                        chunk: chunk.pos,
+                        conn,
                     });
                 }
-                data.resize(data_len, 0);
-                file.read_exact(&mut data)?;
+                read_bounded(file, data_len, "IndexData record", &mut data)?;
                 for e in data[..count * 12].as_chunks::<12>().0 {
                     let secs = u64::from(u32::from_le_bytes([e[0], e[1], e[2], e[3]]));
                     let nsecs = u64::from(u32::from_le_bytes([e[4], e[5], e[6], e[7]]));
@@ -420,18 +433,23 @@ impl Ros1Reader {
             .map(|c| (c.id, std::sync::Arc::new(c.clone())))
             .collect();
         let mut out = Vec::new();
-        self.for_each_raw_filtered(connections, start_ns, stop_ns, |conn, ts, data| {
-            let connection = shared
-                .get(&conn.id)
-                .cloned()
-                .unwrap_or_else(|| conn.clone().into());
-            out.push(RawMessage {
-                connection,
-                timestamp: ts,
-                raw_data: data.to_vec(),
-            });
-            Ok(())
-        })?;
+        self.for_each_raw_filtered::<_, Ros1Error>(
+            connections,
+            start_ns,
+            stop_ns,
+            |conn, ts, data| {
+                let connection = shared
+                    .get(&conn.id)
+                    .cloned()
+                    .unwrap_or_else(|| conn.clone().into());
+                out.push(RawMessage {
+                    connection,
+                    timestamp: ts,
+                    raw_data: data.to_vec(),
+                });
+                Ok(())
+            },
+        )?;
         Ok(out)
     }
 
@@ -439,18 +457,22 @@ impl Ros1Reader {
     ///
     /// No per-message allocation or `Connection` clone: `data` points into the
     /// cached decompressed chunk. `start_ns` is inclusive, `stop_ns` exclusive.
-    pub fn for_each_raw_filtered<F>(
+    ///
+    /// The callback may fail with its own error type `E`; the reader's own
+    /// failures reach the caller converted into `E`.
+    pub fn for_each_raw_filtered<F, E>(
         &mut self,
         connections: Option<&[Connection]>,
         start_ns: Option<u64>,
         stop_ns: Option<u64>,
         mut f: F,
-    ) -> Result<()>
+    ) -> std::result::Result<(), E>
     where
-        F: FnMut(&Connection, u64, &[u8]) -> Result<()>,
+        F: FnMut(&Connection, u64, &[u8]) -> std::result::Result<(), E>,
+        E: From<Ros1Error>,
     {
         if !self.is_open {
-            return Err(BagError::BagNotOpen);
+            return Err(Ros1Error::NotOpen.log().into());
         }
         let id_filter: Option<HashSet<u32>> =
             connections.map(|cs| cs.iter().map(|c| c.id).collect());
@@ -463,28 +485,22 @@ impl Ros1Reader {
 
         // Index only what this query needs (topics, time window); entries
         // come back time-sorted and already window-filtered.
-        let entries = self.build_index(id_filter.as_ref(), start_ns, stop_ns)?;
+        let entries = self
+            .build_index(id_filter.as_ref(), start_ns, stop_ns)
+            .map_err(ErrorLogging::log)?;
 
         // Move the cache out so the closure can borrow `self.connections`.
         let mut cache = std::mem::take(&mut self.chunk_cache);
-        let result = (|| -> Result<()> {
+        let result = (|| -> std::result::Result<(), E> {
             for e in &entries {
                 let ci = *conn_index
                     .get(&e.conn_id)
-                    .ok_or_else(|| BagError::Ros1IndexCorrupt {
-                        reason: format!("index references unknown conn id {}", e.conn_id),
-                    })?;
-                let chunk = Self::cached_chunk(&mut cache, &mut self.file, e.chunk_pos)?;
-                let tail =
-                    chunk
-                        .get(e.offset as usize..)
-                        .ok_or_else(|| BagError::Ros1IndexCorrupt {
-                            reason: format!(
-                                "message offset {} out of bounds in chunk at {}",
-                                e.offset, e.chunk_pos
-                            ),
-                        })?;
-                f(&self.connections[ci], e.time_ns, record_data_slice(tail)?)?;
+                    .ok_or_else(|| Ros1Error::UnknownConnection { conn: e.conn_id }.log())?;
+                let payload = Self::cached_chunk(&mut cache, &mut self.file, e.chunk_pos)
+                    .and_then(|chunk| message_payload(chunk, e))
+                    .map_err(ErrorLogging::log)?;
+                // The callback's own errors are the caller's to log.
+                f(&self.connections[ci], e.time_ns, payload)?;
             }
             Ok(())
         })();
@@ -526,11 +542,13 @@ impl Ros1Reader {
         stop_ns: Option<u64>,
     ) -> Result<Ros1MessageIter<'_>> {
         if !self.is_open {
-            return Err(BagError::BagNotOpen);
+            return Err(Ros1Error::NotOpen.log());
         }
         let id_filter: Option<HashSet<u32>> =
             connections.map(|cs| cs.iter().map(|c| c.id).collect());
-        let entries = self.build_index(id_filter.as_ref(), start_ns, stop_ns)?;
+        let entries = self
+            .build_index(id_filter.as_ref(), start_ns, stop_ns)
+            .map_err(ErrorLogging::log)?;
         Ok(Ros1MessageIter {
             reader: self,
             entries,
@@ -539,55 +557,65 @@ impl Ros1Reader {
     }
 
     fn inflate_chunk_at(file: &mut Option<BufReader<File>>, chunk_pos: u64) -> Result<Vec<u8>> {
-        let file = file.as_mut().ok_or(BagError::BagNotOpen)?;
+        let file = file.as_mut().ok_or(Ros1Error::NotOpen)?;
         file.seek(SeekFrom::Start(chunk_pos))?;
-        let rec = read_record(file)?.ok_or_else(|| BagError::Ros1IndexCorrupt {
-            reason: format!("chunk at {chunk_pos} missing"),
+        let rec = read_record(file)?.ok_or(Ros1Error::MissingRecord {
+            what: "chunk record",
+            position: chunk_pos,
         })?;
-        if rec.header.op()? != OpCode::Chunk {
-            return Err(BagError::Ros1IndexCorrupt {
-                reason: format!("expected chunk record at {chunk_pos}"),
+        let op = rec.header.op()?;
+        if op != OpCode::Chunk {
+            return Err(Ros1Error::UnexpectedRecord {
+                expected: OpCode::Chunk,
+                found: op,
+                position: chunk_pos,
             });
         }
         let compression_str = rec.header.get_str("compression")?;
         let compression = Ros1Compression::parse(compression_str).ok_or_else(|| {
-            BagError::UnsupportedCompressionFormat {
+            Ros1Error::UnsupportedCompression {
                 format: compression_str.to_string(),
             }
         })?;
         let uncompressed_size = rec.header.get_u32("size")? as usize;
+        let prealloc = uncompressed_size.min(MAX_CHUNK_PREALLOC);
 
         let inflated = match compression {
             Ros1Compression::None => rec.data,
             Ros1Compression::Bz2 => {
-                let mut out = Vec::with_capacity(uncompressed_size);
+                let mut out = Vec::with_capacity(prealloc);
                 let mut dec = bzip2::read::BzDecoder::new(&rec.data[..]);
-                dec.read_to_end(&mut out)?;
+                dec.read_to_end(&mut out)
+                    .map_err(|source| Ros1Error::Decompress {
+                        codec: "bz2",
+                        source,
+                    })?;
                 out
             }
             Ros1Compression::Lz4 => {
                 const LZ4_FRAME_MAGIC: [u8; 4] = [0x04, 0x22, 0x4D, 0x18];
                 if rec.data.starts_with(&LZ4_FRAME_MAGIC) {
                     // What `rosbag`/roslz4 write: an LZ4 frame stream.
-                    let mut out = Vec::with_capacity(uncompressed_size);
+                    let mut out = Vec::with_capacity(prealloc);
                     lz4_flex::frame::FrameDecoder::new(&rec.data[..])
                         .read_to_end(&mut out)
-                        .map_err(|e| BagError::compression(format!("lz4 frame decode: {e}")))?;
+                        .map_err(|source| Ros1Error::Decompress {
+                            codec: "lz4",
+                            source,
+                        })?;
                     out
                 } else {
                     // Bags written by earlier versions of this crate used a
                     // size-prefixed raw block.
                     lz4_flex::block::decompress_size_prepended(&rec.data)
-                        .map_err(|e| BagError::compression(format!("lz4 decode: {e}")))?
+                        .map_err(Ros1Error::Lz4Block)?
                 }
             }
         };
         if inflated.len() != uncompressed_size {
-            return Err(BagError::Ros1IndexCorrupt {
-                reason: format!(
-                    "chunk uncompressed size mismatch: expected {uncompressed_size}, got {}",
-                    inflated.len()
-                ),
+            return Err(Ros1Error::ChunkSize {
+                expected: uncompressed_size,
+                actual: inflated.len(),
             });
         }
         Ok(inflated)
@@ -632,39 +660,43 @@ impl Ros1MessageIter<'_> {
             return Ok(None);
         };
         self.pos += 1;
-        let chunk = Ros1Reader::cached_chunk(
+        let payload = Ros1Reader::cached_chunk(
             &mut self.reader.chunk_cache,
             &mut self.reader.file,
             e.chunk_pos,
-        )?;
-        let tail = chunk
-            .get(e.offset as usize..)
-            .ok_or_else(|| BagError::Ros1IndexCorrupt {
-                reason: format!(
-                    "message offset {} out of bounds in chunk at {}",
-                    e.offset, e.chunk_pos
-                ),
-            })?;
+        )
+        .and_then(|chunk| message_payload(chunk, &e))
+        .map_err(ErrorLogging::log)?;
         buf.clear();
-        buf.extend_from_slice(record_data_slice(tail)?);
+        buf.extend_from_slice(payload);
         Ok(Some((e.conn_id, e.time_ns)))
     }
 }
 
 impl Drop for Ros1Reader {
     fn drop(&mut self) {
+        // `close` only releases memory and cannot fail.
         let _ = self.close();
     }
+}
+
+/// The payload of the message record the index entry `e` points at.
+fn message_payload<'c>(chunk: &'c [u8], e: &IndexEntry) -> Result<&'c [u8]> {
+    let tail = chunk
+        .get(e.offset as usize..)
+        .ok_or(Ros1Error::OffsetOutOfChunk {
+            offset: e.offset,
+            chunk: e.chunk_pos,
+        })?;
+    record_data_slice(tail)
 }
 
 fn parse_chunk_info(header: &RecordHeader, data: &[u8]) -> Result<ChunkMeta> {
     let count = header.get_u32("count")? as usize;
     if count.checked_mul(8).is_none_or(|n| data.len() < n) {
-        return Err(BagError::Ros1IndexCorrupt {
-            reason: format!(
-                "ChunkInfo truncated: {count} entries in {} bytes",
-                data.len()
-            ),
+        return Err(Ros1Error::ChunkInfoTruncated {
+            count,
+            len: data.len(),
         });
     }
     let counts = data[..count * 8]
@@ -693,10 +725,15 @@ fn parse_connection_record(header: &RecordHeader, data: &[u8]) -> Result<Connect
     let sub = parse_header(data)?;
     let msg_type = sub.get_str("type")?.to_string();
     let md5sum = sub.get_str("md5sum")?.to_string();
-    let message_definition = sub
-        .get("message_definition")
-        .map(|b| String::from_utf8_lossy(b).to_string())
-        .unwrap_or_default();
+    // Some writers omit the definition; the connection then reports
+    // `MessageDefinitionFormat::None`, so consumers can tell it is absent.
+    let message_definition = match sub.get("message_definition") {
+        Some(bytes) => String::from_utf8_lossy(bytes).to_string(),
+        None => {
+            tracing::debug!(topic = %topic, conn = id, "ROS1 connection has no message definition");
+            String::new()
+        }
+    };
 
     Ok(Connection {
         id,
@@ -777,7 +814,7 @@ mod tests {
     #[test]
     fn open_missing_file_errors() {
         let r = Ros1Reader::new("/nonexistent/path.bag");
-        assert!(matches!(r, Err(BagError::BagNotFound { .. })));
+        assert!(matches!(r, Err(Ros1Error::BagNotFound { .. })));
     }
 
     #[test]
@@ -802,7 +839,7 @@ mod tests {
         std::fs::write(&path, b"dummy").unwrap();
         let mut r = Ros1Reader::new(&path)?;
         let result = r.raw_messages_filtered(None, None, None);
-        assert!(matches!(result, Err(BagError::BagNotOpen)));
+        assert!(matches!(result, Err(Ros1Error::NotOpen)));
         Ok(())
     }
 
@@ -813,7 +850,7 @@ mod tests {
         std::fs::write(&path, b"dummy").unwrap();
         let mut r = Ros1Reader::new(&path)?;
         let result = r.messages_filtered(None, None, None);
-        assert!(matches!(result, Err(BagError::BagNotOpen)));
+        assert!(matches!(result, Err(Ros1Error::NotOpen)));
         Ok(())
     }
 }

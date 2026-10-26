@@ -25,6 +25,7 @@ use super::types::{
     CompressionFormat, CompressionMode, Connection, MessageDefinition, MessageDefinitionFormat,
     QosProfile, StoragePlugin,
 };
+use apex_error::ErrorLogging;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -87,14 +88,24 @@ impl BagKind {
 
 /// Identify an existing bag by looking at the file magic / directory layout.
 pub fn detect_kind(path: &Path) -> Result<BagKind> {
+    detect_kind_unlogged(path).map_err(ErrorLogging::log)
+}
+
+fn detect_kind_unlogged(path: &Path) -> Result<BagKind> {
     if !path.exists() {
         return Err(BagError::BagNotFound {
             path: path.to_path_buf(),
         });
     }
+    let read_error = |source| BagError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
     if path.is_file() {
         let mut magic = [0u8; 13];
-        let n = std::fs::File::open(path)?.read(&mut magic)?;
+        let n = std::fs::File::open(path)
+            .and_then(|mut file| file.read(&mut magic))
+            .map_err(read_error)?;
         if magic[..n].starts_with(ROS1_MAGIC) {
             return Ok(BagKind::Ros1Bag);
         }
@@ -104,8 +115,8 @@ pub fn detect_kind(path: &Path) -> Result<BagKind> {
         if magic[..n].starts_with(VRS_MAGIC) {
             return Ok(BagKind::Vrs);
         }
-        return Err(BagError::UnsupportedStorageFormat {
-            format: format!("'{}' is not a ROS1 bag, MCAP or VRS file", path.display()),
+        return Err(BagError::NotABag {
+            path: path.to_path_buf(),
         });
     }
     let metadata = path.join("metadata.yaml");
@@ -119,22 +130,29 @@ pub fn detect_kind(path: &Path) -> Result<BagKind> {
             }),
         };
     }
-    let has_ext = |ext: &str| {
-        std::fs::read_dir(path)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|e| e.path().extension().is_some_and(|x| x == ext))
-    };
+    // A directory that cannot be listed is an error, not "no bag here".
+    let mut extensions = Vec::new();
+    for entry in std::fs::read_dir(path).map_err(read_error)? {
+        let entry = entry.map_err(read_error)?;
+        if let Some(ext) = entry.path().extension() {
+            extensions.push(ext.to_os_string());
+        }
+    }
+    let has_ext = |ext: &str| extensions.iter().any(|x| x == ext);
     if has_ext("db3") {
         Ok(BagKind::Ros2Sqlite)
     } else if has_ext("mcap") {
         Ok(BagKind::Ros2Mcap)
     } else {
-        Err(BagError::UnsupportedStorageFormat {
-            format: format!("'{}' contains no bag", path.display()),
+        Err(BagError::NoBagInDirectory {
+            path: path.to_path_buf(),
         })
     }
+}
+
+/// The id of the connection after `count` existing ones.
+fn next_connection_id(count: usize) -> Result<u32> {
+    u32::try_from(count + 1).map_err(|_| BagError::TooManyConnections { count }.log())
 }
 
 /// Which messages to read.
@@ -234,7 +252,7 @@ pub struct BagMessage {
 
 enum IterImpl<'a> {
     Ros1(Ros1MessageIter<'a>),
-    Ros2(Box<dyn Iterator<Item = Result<super::types::RawMessage>> + 'a>),
+    Ros2(Box<dyn Iterator<Item = super::ros2::Ros2BagResult<super::types::RawMessage>> + 'a>),
     #[cfg(feature = "vrs")]
     Vrs {
         reader: &'a mut super::vrs_bag::VrsBagReader,
@@ -285,7 +303,7 @@ impl BagIterator<'_> {
     pub fn next_into(&mut self, buf: &mut Vec<u8>) -> Result<Option<(u32, u64)>> {
         match &mut self.inner {
             IterImpl::Empty => Ok(None),
-            IterImpl::Ros1(it) => it.next_into(buf),
+            IterImpl::Ros1(it) => Ok(it.next_into(buf)?),
             IterImpl::Ros2(it) => match it.next() {
                 Some(msg) => {
                     let msg = msg?;
@@ -372,9 +390,7 @@ impl BagReader {
                 }
                 #[cfg(not(feature = "vrs"))]
                 {
-                    Err(BagError::UnsupportedStorageFormat {
-                        format: "VRS (rebuild apex-io with the `vrs` feature)".into(),
-                    })
+                    Err(BagError::VrsDisabled.log())
                 }
             }
             _ => {
@@ -501,9 +517,12 @@ impl BagReader {
             return Ok(());
         }
         match &mut self.inner {
-            ReaderImpl::Ros1(r) => {
-                r.for_each_raw_filtered(Some(connections), selection.start_ns, selection.end_ns, f)
-            }
+            ReaderImpl::Ros1(r) => r.for_each_raw_filtered::<_, BagError>(
+                Some(connections),
+                selection.start_ns,
+                selection.end_ns,
+                f,
+            ),
             ReaderImpl::Ros2(r) => {
                 for msg in r.raw_messages_filtered(
                     Some(connections),
@@ -607,8 +626,13 @@ impl BagWriter {
         compression: OutputCompression,
     ) -> Result<Self> {
         let path: PathBuf = path.as_ref().to_path_buf();
-        let unsupported =
-            |what: &str| BagError::writer(format!("{} does not support {what}", kind.name()));
+        let unsupported = |what: &'static str| {
+            BagError::Unsupported {
+                container: kind.name(),
+                what,
+            }
+            .log()
+        };
         let inner = match kind {
             BagKind::Ros1Bag => {
                 let mut w = Ros1Writer::new(&path)?;
@@ -651,14 +675,12 @@ impl BagWriter {
                 }
                 #[cfg(not(feature = "vrs"))]
                 {
-                    return Err(BagError::UnsupportedStorageFormat {
-                        format: "VRS (rebuild apex-io with the `vrs` feature)".into(),
-                    });
+                    return Err(BagError::VrsDisabled.log());
                 }
             }
             BagKind::McapFile => {
                 if path.exists() {
-                    return Err(BagError::BagAlreadyExists { path });
+                    return Err(BagError::BagAlreadyExists { path }.log());
                 }
                 let mode = match compression {
                     OutputCompression::None => CompressionMode::None,
@@ -694,7 +716,9 @@ impl BagWriter {
             } else {
                 super::transcode::Dialect::Ros2
             };
-            if let Some(text) = super::transcode::catalog_definition(&new.message_type, dialect) {
+            if let Some(text) = super::transcode::catalog_definition(&new.message_type, dialect)
+                .map_err(|e| BagError::from(e).log())?
+            {
                 new.to_mut().definition = text;
             }
         }
@@ -725,8 +749,7 @@ impl BagWriter {
             )?,
             WriterImpl::McapFile(w) => {
                 let connection = Connection {
-                    id: u32::try_from(self.connections.len() + 1)
-                        .map_err(|_| BagError::writer("too many connections"))?,
+                    id: next_connection_id(self.connections.len())?,
                     topic: new.topic.clone(),
                     message_type: new.message_type.clone(),
                     message_definition: definition,
@@ -749,8 +772,7 @@ impl BagWriter {
                     &new.type_hash,
                 )?;
                 Connection {
-                    id: u32::try_from(self.connections.len() + 1)
-                        .map_err(|_| BagError::writer("too many connections"))?,
+                    id: next_connection_id(self.connections.len())?,
                     topic: new.topic.clone(),
                     message_type: new.message_type.clone(),
                     message_definition: definition,
@@ -775,14 +797,15 @@ impl BagWriter {
         let connection = self
             .connections
             .get(handle.0)
-            .ok_or_else(|| BagError::connection_not_found(format!("handle {}", handle.0)))?;
+            .ok_or_else(|| BagError::UnknownHandle { handle: handle.0 }.log())?;
         match &mut self.inner {
-            WriterImpl::Ros1(w) => w.write(connection, timestamp_ns, data),
-            WriterImpl::Ros2(w) => w.write_raw_message(connection, timestamp_ns, data),
-            WriterImpl::McapFile(w) => w.write(connection, timestamp_ns, data),
+            WriterImpl::Ros1(w) => w.write(connection, timestamp_ns, data)?,
+            WriterImpl::Ros2(w) => w.write_raw_message(connection, timestamp_ns, data)?,
+            WriterImpl::McapFile(w) => w.write(connection, timestamp_ns, data)?,
             #[cfg(feature = "vrs")]
-            WriterImpl::Vrs(w) => w.write(handle.0, timestamp_ns, data),
+            WriterImpl::Vrs(w) => w.write(handle.0, timestamp_ns, data)?,
         }
+        Ok(())
     }
 
     /// Finish the bag (index/summary/metadata). Idempotent.
@@ -792,12 +815,13 @@ impl BagWriter {
         }
         self.closed = true;
         match &mut self.inner {
-            WriterImpl::Ros1(w) => w.close(),
-            WriterImpl::Ros2(w) => w.close(),
-            WriterImpl::McapFile(w) => w.close(0, ""),
+            WriterImpl::Ros1(w) => w.close()?,
+            WriterImpl::Ros2(w) => w.close()?,
+            WriterImpl::McapFile(w) => w.close(0, "")?,
             #[cfg(feature = "vrs")]
-            WriterImpl::Vrs(w) => w.finish(),
+            WriterImpl::Vrs(w) => w.finish()?,
         }
+        Ok(())
     }
 }
 

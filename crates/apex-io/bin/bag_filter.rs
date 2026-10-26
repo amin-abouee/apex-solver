@@ -1,4 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Console output is this CLI's user interface (topic lists, progress).
 
 //! Copy a bag, keeping only selected topics and/or a time window.
@@ -17,6 +16,7 @@
 //! epoch; `--start-offset`/`--end-offset` take seconds relative to the first
 //! message instead.
 
+use std::io::Write as _;
 mod common;
 
 use apex_io::rosbag::{BagKind, BagReader, BagWriter, NewConnection, Selection};
@@ -81,20 +81,22 @@ fn main() -> CliResult<()> {
         BagReader::open(&args.input).map_err(|e| format!("cannot open input bag: {e}"))?;
 
     if args.list_topics {
-        println!(
+        writeln!(
+            std::io::stdout().lock(),
             "Topics in {} ({}):",
             args.input.display(),
             reader.kind().name()
-        );
+        )?;
         for (i, c) in reader.connections().iter().enumerate() {
-            println!(
+            writeln!(
+                std::io::stdout().lock(),
                 "  {}: {} ({}, {}, {} msgs)",
                 i + 1,
                 c.topic,
                 c.message_type,
                 c.serialization_format,
                 c.message_count
-            );
+            )?;
         }
         return Ok(());
     }
@@ -124,11 +126,17 @@ fn main() -> CliResult<()> {
     for topic in &selection.include {
         if !reader.connections().iter().any(|c| &c.topic == topic) {
             tracing::warn!(topic = %topic, "requested topic not found in input bag");
-            eprintln!("WARN: requested topic '{topic}' not found in input bag");
+            writeln!(
+                std::io::stderr().lock(),
+                "WARN: requested topic '{topic}' not found in input bag"
+            )?;
         }
     }
     if selected.is_empty() {
-        eprintln!("No topics match the filter criteria");
+        writeln!(
+            std::io::stderr().lock(),
+            "No topics match the filter criteria"
+        )?;
         return Ok(());
     }
 
@@ -157,7 +165,12 @@ fn main() -> CliResult<()> {
     let mut handles = std::collections::HashMap::new();
     for c in &selected {
         if args.verbose {
-            println!("  {} ({})", c.topic, c.message_type);
+            writeln!(
+                std::io::stdout().lock(),
+                "  {} ({})",
+                c.topic,
+                c.message_type
+            )?;
         }
         handles.insert(
             c.id,
@@ -168,9 +181,12 @@ fn main() -> CliResult<()> {
     let t0 = std::time::Instant::now();
     let (mut messages, mut bytes) = (0u64, 0u64);
     reader.for_each(&selected, &selection, |c, ts, data| {
-        let handle = handles
-            .get(&c.id)
-            .ok_or_else(|| apex_io::rosbag::BagError::connection_not_found(&c.topic))?;
+        let handle =
+            handles
+                .get(&c.id)
+                .ok_or_else(|| apex_io::rosbag::BagError::ConnectionNotFound {
+                    topic: c.topic.clone(),
+                })?;
         writer.write(*handle, ts, data)?;
         messages += 1;
         bytes += data.len() as u64;
@@ -178,10 +194,11 @@ fn main() -> CliResult<()> {
     })?;
     writer.close()?;
 
-    println!(
+    writeln!(
+        std::io::stdout().lock(),
         "Copied {} -> {}",
         throughput(messages, bytes, t0.elapsed()),
         output.display()
-    );
+    )?;
     Ok(())
 }

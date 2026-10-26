@@ -164,7 +164,10 @@ pub fn write_bag(scenario: &Scenario, kind: BagKind, path: &Path) {
                 } else {
                     ros2_type(t.ros1_type)
                 },
-                definition: catalog_definition(t.ros1_type, dialect).unwrap_or_default(),
+                definition: catalog_definition(t.ros1_type, dialect)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
                 type_hash: String::new(),
                 serialization_format: fmt.to_string(),
                 qos: Vec::new(),

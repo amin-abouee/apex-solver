@@ -146,7 +146,10 @@ pub use ros2::metadata;
 pub use ros2::storage;
 
 // Re-export main types for convenience
-pub use error::{BagError, ReaderError, Result, WriterResult};
+pub use error::{
+    BagError, BagResult, CdrError, CdrErrorKind, McapError, PointCloudError, ReaderError, Result,
+    Ros1Error, Ros2BagError, TranscodeError, WriterResult,
+};
 pub use ros2::metadata::{BagMetadata, TopicMetadata};
 pub use ros2::reader::Reader;
 pub use ros2::writer::Writer;
@@ -189,5 +192,5 @@ pub use ros1::{Ros1Compression, Ros1Reader, Ros1Writer};
 pub fn read_bag_metadata_fast<P: AsRef<std::path::Path>>(bag_path: P) -> Result<BagMetadata> {
     let bag_path = bag_path.as_ref();
     let metadata_path = bag_path.join("metadata.yaml");
-    BagMetadata::from_file(metadata_path)
+    Ok(BagMetadata::from_file(metadata_path)?)
 }

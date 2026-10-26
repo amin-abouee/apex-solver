@@ -1,4 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Console output is this CLI's user interface (progress report).
 
 //! Write a dummy ROS2 bag file with all supported message types
@@ -21,6 +20,7 @@ use apex_io::rosbag::types::{
 };
 use apex_io::rosbag::{CompressionFormat, CompressionMode, StoragePlugin, Writer};
 use std::env;
+use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
@@ -39,9 +39,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
     let enable_compression = args.contains(&"--compression".to_string());
 
-    println!("Creating dummy ROS2 bag file at: {output_path}");
+    writeln!(
+        std::io::stdout().lock(),
+        "Creating dummy ROS2 bag file at: {output_path}"
+    )?;
     if enable_compression {
-        println!("Compression: ENABLED (zstd)");
+        writeln!(std::io::stdout().lock(), "Compression: ENABLED (zstd)")?;
     }
 
     let mut writer = Writer::new(&output_path, Some(9), Some(StoragePlugin::Sqlite3))?;
@@ -59,11 +62,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writer.open()?;
 
     let message_types = get_all_message_types();
-    println!("Adding {} message types...", message_types.len());
+    writeln!(
+        std::io::stdout().lock(),
+        "Adding {} message types...",
+        message_types.len()
+    )?;
 
     let mut connections = Vec::new();
     for msg_info in &message_types {
-        println!("  Adding: {} -> {}", msg_info.topic, msg_info.message_type);
+        writeln!(
+            std::io::stdout().lock(),
+            "  Adding: {} -> {}",
+            msg_info.topic,
+            msg_info.message_type
+        )?;
         match writer.add_connection(
             msg_info.topic.clone(),
             msg_info.message_type.clone(),
@@ -74,13 +86,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ) {
             Ok(connection) => connections.push((connection, msg_info.description.clone())),
             Err(e) => {
-                eprintln!("Warning: Failed to add {}: {}", msg_info.topic, e);
+                writeln!(
+                    std::io::stderr().lock(),
+                    "Warning: Failed to add {}: {}",
+                    msg_info.topic,
+                    e
+                )?;
             }
         }
     }
 
-    println!("Successfully added {} connections", connections.len());
-    println!("Writing sample messages...");
+    writeln!(
+        std::io::stdout().lock(),
+        "Successfully added {} connections",
+        connections.len()
+    )?;
+    writeln!(std::io::stdout().lock(), "Writing sample messages...")?;
 
     let start_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
 
@@ -88,27 +109,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let timestamp = start_time + (i as u64 * 100_000_000);
         let message_data = create_sample_message_data(&connection.message_type);
         match writer.write(connection, timestamp, &message_data) {
-            Ok(()) => println!("  OK {}: {}", connection.topic, description),
-            Err(e) => eprintln!("  FAIL {}: {}", connection.topic, e),
+            Ok(()) => writeln!(
+                std::io::stdout().lock(),
+                "  OK {}: {}",
+                connection.topic,
+                description
+            )?,
+            Err(e) => writeln!(
+                std::io::stderr().lock(),
+                "  FAIL {}: {}",
+                connection.topic,
+                e
+            )?,
         }
     }
 
     writer.close()?;
 
-    println!(
+    writeln!(
+        std::io::stdout().lock(),
         "Successfully created dummy bag with {} topics!",
         connections.len()
-    );
-    println!("Bag location: {output_path}");
+    )?;
+    writeln!(std::io::stdout().lock(), "Bag location: {output_path}")?;
 
     if std::fs::read_to_string(format!("{output_path}/metadata.yaml")).is_ok() {
-        println!("\nBag Information:");
-        println!("   Storage: SQLite3");
+        writeln!(std::io::stdout().lock(), "\nBag Information:")?;
+        writeln!(std::io::stdout().lock(), "   Storage: SQLite3")?;
         if enable_compression {
-            println!("   Compression: zstd (message-level)");
+            writeln!(
+                std::io::stdout().lock(),
+                "   Compression: zstd (message-level)"
+            )?;
         }
-        println!("   Message count: {}", connections.len());
-        println!("   Topics: {}", connections.len());
+        writeln!(
+            std::io::stdout().lock(),
+            "   Message count: {}",
+            connections.len()
+        )?;
+        writeln!(std::io::stdout().lock(), "   Topics: {}", connections.len())?;
     }
 
     Ok(())

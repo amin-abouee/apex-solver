@@ -167,6 +167,8 @@ fn write_bag_zstd(scenario: &helpers::Scenario, path: &Path) {
                     t.ros1_type,
                     Dialect::Ros2,
                 )
+                .ok()
+                .flatten()
                 .unwrap_or_default(),
                 type_hash: String::new(),
                 serialization_format: "cdr".to_string(),

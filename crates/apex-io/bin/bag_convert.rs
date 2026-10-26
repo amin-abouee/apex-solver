@@ -1,4 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Console output is this CLI's user interface (progress, summaries).
 
 //! Convert bags between ROS1 and ROS2 payload encodings and containers.
@@ -19,6 +18,7 @@
 //!                [--encoding ros1|cdr] [--compression none|zstd|lz4|bz2]
 //!                [--topics a,b] [--exclude c] [--start NS] [--end NS] [--strict]`
 
+use std::io::Write as _;
 mod common;
 
 use apex_io::rosbag::transcode::{Dialect, Transcoder, dialect_of, plan_connections};
@@ -143,11 +143,12 @@ fn main() -> CliResult<()> {
         } else {
             Dialect::Ros1
         };
-        println!(
+        writeln!(
+            std::io::stdout().lock(),
             "Topics in {} ({}):",
             args.input.display(),
             reader.kind().name()
-        );
+        )?;
         for c in reader.connections() {
             let status = match apex_io::rosbag::transcode::plan_topic(c, to) {
                 Ok(_) => "convertible".to_string(),
@@ -157,10 +158,14 @@ fn main() -> CliResult<()> {
                 }
                 Err(reason) => format!("UNSUPPORTED: {reason}"),
             };
-            println!(
+            writeln!(
+                std::io::stdout().lock(),
                 "  {} ({}, {}, {} msgs): {status}",
-                c.topic, c.message_type, c.serialization_format, c.message_count
-            );
+                c.topic,
+                c.message_type,
+                c.serialization_format,
+                c.message_count
+            )?;
         }
         return Ok(());
     }
@@ -215,7 +220,9 @@ fn main() -> CliResult<()> {
     reader.for_each(&readable, &selection, |c, ts, data| {
         let action = actions
             .get(&c.id)
-            .ok_or_else(|| BagError::connection_not_found(&c.topic))?;
+            .ok_or_else(|| BagError::ConnectionNotFound {
+                topic: c.topic.clone(),
+            })?;
         match action {
             Action::Copy(h) => {
                 writer.write(*h, ts, data)?;
@@ -250,10 +257,11 @@ fn main() -> CliResult<()> {
         let mut topics: Vec<_> = per_topic.into_iter().collect();
         topics.sort();
         for (topic, n) in topics {
-            println!("  {topic}: {n} msgs");
+            writeln!(std::io::stdout().lock(), "  {topic}: {n} msgs")?;
         }
     }
-    println!(
+    writeln!(
+        std::io::stdout().lock(),
         "Converted {} -> {} ({}){}",
         throughput(messages, bytes, t0.elapsed()),
         output.display(),
@@ -263,7 +271,7 @@ fn main() -> CliResult<()> {
         } else {
             format!("; {} topic(s) skipped as unsupported", unsupported.len())
         }
-    );
+    )?;
     if failed > 0 {
         std::process::exit(2);
     }

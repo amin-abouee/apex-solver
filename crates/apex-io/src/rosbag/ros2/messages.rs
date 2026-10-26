@@ -3,8 +3,9 @@
 //! This module contains Rust definitions for common ROS2 message types
 //! that match the official ROS2 API specifications.
 
-use super::cdr::CdrDeserializer;
-use crate::rosbag::error::Result;
+use super::cdr::{CdrDeserializer, CdrResult as Result};
+use super::error::{Ros2BagError, Ros2BagResult};
+use crate::rosbag::point_cloud::PointCloudResult;
 
 /// builtin_interfaces/msg/Time
 #[derive(Debug, Clone, PartialEq)]
@@ -361,174 +362,29 @@ impl FromCdr for TransformStamped {
 }
 
 impl FromCdr for Imu {
+    /// `sensor_msgs/msg/Imu` in spec order; a short message is an error, never
+    /// a message padded with zeros.
     fn from_cdr(deserializer: &mut CdrDeserializer) -> Result<Self> {
-        let header = Header::from_cdr(deserializer)?;
-
-        // For SQLite3 format, IMU messages are much smaller (324 bytes total)
-        // The data layout is different from MCAP format
-
-        // For a 324-byte message, the actual IMU data starts after the header
-        // Skip to position 28 which is where the quaternion data typically starts
-        let target_pos = 28;
-
-        // Skip to target position if we're not there yet
-        while deserializer.position() < target_pos && deserializer.has_remaining(1) {
-            if deserializer.read_u8().is_err() {
-                break;
-            }
-        }
-
-        // Read orientation quaternion with manual f64 reading
-        let orientation = Quaternion {
-            x: if deserializer.has_remaining(8) {
-                read_f64_manual(deserializer)?
-            } else {
-                0.0
-            },
-            y: if deserializer.has_remaining(8) {
-                read_f64_manual(deserializer)?
-            } else {
-                0.0
-            },
-            z: if deserializer.has_remaining(8) {
-                read_f64_manual(deserializer)?
-            } else {
-                0.0
-            },
-            w: if deserializer.has_remaining(8) {
-                read_f64_manual(deserializer)?
-            } else {
-                1.0
-            },
-        };
-
-        // For SQLite3 IMU messages, we may not have full covariance matrices
-        // Read what we can and fill the rest with defaults
-        let mut orientation_covariance = [0.0; 9];
-        for item in &mut orientation_covariance {
-            if deserializer.has_remaining(8) {
-                *item = read_f64_manual(deserializer)?;
-            }
-        }
-
-        // Read angular velocity
-        let angular_velocity = Vector3 {
-            x: if deserializer.has_remaining(8) {
-                read_f64_manual(deserializer)?
-            } else {
-                0.0
-            },
-            y: if deserializer.has_remaining(8) {
-                read_f64_manual(deserializer)?
-            } else {
-                0.0
-            },
-            z: if deserializer.has_remaining(8) {
-                read_f64_manual(deserializer)?
-            } else {
-                0.0
-            },
-        };
-
-        // Read angular velocity covariance matrix (9 elements)
-        let mut angular_velocity_covariance = [0.0; 9];
-        for item in &mut angular_velocity_covariance {
-            if deserializer.has_remaining(8) {
-                *item = read_f64_manual(deserializer)?;
-            }
-        }
-
-        // Read linear acceleration
-        let linear_acceleration = Vector3 {
-            x: if deserializer.has_remaining(8) {
-                read_f64_manual(deserializer)?
-            } else {
-                0.0
-            },
-            y: if deserializer.has_remaining(8) {
-                read_f64_manual(deserializer)?
-            } else {
-                0.0
-            },
-            z: if deserializer.has_remaining(8) {
-                read_f64_manual(deserializer)?
-            } else {
-                0.0
-            },
-        };
-
-        // Read linear acceleration covariance matrix (9 elements)
-        let mut linear_acceleration_covariance = [0.0; 9];
-        for item in &mut linear_acceleration_covariance {
-            if deserializer.has_remaining(8) {
-                *item = read_f64_manual(deserializer)?;
-            }
-        }
-
         Ok(Self {
-            header,
-            orientation,
-            orientation_covariance,
-            angular_velocity,
-            angular_velocity_covariance,
-            linear_acceleration,
-            linear_acceleration_covariance,
+            header: Header::from_cdr(deserializer)?,
+            orientation: Quaternion::from_cdr(deserializer)?,
+            orientation_covariance: deserializer.read_f64_array()?,
+            angular_velocity: Vector3::from_cdr(deserializer)?,
+            angular_velocity_covariance: deserializer.read_f64_array()?,
+            linear_acceleration: Vector3::from_cdr(deserializer)?,
+            linear_acceleration_covariance: deserializer.read_f64_array()?,
         })
     }
 }
 
 impl FromCdr for PoseWithCovariance {
+    /// `geometry_msgs/msg/PoseWithCovariance`: the pose, then all 36
+    /// covariance entries; a truncated covariance is an error.
     fn from_cdr(deserializer: &mut CdrDeserializer) -> Result<Self> {
-        let current_pos = deserializer.position();
-
-        // For MCAP format, we need to be more careful about data boundaries
-        // MCAP messages are exactly 372 bytes, so we need to ensure we don't read past the end
-
-        // Skip to where pose data typically starts
-        // Try position 28 first (same as SQLite3), then fallback to MCAP-specific positions
-        let target_pos = if current_pos <= 22 {
-            28
-        } else {
-            current_pos + 6
-        };
-
-        // Skip to target position
-        let mut skip_pos = current_pos;
-        while skip_pos < target_pos {
-            if deserializer.read_u8().is_err() {
-                // If we can't skip, fall back to current position
-                break;
-            }
-            skip_pos += 1;
-        }
-
-        // Read pose data with manual f64 reading
-        let position = Point {
-            x: read_f64_manual(deserializer)?,
-            y: read_f64_manual(deserializer)?,
-            z: read_f64_manual(deserializer)?,
-        };
-
-        let orientation = Quaternion {
-            x: read_f64_manual(deserializer)?,
-            y: read_f64_manual(deserializer)?,
-            z: read_f64_manual(deserializer)?,
-            w: read_f64_manual(deserializer)?,
-        };
-
-        let pose = Pose {
-            position,
-            orientation,
-        };
-
-        // Try to read covariance matrix, but handle the case where there's not enough data
-        let covariance = read_f64_array_manual(deserializer).unwrap_or({
-            // If we can't read the full covariance matrix, use zeros
-            // This happens in MCAP format where the message might be truncated
-            [0.0; 36]
-        });
-
-        Ok(Self { pose, covariance })
+        Ok(Self {
+            pose: Pose::from_cdr(deserializer)?,
+            covariance: read_f64_array_manual(deserializer)?,
+        })
     }
 }
 
@@ -543,25 +399,10 @@ impl FromCdr for PoseWithCovarianceStamped {
 
 impl FromCdr for PointStamped {
     fn from_cdr(deserializer: &mut CdrDeserializer) -> Result<Self> {
-        let header = Header::from_cdr(deserializer)?;
-
-        // Skip to position 28 where Point data starts
-        // We need to skip 6 bytes from current position (22) to get to position 28
-        let current_pos = deserializer.position();
-        let bytes_to_skip = 28 - current_pos;
-
-        for _ in 0..bytes_to_skip {
-            deserializer.read_u8()?;
-        }
-
-        // Now read the Point data manually without automatic alignment
-        let point = Point {
-            x: read_f64_manual(deserializer)?,
-            y: read_f64_manual(deserializer)?,
-            z: read_f64_manual(deserializer)?,
-        };
-
-        Ok(Self { header, point })
+        Ok(Self {
+            header: Header::from_cdr(deserializer)?,
+            point: Point::from_cdr(deserializer)?,
+        })
     }
 }
 
@@ -575,46 +416,17 @@ impl FromCdr for NavSatStatus {
 }
 
 impl FromCdr for NavSatFix {
+    /// `sensor_msgs/msg/NavSatFix` in spec order: the status and covariance
+    /// are read, not invented.
     fn from_cdr(deserializer: &mut CdrDeserializer) -> Result<Self> {
-        let header = Header::from_cdr(deserializer)?;
-
-        // For now, try the most common GPS positions based on our debug analysis
-        // Position 20 for the new bag file format, position 28 for the old format
-        let current_pos = deserializer.position();
-
-        // Try position 20 first (new format)
-        let target_pos = if current_pos <= 20 { 20 } else { 28 };
-
-        // Skip to GPS data position
-        if current_pos < target_pos {
-            let skip_bytes = target_pos - current_pos;
-            for _ in 0..skip_bytes {
-                deserializer.read_u8()?;
-            }
-        }
-
-        // Read GPS coordinates manually
-        let latitude = read_f64_manual(deserializer)?;
-        let longitude = read_f64_manual(deserializer)?;
-        let altitude = read_f64_manual(deserializer)?;
-
-        // Create default status and covariance for now
-        let status = NavSatStatus {
-            status: 0,
-            service: 1,
-        };
-
-        let position_covariance = [0.0; 9];
-        let position_covariance_type = 0;
-
         Ok(Self {
-            header,
-            status,
-            latitude,
-            longitude,
-            altitude,
-            position_covariance,
-            position_covariance_type,
+            header: Header::from_cdr(deserializer)?,
+            status: NavSatStatus::from_cdr(deserializer)?,
+            latitude: deserializer.read_f64()?,
+            longitude: deserializer.read_f64()?,
+            altitude: deserializer.read_f64()?,
+            position_covariance: deserializer.read_f64_array()?,
+            position_covariance_type: deserializer.read_u8()?,
         })
     }
 }
@@ -638,187 +450,14 @@ impl FromCdr for TwistWithCovariance {
 }
 
 impl FromCdr for Odometry {
+    /// `nav_msgs/msg/Odometry` in spec order. A message that does not decode
+    /// is an error: no stamp, frame or pose is invented for it.
     fn from_cdr(deserializer: &mut CdrDeserializer) -> Result<Self> {
-        // For SQLite3 Odometry messages, we need a completely different approach
-        // The "CDR string data truncated" error suggests the header structure is different
-
-        // Try to read the header manually using the same approach as other message types
-
-        // Skip to position 28 like we do for other SQLite3 message types
-        let target_pos = 28;
-        while deserializer.position() < target_pos && deserializer.has_remaining(1) {
-            if deserializer.read_u8().is_err() {
-                break;
-            }
-        }
-
-        // Try to manually construct a header
-        let header = Header {
-            stamp: Time { sec: 0, nanosec: 0 },
-            frame_id: "odom".to_string(),
-        };
-
-        // For child_frame_id, try to read a string or use default
-        let child_frame_id = if deserializer.has_remaining(4) {
-            // Try to read string length
-            match deserializer.read_u32() {
-                Ok(len) if len < 100 && deserializer.has_remaining(len as usize) => {
-                    // Try to read the string
-                    let mut string_bytes = vec![0u8; len as usize];
-                    let mut success = true;
-                    for byte in string_bytes.iter_mut().take(len as usize) {
-                        match deserializer.read_u8() {
-                            Ok(read_byte) => *byte = read_byte,
-                            Err(_) => {
-                                success = false;
-                                break;
-                            }
-                        }
-                    }
-                    if success {
-                        String::from_utf8(string_bytes).unwrap_or_else(|_| "base_link".to_string())
-                    } else {
-                        "base_link".to_string()
-                    }
-                }
-                _ => "base_link".to_string(),
-            }
-        } else {
-            "base_link".to_string()
-        };
-
-        // Now try to read pose data using the same manual approach as PoseWithCovarianceStamped
-        // Skip to where pose data should start
-        let current_pos = deserializer.position();
-
-        // For Odometry, the pose data should be after header + child_frame_id
-        // Let's try different positions to find the actual pose data
-        let pose_positions_to_try = [
-            current_pos,
-            current_pos + 4,
-            current_pos + 8,
-            28,
-            32,
-            36,
-            40,
-        ];
-
-        let mut _pose_found = false;
-        let mut pose = PoseWithCovariance {
-            pose: Pose {
-                position: Point {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                },
-                orientation: Quaternion {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                    w: 1.0,
-                },
-            },
-            covariance: [0.0; 36],
-        };
-
-        for &try_pos in &pose_positions_to_try {
-            if try_pos >= deserializer.data_len() {
-                continue;
-            }
-
-            // Reset to try position
-            let data = deserializer.data();
-            let mut test_deserializer = CdrDeserializer::new(data)?;
-
-            // Skip to try position
-            for _ in 0..try_pos {
-                if test_deserializer.read_u8().is_err() {
-                    break;
-                }
-            }
-
-            // Try to read pose data
-            if test_deserializer.has_remaining(56) {
-                // 7 f64s for position + orientation
-                match Self::try_read_pose_at_position(&mut test_deserializer) {
-                    Ok(read_pose) => {
-                        // Check if the quaternion looks reasonable (w component should be close to 1 for identity)
-                        let quat_magnitude = (read_pose.pose.orientation.x.powi(2)
-                            + read_pose.pose.orientation.y.powi(2)
-                            + read_pose.pose.orientation.z.powi(2)
-                            + read_pose.pose.orientation.w.powi(2))
-                        .sqrt();
-
-                        if quat_magnitude > 0.1 && quat_magnitude < 10.0 {
-                            pose = read_pose;
-                            _pose_found = true;
-                            break;
-                        }
-                    }
-                    Err(_) => continue,
-                }
-            }
-        }
-
-        // Create a reasonable twist (velocity) - typically zero for most odometry
-        let twist = TwistWithCovariance {
-            twist: Twist {
-                linear: Vector3 {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                },
-                angular: Vector3 {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                },
-            },
-            covariance: [0.0; 36],
-        };
-
         Ok(Self {
-            header,
-            child_frame_id,
-            pose,
-            twist,
-        })
-    }
-}
-
-impl Odometry {
-    fn try_read_pose_at_position(deserializer: &mut CdrDeserializer) -> Result<PoseWithCovariance> {
-        // Read position
-        let position = Point {
-            x: read_f64_manual(deserializer)?,
-            y: read_f64_manual(deserializer)?,
-            z: read_f64_manual(deserializer)?,
-        };
-
-        // Read orientation
-        let orientation = Quaternion {
-            x: read_f64_manual(deserializer)?,
-            y: read_f64_manual(deserializer)?,
-            z: read_f64_manual(deserializer)?,
-            w: read_f64_manual(deserializer)?,
-        };
-
-        // Read covariance if available
-        let mut covariance = [0.0; 36];
-        for item in &mut covariance {
-            if deserializer.has_remaining(8) {
-                *item = read_f64_manual(deserializer)?;
-            } else {
-                break;
-            }
-        }
-
-        Ok(PoseWithCovariance {
-            pose: Pose {
-                position,
-                orientation,
-            },
-            covariance,
+            header: Header::from_cdr(deserializer)?,
+            child_frame_id: deserializer.read_string()?,
+            pose: PoseWithCovariance::from_cdr(deserializer)?,
+            twist: TwistWithCovariance::from_cdr(deserializer)?,
         })
     }
 }
@@ -850,7 +489,7 @@ impl PointCloud2 {
 
     /// The values of field `name` for every point, widened to `f64` — see
     /// [`crate::rosbag::point_cloud::field_values`].
-    pub fn field_values(&self, name: &str) -> Result<Vec<f64>> {
+    pub fn field_values(&self, name: &str) -> PointCloudResult<Vec<f64>> {
         crate::rosbag::point_cloud::field_values(
             &self.fields,
             name,
@@ -922,39 +561,47 @@ impl FromCdr for Duration {
     }
 }
 
-/// Deserialize a message from CDR data based on its type name
-pub fn deserialize_message(data: &[u8], message_type: &str) -> Result<Box<dyn std::fmt::Debug>> {
-    let mut deserializer = CdrDeserializer::new(data)?;
+/// A message decoded by [`deserialize_message`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum DecodedMessage {
+    Imu(Box<Imu>),
+    TransformStamped(Box<TransformStamped>),
+    PoseWithCovarianceStamped(Box<PoseWithCovarianceStamped>),
+    PointStamped(Box<PointStamped>),
+    NavSatFix(Box<NavSatFix>),
+    Odometry(Box<Odometry>),
+}
 
-    match message_type {
-        "sensor_msgs/msg/Imu" => {
-            let msg = Imu::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
-        }
+/// Deserialize a message from CDR data based on its type name.
+///
+/// # Errors
+///
+/// [`Ros2BagError::UnsupportedMessageType`] for a type this function does not
+/// decode, or the [`CdrError`](super::cdr::CdrError) of a payload that does
+/// not decode as its type.
+pub fn deserialize_message(data: &[u8], message_type: &str) -> Ros2BagResult<DecodedMessage> {
+    let mut deserializer = CdrDeserializer::new(data)?;
+    let d = &mut deserializer;
+    Ok(match message_type {
+        "sensor_msgs/msg/Imu" => DecodedMessage::Imu(Box::new(Imu::from_cdr(d)?)),
         "geometry_msgs/msg/TransformStamped" => {
-            let msg = TransformStamped::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
+            DecodedMessage::TransformStamped(Box::new(TransformStamped::from_cdr(d)?))
         }
-        "geometry_msgs/msg/PoseWithCovarianceStamped" => {
-            let msg = PoseWithCovarianceStamped::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
-        }
+        "geometry_msgs/msg/PoseWithCovarianceStamped" => DecodedMessage::PoseWithCovarianceStamped(
+            Box::new(PoseWithCovarianceStamped::from_cdr(d)?),
+        ),
         "geometry_msgs/msg/PointStamped" => {
-            let msg = PointStamped::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
+            DecodedMessage::PointStamped(Box::new(PointStamped::from_cdr(d)?))
         }
-        "sensor_msgs/msg/NavSatFix" => {
-            let msg = NavSatFix::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
+        "sensor_msgs/msg/NavSatFix" => DecodedMessage::NavSatFix(Box::new(NavSatFix::from_cdr(d)?)),
+        "nav_msgs/msg/Odometry" => DecodedMessage::Odometry(Box::new(Odometry::from_cdr(d)?)),
+        _ => {
+            return Err(Ros2BagError::UnsupportedMessageType {
+                message_type: message_type.to_string(),
+            });
         }
-        "nav_msgs/msg/Odometry" => {
-            let msg = Odometry::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
-        }
-        _ => Err(crate::rosbag::error::ReaderError::generic(format!(
-            "Unsupported message type: {message_type}"
-        ))),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1391,15 +1038,65 @@ mod tests {
 
     // ── Imu ──────────────────────────────────────────────────────────────
 
+    fn push_header(buf: &mut Vec<u8>, sec: i32, frame: &str) {
+        push_i32_le(buf, sec);
+        push_u32_le(buf, 7);
+        push_string(buf, frame);
+    }
+
+    fn push_f64s(buf: &mut Vec<u8>, values: &[f64]) {
+        for v in values {
+            push_f64_le(buf, *v);
+        }
+    }
+
+    fn imu_bytes(frame: &str) -> Vec<u8> {
+        let mut data = le_header();
+        push_header(&mut data, 42, frame);
+        push_f64s(&mut data, &[0.1, 0.2, 0.3, 0.9]); // orientation
+        push_f64s(&mut data, &[1.0; 9]);
+        push_f64s(&mut data, &[4.0, 5.0, 6.0]); // angular velocity
+        push_f64s(&mut data, &[2.0; 9]);
+        push_f64s(&mut data, &[7.0, 8.0, 9.81]); // linear acceleration
+        push_f64s(&mut data, &[3.0; 9]);
+        data
+    }
+
     #[test]
-    fn imu_from_cdr_with_full_buffer() -> TestResult {
-        // 324 bytes total: CDR header + enough zeros for the full Imu
-        let mut data = vec![0u8; 324];
-        data[1] = 0x01; // LE
-        let mut d = CdrDeserializer::new(&data)?;
-        // IMU parsing skips to pos 28, reads quaternion + covariance + vectors
-        // Just check it doesn't panic/crash
-        let _ = Imu::from_cdr(&mut d); // may succeed or fail gracefully
+    fn imu_decodes_every_field_in_spec_order() -> TestResult {
+        // A one-character frame id leaves the quaternion at byte 20, where
+        // the old decoder skipped to byte 28 and read the wrong values.
+        for frame in ["i", "imu4", "a_much_longer_imu_frame"] {
+            let data = imu_bytes(frame);
+            let imu = Imu::from_cdr(&mut CdrDeserializer::new(&data)?)?;
+            assert_eq!(imu.header.frame_id, frame);
+            assert_eq!(imu.header.stamp.sec, 42);
+            assert_eq!(imu.orientation.w, 0.9);
+            assert_eq!(imu.orientation_covariance, [1.0; 9]);
+            assert_eq!(imu.angular_velocity.z, 6.0);
+            assert_eq!(imu.angular_velocity_covariance, [2.0; 9]);
+            assert_eq!(imu.linear_acceleration.z, 9.81);
+            assert_eq!(imu.linear_acceleration_covariance, [3.0; 9]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_short_imu_is_an_error_not_zero_padded() -> TestResult {
+        let data = imu_bytes("imu4");
+        for cut in [data.len() - 1, data.len() - 72, 40] {
+            let result = Imu::from_cdr(&mut CdrDeserializer::new(&data[..cut])?);
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::rosbag::cdr::CdrError {
+                        kind: crate::rosbag::cdr::CdrErrorKind::Truncated { .. },
+                        ..
+                    })
+                ),
+                "cut at {cut}: {result:?}"
+            );
+        }
         Ok(())
     }
 
@@ -1408,81 +1105,140 @@ mod tests {
     #[test]
     fn point_stamped_from_cdr() -> TestResult {
         let mut data = le_header();
-        // header: sec=0, nanosec=0, frame_id=""
-        push_i32_le(&mut data, 0);
-        push_u32_le(&mut data, 0);
-        push_empty_string(&mut data); // pos = 16 after header
-        // pad to 28 (12 bytes)
-        data.extend_from_slice(&[0u8; 12]);
-        // Point x, y, z
-        push_f64_le(&mut data, 3.0);
-        push_f64_le(&mut data, 4.0);
-        push_f64_le(&mut data, 5.0);
+        push_header(&mut data, 0, "");
+        push_f64s(&mut data, &[3.0, 4.0, 5.0]);
         let mut d = CdrDeserializer::new(&data)?;
         let ps = PointStamped::from_cdr(&mut d)?;
         assert!((ps.point.x - 3.0).abs() < 1e-12);
         assert!((ps.point.y - 4.0).abs() < 1e-12);
+        assert!((ps.point.z - 5.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn point_stamped_after_a_long_frame_id_does_not_underflow() -> TestResult {
+        // The old decoder skipped `28 - position` bytes, which underflowed
+        // once the header ran past byte 28.
+        let mut data = le_header();
+        push_header(&mut data, 0, "a_frame_id_longer_than_the_old_fixed_offset");
+        push_f64s(&mut data, &[1.0, 2.0, 3.0]);
+        let ps = PointStamped::from_cdr(&mut CdrDeserializer::new(&data)?)?;
+        assert_eq!((ps.point.x, ps.point.y, ps.point.z), (1.0, 2.0, 3.0));
         Ok(())
     }
 
     // ── NavSatFix ────────────────────────────────────────────────────────
 
-    #[test]
-    fn nav_sat_fix_from_cdr() -> TestResult {
+    fn nav_sat_fix_bytes() -> Vec<u8> {
         let mut data = le_header();
-        // header: sec, nanosec, empty frame_id = 16 bytes
-        push_i32_le(&mut data, 0);
-        push_u32_le(&mut data, 0);
-        push_empty_string(&mut data); // pos = 16
-        // skip to 20 (4 bytes)
-        data.extend_from_slice(&[0u8; 4]); // pos = 20
-        // latitude, longitude, altitude
-        push_f64_le(&mut data, 37.5);
-        push_f64_le(&mut data, -122.0);
-        push_f64_le(&mut data, 100.0);
-        let mut d = CdrDeserializer::new(&data)?;
-        let fix = NavSatFix::from_cdr(&mut d)?;
+        push_header(&mut data, 0, "gps");
+        data.push(2u8); // status.status (i8)
+        pad_to(&mut data, 2);
+        data.extend_from_slice(&5u16.to_le_bytes()); // status.service
+        push_f64s(&mut data, &[37.5, -122.0, 100.0]);
+        push_f64s(&mut data, &[0.5; 9]);
+        data.push(2u8); // position_covariance_type
+        data
+    }
+
+    #[test]
+    fn nav_sat_fix_reads_status_and_covariance() -> TestResult {
+        let data = nav_sat_fix_bytes();
+        let fix = NavSatFix::from_cdr(&mut CdrDeserializer::new(&data)?)?;
+        assert_eq!(fix.status.status, 2);
+        assert_eq!(fix.status.service, 5);
         assert!((fix.latitude - 37.5).abs() < 1e-9);
         assert!((fix.longitude - (-122.0)).abs() < 1e-9);
+        assert_eq!(fix.position_covariance, [0.5; 9]);
+        assert_eq!(fix.position_covariance_type, 2);
         Ok(())
     }
 
     // ── PoseWithCovariance / PoseWithCovarianceStamped ───────────────────
 
+    fn pose_with_covariance_bytes(data: &mut Vec<u8>) {
+        push_f64s(data, &[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]);
+        let covariance: Vec<f64> = (0..36).map(f64::from).collect();
+        push_f64s(data, &covariance);
+    }
+
     #[test]
     fn pose_with_covariance_from_cdr() -> TestResult {
-        // Give a large zero buffer so the heuristic parser has room
-        let mut data = vec![0u8; 400];
-        data[1] = 0x01; // LE
-        let mut d = CdrDeserializer::new(&data)?;
-        let _ = PoseWithCovariance::from_cdr(&mut d); // check no panic
+        let mut data = le_header();
+        pose_with_covariance_bytes(&mut data);
+        let pose = PoseWithCovariance::from_cdr(&mut CdrDeserializer::new(&data)?)?;
+        assert_eq!(pose.pose.position.z, 3.0);
+        assert_eq!(pose.pose.orientation.w, 1.0);
+        assert_eq!(pose.covariance[35], 35.0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_truncated_covariance_is_an_error_not_zeros() -> TestResult {
+        let mut data = le_header();
+        pose_with_covariance_bytes(&mut data);
+        data.truncate(data.len() - 8);
+        assert!(PoseWithCovariance::from_cdr(&mut CdrDeserializer::new(&data)?).is_err());
         Ok(())
     }
 
     #[test]
     fn pose_with_covariance_stamped_from_cdr() -> TestResult {
-        let mut data = vec![0u8; 400];
-        data[1] = 0x01;
-        let mut d = CdrDeserializer::new(&data)?;
-        let _ = PoseWithCovarianceStamped::from_cdr(&mut d);
+        let mut data = le_header();
+        push_header(&mut data, 3, "map");
+        pose_with_covariance_bytes(&mut data);
+        let stamped = PoseWithCovarianceStamped::from_cdr(&mut CdrDeserializer::new(&data)?)?;
+        assert_eq!(stamped.header.frame_id, "map");
+        assert_eq!(stamped.pose.pose.position.x, 1.0);
         Ok(())
     }
 
     // ── Odometry ─────────────────────────────────────────────────────────
 
+    fn odometry_bytes() -> Vec<u8> {
+        let mut data = le_header();
+        push_header(&mut data, 9, "odom");
+        push_string(&mut data, "base_link");
+        pose_with_covariance_bytes(&mut data);
+        push_f64s(&mut data, &[0.5, 0.0, 0.0, 0.0, 0.0, 0.1]); // twist
+        push_f64s(&mut data, &[0.0; 36]);
+        data
+    }
+
     #[test]
-    fn odometry_from_cdr() -> TestResult {
-        let mut data = vec![0u8; 600];
-        data[1] = 0x01;
-        // Put a plausible quaternion at various offsets so the heuristic finds it
-        let w_bytes = 1.0f64.to_le_bytes();
-        // Try offset 84 (7 f64 * 8 + 28 header+skip = 84)
-        let off = 84;
-        if off + 8 <= data.len() {
-            data[off..off + 8].copy_from_slice(&w_bytes);
+    fn odometry_decodes_header_frames_pose_and_twist() -> TestResult {
+        let data = odometry_bytes();
+        let odom = Odometry::from_cdr(&mut CdrDeserializer::new(&data)?)?;
+        assert_eq!(odom.header.stamp.sec, 9);
+        assert_eq!(odom.header.frame_id, "odom");
+        assert_eq!(odom.child_frame_id, "base_link");
+        assert_eq!(odom.pose.pose.position.y, 2.0);
+        assert_eq!(odom.twist.twist.linear.x, 0.5);
+        assert_eq!(odom.twist.twist.angular.z, 0.1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_broken_odometry_is_an_error_not_an_invented_message() -> TestResult {
+        // The old decoder answered these with stamp 0, frame "odom", child
+        // "base_link", an identity pose and a zero twist.
+        let data = odometry_bytes();
+        for cut in [10, 30, data.len() - 1] {
+            assert!(
+                Odometry::from_cdr(&mut CdrDeserializer::new(&data[..cut])?).is_err(),
+                "cut at {cut}"
+            );
         }
-        let mut d = CdrDeserializer::new(&data)?;
-        let _ = Odometry::from_cdr(&mut d);
+        let zeros = {
+            let mut z = vec![0u8; 800];
+            z[1] = 0x01;
+            z
+        };
+        // All zeros is a valid (if empty) message: it decodes as zeros
+        // because those are the bytes, not because anything was invented.
+        let odom = Odometry::from_cdr(&mut CdrDeserializer::new(&zeros)?)?;
+        assert_eq!(odom.header.frame_id, "");
+        assert_eq!(odom.child_frame_id, "");
         Ok(())
     }
 
@@ -1492,7 +1248,10 @@ mod tests {
     fn deserialize_message_unknown_type_returns_err() -> TestResult {
         let data = vec![0x00u8, 0x01, 0x00, 0x00];
         let result = deserialize_message(&data, "unknown_pkg/msg/Unknown");
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(Ros2BagError::UnsupportedMessageType { .. })
+        ));
         Ok(())
     }
 
@@ -1505,32 +1264,18 @@ mod tests {
 
     #[test]
     fn deserialize_message_dispatches_point_stamped() -> TestResult {
-        // Build minimal valid PointStamped CDR
         let mut data = le_header();
-        push_i32_le(&mut data, 0);
-        push_u32_le(&mut data, 0);
-        push_empty_string(&mut data);
-        data.extend_from_slice(&[0u8; 12]); // pad to 28
-        push_f64_le(&mut data, 1.0);
-        push_f64_le(&mut data, 2.0);
-        push_f64_le(&mut data, 3.0);
-        let result = deserialize_message(&data, "geometry_msgs/msg/PointStamped");
-        assert!(result.is_ok());
+        push_header(&mut data, 0, "");
+        push_f64s(&mut data, &[1.0, 2.0, 3.0]);
+        let result = deserialize_message(&data, "geometry_msgs/msg/PointStamped")?;
+        assert!(matches!(result, DecodedMessage::PointStamped(_)));
         Ok(())
     }
 
     #[test]
     fn deserialize_message_dispatches_nav_sat_fix() -> TestResult {
-        let mut data = le_header();
-        push_i32_le(&mut data, 0);
-        push_u32_le(&mut data, 0);
-        push_empty_string(&mut data);
-        data.extend_from_slice(&[0u8; 4]); // pad to 20
-        push_f64_le(&mut data, 0.0);
-        push_f64_le(&mut data, 0.0);
-        push_f64_le(&mut data, 0.0);
-        let result = deserialize_message(&data, "sensor_msgs/msg/NavSatFix");
-        assert!(result.is_ok());
+        let result = deserialize_message(&nav_sat_fix_bytes(), "sensor_msgs/msg/NavSatFix")?;
+        assert!(matches!(result, DecodedMessage::NavSatFix(_)));
         Ok(())
     }
 
@@ -1544,32 +1289,35 @@ mod tests {
         for _ in 0..7 {
             push_f64_le(&mut data, 0.0);
         }
-        let result = deserialize_message(&data, "geometry_msgs/msg/TransformStamped");
-        assert!(result.is_ok());
+        let result = deserialize_message(&data, "geometry_msgs/msg/TransformStamped")?;
+        assert!(matches!(result, DecodedMessage::TransformStamped(_)));
         Ok(())
     }
 
     #[test]
     fn deserialize_message_dispatches_odometry() -> TestResult {
-        let mut data = vec![0u8; 600];
-        data[1] = 0x01;
-        let _ = deserialize_message(&data, "nav_msgs/msg/Odometry");
+        let result = deserialize_message(&odometry_bytes(), "nav_msgs/msg/Odometry")?;
+        assert!(matches!(result, DecodedMessage::Odometry(_)));
         Ok(())
     }
 
     #[test]
     fn deserialize_message_dispatches_pose_with_covariance_stamped() -> TestResult {
-        let mut data = vec![0u8; 400];
-        data[1] = 0x01;
-        let _ = deserialize_message(&data, "geometry_msgs/msg/PoseWithCovarianceStamped");
+        let mut data = le_header();
+        push_header(&mut data, 0, "map");
+        pose_with_covariance_bytes(&mut data);
+        let result = deserialize_message(&data, "geometry_msgs/msg/PoseWithCovarianceStamped")?;
+        assert!(matches!(
+            result,
+            DecodedMessage::PoseWithCovarianceStamped(_)
+        ));
         Ok(())
     }
 
     #[test]
     fn deserialize_message_dispatches_imu() -> TestResult {
-        let mut data = vec![0u8; 324];
-        data[1] = 0x01;
-        let _ = deserialize_message(&data, "sensor_msgs/msg/Imu");
+        let result = deserialize_message(&imu_bytes("imu4"), "sensor_msgs/msg/Imu")?;
+        assert!(matches!(result, DecodedMessage::Imu(_)));
         Ok(())
     }
 }

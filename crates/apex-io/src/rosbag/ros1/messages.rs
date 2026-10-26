@@ -5,7 +5,8 @@
 //! commonly seen in pose-graph/SLAM datasets are included; consumers can
 //! always fall back to `Ros1Reader::raw_messages` for unknown types.
 
-use crate::rosbag::error::Result;
+use super::error::Ros1Result as Result;
+use crate::rosbag::point_cloud::PointCloudResult;
 
 use super::deserialize::{Ros1Deserializer, Ros1Serializer};
 use crate::rosbag::messages::PointField;
@@ -372,7 +373,7 @@ impl PointCloud2 {
 
     /// The values of field `name` for every point, widened to `f64` — see
     /// [`crate::rosbag::point_cloud::field_values`].
-    pub fn field_values(&self, name: &str) -> Result<Vec<f64>> {
+    pub fn field_values(&self, name: &str) -> PointCloudResult<Vec<f64>> {
         crate::rosbag::point_cloud::field_values(
             &self.fields,
             name,
@@ -423,12 +424,13 @@ fn write_f64_9(s: &mut Ros1Serializer, arr: &[f64; 9]) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    fn point_cloud_round_trip_and_fields() -> Result<()> {
+    fn point_cloud_round_trip_and_fields() -> TestResult {
         let mut data = Vec::new();
         for (x, t) in [(1.25f32, 10.5f64), (-3.0, 10.6)] {
             data.extend(x.to_le_bytes());
@@ -475,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn imu_round_trip() -> Result<()> {
+    fn imu_round_trip() -> TestResult {
         let imu = Imu {
             header: Header {
                 seq: 42,
@@ -514,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn pose_stamped_round_trip() -> Result<()> {
+    fn pose_stamped_round_trip() -> TestResult {
         let ps = PoseStamped {
             header: Header {
                 seq: 1,
@@ -538,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn header_round_trip() -> Result<()> {
+    fn header_round_trip() -> TestResult {
         let h = Header {
             seq: 42,
             stamp_ns: 1_000_000_000,
@@ -552,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn vector3_round_trip() -> Result<()> {
+    fn vector3_round_trip() -> TestResult {
         let v = Vector3 {
             x: 1.5,
             y: -2.5,
@@ -566,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn point_round_trip() -> Result<()> {
+    fn point_round_trip() -> TestResult {
         let p = Point {
             x: -1.0,
             y: 0.0,
@@ -580,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn quaternion_round_trip() -> Result<()> {
+    fn quaternion_round_trip() -> TestResult {
         let q = Quaternion {
             x: 0.0,
             y: 0.707,
@@ -604,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn pose_round_trip() -> Result<()> {
+    fn pose_round_trip() -> TestResult {
         let p = Pose {
             position: Point {
                 x: 1.0,
@@ -621,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn transform_stamped_round_trip() -> Result<()> {
+    fn transform_stamped_round_trip() -> TestResult {
         let msg = TransformStamped {
             header: Header {
                 seq: 7,
@@ -651,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn string_msg_round_trip() -> Result<()> {
+    fn string_msg_round_trip() -> TestResult {
         let msg = StringMsg {
             data: "hello world".into(),
         };
@@ -663,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn string_msg_empty_round_trip() -> Result<()> {
+    fn string_msg_empty_round_trip() -> TestResult {
         let msg = StringMsg { data: "".into() };
         let mut s = Ros1Serializer::new();
         msg.to_ros1(&mut s);
@@ -673,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn image_round_trip() -> Result<()> {
+    fn image_round_trip() -> TestResult {
         let img = Image {
             header: Header {
                 seq: 1,
@@ -695,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn image_empty_data_round_trip() -> Result<()> {
+    fn image_empty_data_round_trip() -> TestResult {
         let img = Image {
             header: Header::default(),
             height: 0,
@@ -713,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn compressed_image_round_trip() -> Result<()> {
+    fn compressed_image_round_trip() -> TestResult {
         let img = CompressedImage {
             header: Header {
                 seq: 5,
@@ -731,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn compressed_image_empty_data_round_trip() -> Result<()> {
+    fn compressed_image_empty_data_round_trip() -> TestResult {
         let img = CompressedImage {
             header: Header::default(),
             format: "".into(),

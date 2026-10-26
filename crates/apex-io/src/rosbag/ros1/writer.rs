@@ -12,8 +12,9 @@
 //! chunk-info record*          (one per chunk written)
 //! ```
 
-use crate::rosbag::error::{BagError, Result};
+use super::error::{Ros1Error, Ros1Result as Result};
 use crate::rosbag::types::{Connection, MessageDefinition, MessageDefinitionFormat};
+use apex_error::ErrorLogging;
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
@@ -80,12 +81,14 @@ struct DoneChunk {
     compression: Ros1Compression,
 }
 
-type ChunkResult = (u64, std::result::Result<DoneChunk, String>);
+type ChunkResult = (u64, Result<DoneChunk>);
 
 /// Compress a chunk and serialise its index. Pure, so it can run on any core.
 fn build_chunk(job: ChunkJob) -> Result<DoneChunk> {
-    let uncompressed_size = u32::try_from(job.buf.len())
-        .map_err(|_| BagError::writer("chunk exceeds 4 GiB uncompressed"))?;
+    let uncompressed_size = u32::try_from(job.buf.len()).map_err(|_| Ros1Error::TooLarge {
+        what: "uncompressed chunk",
+        len: job.buf.len(),
+    })?;
 
     // ROS1's `lz4` chunk compression is the LZ4 *frame* format (what
     // `rosbag`/roslz4 read and write), not the raw block format.
@@ -94,15 +97,22 @@ fn build_chunk(job: ChunkJob) -> Result<DoneChunk> {
         Ros1Compression::Bz2 => {
             let mut out = Vec::new();
             let mut enc = bzip2::write::BzEncoder::new(&mut out, bzip2::Compression::default());
-            enc.write_all(&job.buf)?;
-            enc.finish()?;
+            enc.write_all(&job.buf)
+                .and_then(|()| enc.finish().map(drop))
+                .map_err(|source| Ros1Error::Compress {
+                    codec: "bz2",
+                    source,
+                })?;
             out
         }
         Ros1Compression::Lz4 => {
             let mut enc = lz4_flex::frame::FrameEncoder::new(Vec::new());
-            enc.write_all(&job.buf)?;
-            enc.finish()
-                .map_err(|e| BagError::compression(format!("lz4 encode: {e}")))?
+            enc.write_all(&job.buf)
+                .map_err(|source| Ros1Error::Compress {
+                    codec: "lz4",
+                    source,
+                })?;
+            enc.finish().map_err(Ros1Error::Lz4Frame)?
         }
     };
 
@@ -185,7 +195,7 @@ impl Ros1Writer {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         if path.exists() {
-            return Err(BagError::BagAlreadyExists { path });
+            return Err(Ros1Error::BagAlreadyExists { path }.log());
         }
         let (tx, rx) = mpsc::channel();
         let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
@@ -218,7 +228,10 @@ impl Ros1Writer {
     /// [`Self::open`].
     pub fn set_compression(&mut self, compression: Ros1Compression) -> Result<()> {
         if self.is_open {
-            return Err(BagError::writer("set_compression called after open"));
+            return Err(Ros1Error::AlreadyStarted {
+                what: "set the compression",
+            }
+            .log());
         }
         self.compression = compression;
         Ok(())
@@ -227,7 +240,10 @@ impl Ros1Writer {
     /// Override the per-chunk size threshold (default 768 KiB).
     pub fn set_chunk_threshold(&mut self, bytes: usize) -> Result<()> {
         if self.is_open {
-            return Err(BagError::writer("set_chunk_threshold called after open"));
+            return Err(Ros1Error::AlreadyStarted {
+                what: "set the chunk threshold",
+            }
+            .log());
         }
         self.chunk_threshold = bytes.max(1);
         Ok(())
@@ -235,14 +251,22 @@ impl Ros1Writer {
 
     /// Open the underlying file and write the magic + placeholder bag header.
     pub fn open(&mut self) -> Result<()> {
+        self.open_unlogged().map_err(ErrorLogging::log)
+    }
+
+    fn open_unlogged(&mut self) -> Result<()> {
         if self.is_open {
-            return Err(BagError::BagAlreadyOpen);
+            return Err(Ros1Error::AlreadyOpen);
         }
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .read(true)
-            .open(&self.path)?;
+            .open(&self.path)
+            .map_err(|source| Ros1Error::Open {
+                path: self.path.clone(),
+                source,
+            })?;
         let mut writer = BufWriter::new(file);
         writer.write_all(super::format::MAGIC)?;
 
@@ -265,7 +289,7 @@ impl Ros1Writer {
         latching: bool,
     ) -> Result<Connection> {
         if !self.is_open {
-            return Err(BagError::BagNotOpen);
+            return Err(Ros1Error::NotOpen.log());
         }
         let topic = topic.into();
         let msg_type = msg_type.into();
@@ -273,7 +297,7 @@ impl Ros1Writer {
         let message_definition = message_definition.into();
 
         if self.connections.iter().any(|c| c.topic == topic) {
-            return Err(BagError::connection_already_exists(topic));
+            return Err(Ros1Error::ConnectionAlreadyExists { topic }.log());
         }
 
         let id = self.next_conn_id;
@@ -310,8 +334,18 @@ impl Ros1Writer {
 
     /// Write a single message.  `timestamp_ns` is nanoseconds since epoch.
     pub fn write(&mut self, connection: &Connection, timestamp_ns: u64, data: &[u8]) -> Result<()> {
+        self.write_unlogged(connection, timestamp_ns, data)
+            .map_err(ErrorLogging::log)
+    }
+
+    fn write_unlogged(
+        &mut self,
+        connection: &Connection,
+        timestamp_ns: u64,
+        data: &[u8],
+    ) -> Result<()> {
         if !self.is_open {
-            return Err(BagError::BagNotOpen);
+            return Err(Ros1Error::NotOpen);
         }
         // Ids are assigned sequentially from 0, so the id is the index.
         let slot = connection.id as usize;
@@ -319,7 +353,9 @@ impl Ros1Writer {
             .connections
             .get(slot)
             .filter(|c| c.id == connection.id)
-            .ok_or_else(|| BagError::connection_not_found(&connection.topic))?;
+            .ok_or_else(|| Ros1Error::ConnectionNotFound {
+                topic: connection.topic.clone(),
+            })?;
         let descriptor_id = descriptor.id;
 
         // Emit the connection record into the chunk on first use within this chunk.
@@ -333,7 +369,10 @@ impl Ros1Writer {
 
         let offset = self.chunk_buf.len();
         if offset > u32::MAX as usize {
-            return Err(BagError::writer("chunk exceeds 4 GiB uncompressed"));
+            return Err(Ros1Error::TooLarge {
+                what: "uncompressed chunk",
+                len: offset,
+            });
         }
         encode_message_data_record(&mut self.chunk_buf, descriptor_id, timestamp_ns, data)?;
 
@@ -360,6 +399,10 @@ impl Ros1Writer {
     /// Flush the current chunk (if non-empty), write the tail records, then
     /// rewrite the bag header with the correct `index_pos`.
     pub fn close(&mut self) -> Result<()> {
+        self.close_unlogged().map_err(ErrorLogging::log)
+    }
+
+    fn close_unlogged(&mut self) -> Result<()> {
         if !self.is_open {
             return Ok(());
         }
@@ -372,7 +415,7 @@ impl Ros1Writer {
         }
         self.write_ready()?;
 
-        let file = self.file.as_mut().ok_or(BagError::BagNotOpen)?;
+        let file = self.file.as_mut().ok_or(Ros1Error::NotOpen)?;
         let index_pos = file.stream_position()?;
 
         // Connection records (re-declared in the tail for fast indexing).
@@ -465,8 +508,8 @@ impl Ros1Writer {
         rayon::spawn(move || {
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_chunk(job)))
-                    .map_err(|_| "chunk compression panicked".to_string())
-                    .and_then(|r| r.map_err(|e| e.to_string()));
+                    .unwrap_or(Err(Ros1Error::WorkerPanicked));
+            // A failed send means the writer is gone; nobody wants the chunk.
             let _ = tx.send((seq, result));
         });
 
@@ -481,10 +524,7 @@ impl Ros1Writer {
     /// something is in flight, so this cannot hang).
     fn receive(&mut self, block: bool) -> Result<()> {
         if block && self.inflight > 0 {
-            let item = self
-                .rx
-                .recv()
-                .map_err(|_| BagError::writer("chunk compression workers disconnected"))?;
+            let item = self.rx.recv().map_err(|_| Ros1Error::WorkersDisconnected)?;
             self.accept(item)?;
         }
         while let Ok(item) = self.rx.try_recv() {
@@ -495,7 +535,7 @@ impl Ros1Writer {
 
     fn accept(&mut self, (seq, result): ChunkResult) -> Result<()> {
         self.inflight -= 1;
-        let done = result.map_err(|e| BagError::writer(format!("chunk: {e}")))?;
+        let done = result?;
         self.ready.insert(seq, done);
         Ok(())
     }
@@ -504,7 +544,7 @@ impl Ros1Writer {
     fn write_ready(&mut self) -> Result<()> {
         while let Some(done) = self.ready.remove(&self.next_to_write) {
             self.next_to_write += 1;
-            let file = self.file.as_mut().ok_or(BagError::BagNotOpen)?;
+            let file = self.file.as_mut().ok_or(Ros1Error::NotOpen)?;
             let chunk_pos = file.stream_position()?;
 
             let mut chunk_header = RecordHeader::new();
@@ -551,7 +591,10 @@ fn write_bag_header<W: Write + Seek>(
     // Pad the data section so the whole record occupies BAG_HEADER_RESERVED bytes.
     let overhead = 4 + header_bytes.len() + 4;
     if overhead > BAG_HEADER_RESERVED {
-        return Err(BagError::writer("bag header exceeds reserved size"));
+        return Err(Ros1Error::HeaderTooLarge {
+            len: overhead,
+            reserved: BAG_HEADER_RESERVED,
+        });
     }
     let pad_len = BAG_HEADER_RESERVED - overhead;
     let padding = vec![b' '; pad_len];
@@ -598,8 +641,10 @@ fn encode_message_data_record(
 ) -> Result<()> {
     // Fixed-shape header (fields in sorted order: conn, op, time), written
     // without allocating a `RecordHeader`: 13 + 8 + 17 = 38 bytes.
-    let data_len =
-        u32::try_from(data.len()).map_err(|_| BagError::writer("message larger than 4 GiB"))?;
+    let data_len = u32::try_from(data.len()).map_err(|_| Ros1Error::TooLarge {
+        what: "message",
+        len: data.len(),
+    })?;
     let secs = (timestamp_ns / 1_000_000_000) as u32;
     let nsecs = (timestamp_ns % 1_000_000_000) as u32;
     buf.reserve(46 + data.len());
@@ -672,7 +717,10 @@ mod tests {
         w.open()?;
         let _ = w.add_connection("/imu", "sensor_msgs/Imu", "abc", "", false)?;
         let dup = w.add_connection("/imu", "sensor_msgs/Imu", "abc", "", false);
-        assert!(matches!(dup, Err(BagError::ConnectionAlreadyExists { .. })));
+        assert!(matches!(
+            dup,
+            Err(Ros1Error::ConnectionAlreadyExists { .. })
+        ));
         Ok(())
     }
 
@@ -682,7 +730,7 @@ mod tests {
         let path = dir.path().join("exists.bag");
         std::fs::write(&path, b"x").unwrap();
         let r = Ros1Writer::new(&path);
-        assert!(matches!(r, Err(BagError::BagAlreadyExists { .. })));
+        assert!(matches!(r, Err(Ros1Error::BagAlreadyExists { .. })));
         Ok(())
     }
 
@@ -737,7 +785,7 @@ mod tests {
             offered_qos_profiles: Vec::new(),
         };
         let result = w.write(&conn, 0, &[]);
-        assert!(matches!(result, Err(BagError::BagNotOpen)));
+        assert!(matches!(result, Err(Ros1Error::NotOpen)));
         Ok(())
     }
 
@@ -747,7 +795,7 @@ mod tests {
         let path = dir.path().join("noopen2.bag");
         let mut w = Ros1Writer::new(&path)?;
         let result = w.add_connection("/t", "std_msgs/String", "md5", "", false);
-        assert!(matches!(result, Err(BagError::BagNotOpen)));
+        assert!(matches!(result, Err(Ros1Error::NotOpen)));
         Ok(())
     }
 

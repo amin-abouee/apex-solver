@@ -20,7 +20,7 @@ pub mod writer;
 pub use copy::{CopyOptions, copy_filtered};
 pub use datalayout::{DataLayout, LayoutView, LayoutWriter, Piece, PieceKind, Scalar};
 pub use description::{Description, StreamTags, TagMap};
-pub use error::{Result, VrsError};
+pub use error::{LayoutError, LayoutResult, Result, VrsError, VrsResult};
 pub use format::{
     Compression, FILE_HEADER_SIZE, FileHeader, IndexEntry, RECORD_HEADER_SIZE, RecordHeader,
     RecordType, StreamId,

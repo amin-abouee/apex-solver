@@ -1,10 +1,11 @@
 //! SQLite3 storage backend implementation
 
 use super::StorageReader;
-use crate::rosbag::error::{BagError, ReaderError, Result};
+use crate::rosbag::ros2::error::{Ros2BagError, Ros2BagResult as Result};
 use crate::rosbag::types::{
     Connection, Message, MessageDefinition, MessageDefinitionFormat, RawMessage,
 };
+use apex_error::ErrorLogging;
 use rusqlite::Connection as SqliteConnection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -113,8 +114,8 @@ impl SqliteReader {
     }
 }
 
-impl StorageReader for SqliteReader {
-    fn open(&mut self) -> Result<()> {
+impl SqliteReader {
+    fn open_unlogged(&mut self) -> Result<()> {
         if self.is_open {
             return Ok(());
         }
@@ -141,10 +142,7 @@ impl StorageReader for SqliteReader {
                 let table_count: i32 = stmt.query_row([], |row| row.get(0))?;
 
                 if table_count != 2 {
-                    return Err(ReaderError::generic(format!(
-                        "Database {} is missing required tables",
-                        path.display()
-                    )));
+                    return Err(Ros2BagError::MissingTables { path: path.clone() });
                 }
             }
 
@@ -163,6 +161,12 @@ impl StorageReader for SqliteReader {
         self.is_open = true;
         Ok(())
     }
+}
+
+impl StorageReader for SqliteReader {
+    fn open(&mut self) -> Result<()> {
+        self.open_unlogged().map_err(ErrorLogging::log)
+    }
 
     fn close(&mut self) -> Result<()> {
         if !self.is_open {
@@ -177,7 +181,7 @@ impl StorageReader for SqliteReader {
 
     fn get_definitions(&self) -> Result<HashMap<String, MessageDefinition>> {
         if !self.is_open {
-            return Err(ReaderError::BagNotOpen);
+            return Err(Ros2BagError::NotOpen.log());
         }
         Ok(self.message_definitions.clone())
     }
@@ -214,7 +218,7 @@ impl StorageReader for SqliteReader {
         stop: Option<u64>,
     ) -> Result<Box<dyn Iterator<Item = Result<RawMessage>> + '_>> {
         if !self.is_open {
-            return Err(ReaderError::BagNotOpen);
+            return Err(Ros2BagError::NotOpen.log());
         }
         let topics = connections
             .filter(|c| !c.is_empty())
@@ -363,14 +367,17 @@ impl<'a> SqliteMessageIter<'a> {
             if self.topics.as_ref().is_some_and(|t| !t.contains(&name)) {
                 continue;
             }
-            let connection = self
+            // A topic in the database but not in `metadata.yaml` is still
+            // read, described by its own `topics` row.
+            let connection = match self
                 .reader
                 .topic_connections
                 .iter()
                 .find(|c| c.topic == name)
-                .cloned()
-                .unwrap_or_else(|| Connection {
-                    id: u32::try_from(id).unwrap_or(0),
+            {
+                Some(known) => known.clone(),
+                None => Connection {
+                    id: u32::try_from(id).map_err(|_| Ros2BagError::TopicIdOutOfRange { id })?,
                     topic: name,
                     message_type,
                     message_definition: MessageDefinition::default(),
@@ -378,7 +385,8 @@ impl<'a> SqliteMessageIter<'a> {
                     message_count: 0,
                     serialization_format,
                     offered_qos_profiles: Vec::new(),
-                });
+                },
+            };
             wanted_ids.push(id.to_string());
             topic_map.insert(id, std::sync::Arc::new(connection));
         }
@@ -427,16 +435,20 @@ impl<'a> SqliteMessageIter<'a> {
             state.last = Some((timestamp, id));
             fetched += 1;
             bytes += data.len();
-            if let Some(connection) = state.topic_map.get(&topic_id) {
-                state.page.push_back((
-                    (timestamp, id),
-                    Ok(RawMessage {
-                        connection: connection.clone(),
-                        timestamp: timestamp as u64,
-                        raw_data: data,
-                    }),
-                ));
-            }
+            // Without a topic filter every topic row is in the map, so a
+            // miss is a message pointing at a topic the file does not have.
+            let message = match state.topic_map.get(&topic_id) {
+                Some(connection) => Ok(RawMessage {
+                    connection: connection.clone(),
+                    timestamp: timestamp as u64,
+                    raw_data: data,
+                }),
+                None => Err(Ros2BagError::UnknownTopicId {
+                    message: id,
+                    topic_id,
+                }),
+            };
+            state.page.push_back(((timestamp, id), message));
             if bytes >= PAGE_BYTES {
                 break;
             }
@@ -491,7 +503,7 @@ impl Iterator for SqliteMessageIter<'_> {
         for idx in 0..self.reader.connections.len() {
             if let Err(e) = self.ensure_head(idx) {
                 self.failed = true;
-                return Some(Err(e));
+                return Some(Err(e.log()));
             }
             let Some((ts, id)) = self.head_key(idx) else {
                 continue;
@@ -506,7 +518,7 @@ impl Iterator for SqliteMessageIter<'_> {
             .get_mut(idx)
             .and_then(|s| s.as_mut())
             .and_then(|s| s.page.pop_front())
-            .map(|(_, msg)| msg)
+            .map(|(_, msg)| msg.map_err(ErrorLogging::log))
     }
 }
 
@@ -553,14 +565,12 @@ impl SqliteWriter {
         compression_mode: crate::rosbag::types::CompressionMode,
     ) -> Result<Self> {
         if compression_mode == crate::rosbag::types::CompressionMode::Storage {
-            return Err(BagError::writer(
-                "SQLite3 writer does not support storage-side compression",
-            ));
+            return Err(Ros2BagError::SqliteStorageCompression.log());
         }
 
         let file_name = path
             .file_name()
-            .ok_or_else(|| BagError::writer("bag path has no file name component"))?
+            .ok_or_else(|| Ros2BagError::no_file_name(path).log())?
             .to_string_lossy();
         let db_path = path.join(format!("{file_name}.db3"));
 
@@ -577,7 +587,7 @@ impl SqliteWriter {
 
     /// Create the database schema
     fn create_schema(&self) -> Result<()> {
-        let conn = self.connection.as_ref().ok_or(BagError::BagNotOpen)?;
+        let conn = self.connection.as_ref().ok_or(Ros2BagError::NotOpen)?;
 
         let schema = r#"
             CREATE TABLE schema(
@@ -618,10 +628,10 @@ impl SqliteWriter {
     }
 }
 
-impl crate::rosbag::storage::StorageWriter for SqliteWriter {
-    fn open(&mut self) -> Result<()> {
+impl SqliteWriter {
+    fn open_unlogged(&mut self) -> Result<()> {
         if self.is_open {
-            return Err(BagError::BagAlreadyOpen);
+            return Err(Ros2BagError::AlreadyOpen);
         }
 
         let connection = SqliteConnection::open(&self.db_path)?;
@@ -641,7 +651,7 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
         Ok(())
     }
 
-    fn close(&mut self, version: u32, metadata: &str) -> Result<()> {
+    fn close_unlogged(&mut self, version: u32, metadata: &str) -> Result<()> {
         if !self.is_open {
             return Ok(());
         }
@@ -662,12 +672,12 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
         Ok(())
     }
 
-    fn add_msgtype(&mut self, connection: &Connection) -> Result<()> {
+    fn add_msgtype_unlogged(&mut self, connection: &Connection) -> Result<()> {
         if !self.is_open {
-            return Err(BagError::BagNotOpen);
+            return Err(Ros2BagError::NotOpen);
         }
 
-        let conn = self.connection.as_ref().ok_or(BagError::BagNotOpen)?;
+        let conn = self.connection.as_ref().ok_or(Ros2BagError::NotOpen)?;
 
         let encoding = match connection.message_definition.format {
             MessageDefinitionFormat::Msg => "ros2msg",
@@ -688,16 +698,16 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
         Ok(())
     }
 
-    fn add_connection(
+    fn add_connection_unlogged(
         &mut self,
         connection: &Connection,
         offered_qos_profiles: &str,
     ) -> Result<()> {
         if !self.is_open {
-            return Err(BagError::BagNotOpen);
+            return Err(Ros2BagError::NotOpen);
         }
 
-        let conn = self.connection.as_ref().ok_or(BagError::BagNotOpen)?;
+        let conn = self.connection.as_ref().ok_or(Ros2BagError::NotOpen)?;
 
         conn.execute(
             "INSERT INTO topics(name, type, serialization_format, offered_qos_profiles, type_description_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -716,17 +726,22 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
         Ok(())
     }
 
-    fn write(&mut self, connection: &Connection, timestamp: u64, data: &[u8]) -> Result<()> {
+    fn write_unlogged(
+        &mut self,
+        connection: &Connection,
+        timestamp: u64,
+        data: &[u8],
+    ) -> Result<()> {
         if !self.is_open {
-            return Err(BagError::BagNotOpen);
+            return Err(Ros2BagError::NotOpen);
         }
 
         let topic_id = self
             .topic_id_map
             .get(&connection.topic)
-            .ok_or_else(|| BagError::connection_not_found(&connection.topic))?;
+            .ok_or_else(|| Ros2BagError::connection_not_found(&connection.topic))?;
 
-        let conn = self.connection.as_ref().ok_or(BagError::BagNotOpen)?;
+        let conn = self.connection.as_ref().ok_or(Ros2BagError::NotOpen)?;
 
         conn.prepare_cached("INSERT INTO messages(topic_id, timestamp, data) VALUES (?1, ?2, ?3)")?
             .execute((topic_id, timestamp as i64, data))?;
@@ -737,6 +752,36 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
             self.begin()?;
         }
         Ok(())
+    }
+}
+
+impl crate::rosbag::storage::StorageWriter for SqliteWriter {
+    fn open(&mut self) -> Result<()> {
+        self.open_unlogged().map_err(ErrorLogging::log)
+    }
+
+    fn close(&mut self, version: u32, metadata: &str) -> Result<()> {
+        self.close_unlogged(version, metadata)
+            .map_err(ErrorLogging::log)
+    }
+
+    fn add_msgtype(&mut self, connection: &Connection) -> Result<()> {
+        self.add_msgtype_unlogged(connection)
+            .map_err(ErrorLogging::log)
+    }
+
+    fn add_connection(
+        &mut self,
+        connection: &Connection,
+        offered_qos_profiles: &str,
+    ) -> Result<()> {
+        self.add_connection_unlogged(connection, offered_qos_profiles)
+            .map_err(ErrorLogging::log)
+    }
+
+    fn write(&mut self, connection: &Connection, timestamp: u64, data: &[u8]) -> Result<()> {
+        self.write_unlogged(connection, timestamp, data)
+            .map_err(ErrorLogging::log)
     }
 
     fn set_commit_interval(&mut self, messages: usize) {

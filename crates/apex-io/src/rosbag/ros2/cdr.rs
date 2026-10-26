@@ -2,14 +2,63 @@
 //!
 //! This module implements CDR deserialization according to the OMG CDR specification
 //! used by ROS2 for message serialization.
+//!
+//! Decoding runs once per message, so a failed decode is an expected outcome
+//! here: [`CdrError`] is `Copy`, never allocates and is never logged where it
+//! is built. The caller that gives up on a message or a read logs it.
 
-use crate::rosbag::error::{ReaderError, Result};
-use std::convert::TryInto;
+use std::fmt;
 
 /// Bytes of the CDR encapsulation header preceding the body.
 ///
 /// Alignment inside the body is measured from the end of this header.
 const ENCAPSULATION_HEADER_LEN: usize = 4;
+
+/// Result of a CDR decode.
+pub type CdrResult<T> = std::result::Result<T, CdrError>;
+
+/// What went wrong while decoding CDR bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CdrErrorKind {
+    /// Fewer than 4 bytes: no encapsulation header.
+    MissingHeader,
+    /// The encapsulation header names neither byte order.
+    InvalidEndianness {
+        /// The flag byte found.
+        flag: u8,
+    },
+    /// A field needs more bytes than remain.
+    Truncated {
+        /// Bytes the field needs.
+        need: usize,
+    },
+    /// A string field is not UTF-8.
+    InvalidUtf8,
+}
+
+impl fmt::Display for CdrErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingHeader => write!(f, "message is too short for the encapsulation header"),
+            Self::InvalidEndianness { flag } => write!(f, "endianness flag {flag} is invalid"),
+            Self::Truncated { need } => write!(f, "field needs {need} bytes"),
+            Self::InvalidUtf8 => write!(f, "string is not UTF-8"),
+        }
+    }
+}
+
+/// A CDR decode failure: what, at which byte, in a message of how many bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("CDR {kind} at byte {position} of {len}")]
+pub struct CdrError {
+    /// What went wrong.
+    pub kind: CdrErrorKind,
+    /// Read position when it went wrong.
+    pub position: usize,
+    /// Message length in bytes.
+    pub len: usize,
+}
 
 /// CDR header information
 #[derive(Debug, Clone, Copy)]
@@ -34,17 +83,17 @@ pub struct CdrDeserializer<'a> {
 
 impl<'a> CdrDeserializer<'a> {
     /// Create a new CDR deserializer from raw message data
-    pub fn new(data: &'a [u8]) -> Result<Self> {
-        if data.len() < 4 {
-            return Err(ReaderError::generic("CDR data too short for header"));
-        }
-
-        // Parse CDR header (4 bytes)
-        let header = CdrHeader::parse(&data[0..4])?;
+    pub fn new(data: &'a [u8]) -> CdrResult<Self> {
+        let header_bytes = data.get(..ENCAPSULATION_HEADER_LEN).ok_or(CdrError {
+            kind: CdrErrorKind::MissingHeader,
+            position: 0,
+            len: data.len(),
+        })?;
+        let header = CdrHeader::parse(header_bytes)?;
 
         Ok(Self {
             data,
-            pos: 4, // Skip the 4-byte header
+            pos: ENCAPSULATION_HEADER_LEN,
             endianness: header.endianness,
         })
     }
@@ -61,12 +110,22 @@ impl<'a> CdrDeserializer<'a> {
 
     /// Check if there are enough bytes remaining from current position
     pub fn has_remaining(&self, bytes: usize) -> bool {
-        self.pos + bytes <= self.data.len()
+        self.pos
+            .checked_add(bytes)
+            .is_some_and(|end| end <= self.data.len())
     }
 
     /// Get a reference to the underlying data
     pub fn data(&self) -> &[u8] {
         self.data
+    }
+
+    fn error(&self, kind: CdrErrorKind) -> CdrError {
+        CdrError {
+            kind,
+            position: self.pos,
+            len: self.data.len(),
+        }
     }
 
     /// Align the read cursor to `alignment`, measured from the **body**.
@@ -85,122 +144,136 @@ impl<'a> CdrDeserializer<'a> {
         self.pos = aligned + ENCAPSULATION_HEADER_LEN;
     }
 
-    /// Read a primitive value with proper alignment and endianness
-    fn read_primitive<T>(&mut self, size: usize) -> Result<T>
-    where
-        T: FromBytes,
-    {
-        self.align(size);
+    /// Take the next `len` bytes without alignment.
+    fn take_bytes(&mut self, len: usize) -> CdrResult<&'a [u8]> {
+        let data: &'a [u8] = self.data;
+        let bytes = self
+            .pos
+            .checked_add(len)
+            .and_then(|end| data.get(self.pos..end))
+            .ok_or_else(|| self.error(CdrErrorKind::Truncated { need: len }))?;
+        self.pos += len;
+        Ok(bytes)
+    }
 
-        if self.pos + size > self.data.len() {
-            return Err(ReaderError::generic(format!(
-                "CDR data truncated: need {} bytes at pos {}, but only {} bytes available",
-                size,
-                self.pos,
-                self.data.len()
-            )));
-        }
-
-        let bytes = &self.data[self.pos..self.pos + size];
-        self.pos += size;
-
-        T::from_bytes(bytes, self.endianness)
+    /// Align to `N` and take the next `N` bytes of a primitive.
+    fn take<const N: usize>(&mut self) -> CdrResult<[u8; N]> {
+        self.align(N);
+        let bytes = self.take_bytes(N)?;
+        let mut array = [0u8; N];
+        array.copy_from_slice(bytes);
+        Ok(array)
     }
 
     /// Read an i8 value
-    pub fn read_i8(&mut self) -> Result<i8> {
-        self.read_primitive(1)
+    pub fn read_i8(&mut self) -> CdrResult<i8> {
+        Ok(i8::from_le_bytes(self.take::<1>()?))
     }
 
     /// Read a u8 value
-    pub fn read_u8(&mut self) -> Result<u8> {
-        self.read_primitive(1)
+    pub fn read_u8(&mut self) -> CdrResult<u8> {
+        Ok(self.take::<1>()?[0])
     }
 
     /// Read a u16 value
-    pub fn read_u16(&mut self) -> Result<u16> {
-        self.read_primitive(2)
+    pub fn read_u16(&mut self) -> CdrResult<u16> {
+        let bytes = self.take::<2>()?;
+        Ok(match self.endianness {
+            Endianness::LittleEndian => u16::from_le_bytes(bytes),
+            Endianness::BigEndian => u16::from_be_bytes(bytes),
+        })
     }
 
     /// Read an i32 value
-    pub fn read_i32(&mut self) -> Result<i32> {
-        self.read_primitive(4)
+    pub fn read_i32(&mut self) -> CdrResult<i32> {
+        let bytes = self.take::<4>()?;
+        Ok(match self.endianness {
+            Endianness::LittleEndian => i32::from_le_bytes(bytes),
+            Endianness::BigEndian => i32::from_be_bytes(bytes),
+        })
     }
 
     /// Read a u32 value
-    pub fn read_u32(&mut self) -> Result<u32> {
-        self.read_primitive(4)
+    pub fn read_u32(&mut self) -> CdrResult<u32> {
+        let bytes = self.take::<4>()?;
+        Ok(match self.endianness {
+            Endianness::LittleEndian => u32::from_le_bytes(bytes),
+            Endianness::BigEndian => u32::from_be_bytes(bytes),
+        })
     }
 
     /// Read an i64 value
-    pub fn read_i64(&mut self) -> Result<i64> {
-        self.read_primitive(8)
+    pub fn read_i64(&mut self) -> CdrResult<i64> {
+        let bytes = self.take::<8>()?;
+        Ok(match self.endianness {
+            Endianness::LittleEndian => i64::from_le_bytes(bytes),
+            Endianness::BigEndian => i64::from_be_bytes(bytes),
+        })
     }
 
     /// Read a u64 value
-    pub fn read_u64(&mut self) -> Result<u64> {
-        self.read_primitive(8)
+    pub fn read_u64(&mut self) -> CdrResult<u64> {
+        let bytes = self.take::<8>()?;
+        Ok(match self.endianness {
+            Endianness::LittleEndian => u64::from_le_bytes(bytes),
+            Endianness::BigEndian => u64::from_be_bytes(bytes),
+        })
+    }
+
+    /// Read an f32 value
+    pub fn read_f32(&mut self) -> CdrResult<f32> {
+        let bytes = self.take::<4>()?;
+        Ok(match self.endianness {
+            Endianness::LittleEndian => f32::from_le_bytes(bytes),
+            Endianness::BigEndian => f32::from_be_bytes(bytes),
+        })
     }
 
     /// Read an f64 value
-    pub fn read_f64(&mut self) -> Result<f64> {
-        // In CDR, f64 values are aligned to 8-byte boundaries
-        self.align(8);
-
-        if self.pos + 8 > self.data.len() {
-            return Err(ReaderError::generic(format!(
-                "CDR data truncated: need 8 bytes at pos {}, but only {} bytes available",
-                self.pos,
-                self.data.len()
-            )));
-        }
-
-        let bytes = &self.data[self.pos..self.pos + 8];
-        self.pos += 8;
-
-        f64::from_bytes(bytes, self.endianness)
+    pub fn read_f64(&mut self) -> CdrResult<f64> {
+        let bytes = self.take::<8>()?;
+        Ok(match self.endianness {
+            Endianness::LittleEndian => f64::from_le_bytes(bytes),
+            Endianness::BigEndian => f64::from_be_bytes(bytes),
+        })
     }
 
     /// Read a string value
-    pub fn read_string(&mut self) -> Result<String> {
+    pub fn read_string(&mut self) -> CdrResult<String> {
         let length = self.read_u32()? as usize;
 
         if length == 0 {
             return Ok(String::new());
         }
 
-        if self.pos + length > self.data.len() {
-            return Err(ReaderError::generic("CDR string data truncated"));
-        }
-
-        // String includes null terminator, but we need to handle the case where it might not
-        let string_bytes = if length > 0 && self.data[self.pos + length - 1] == 0 {
-            // Has null terminator
-            &self.data[self.pos..self.pos + length - 1]
-        } else {
-            // No null terminator
-            &self.data[self.pos..self.pos + length]
+        let start = self.pos;
+        let bytes = self.take_bytes(length)?;
+        // The length counts a null terminator, but tolerate one that is missing.
+        let string_bytes = match bytes.split_last() {
+            Some((0, text)) => text,
+            _ => bytes,
         };
 
-        self.pos += length;
-
-        String::from_utf8(string_bytes.to_vec())
-            .map_err(|_| ReaderError::generic("Invalid UTF-8 in CDR string"))
+        String::from_utf8(string_bytes.to_vec()).map_err(|_| CdrError {
+            kind: CdrErrorKind::InvalidUtf8,
+            position: start,
+            len: self.data.len(),
+        })
     }
 
     /// Read a fixed-size array of f64 values
-    pub fn read_f64_array<const N: usize>(&mut self) -> Result<[f64; N]> {
+    pub fn read_f64_array<const N: usize>(&mut self) -> CdrResult<[f64; N]> {
         let mut array = [0.0; N];
-        for item in array.iter_mut().take(N) {
+        for item in &mut array {
             *item = self.read_f64()?;
         }
         Ok(array)
     }
 
     /// Read a sequence (variable-length array) of elements
-    pub fn read_sequence<T, F>(&mut self, read_element: F) -> Result<Vec<T>>
+    pub fn read_sequence<T, F>(&mut self, read_element: F) -> CdrResult<Vec<T>>
     where
-        F: Fn(&mut Self) -> Result<T>,
+        F: Fn(&mut Self) -> CdrResult<T>,
     {
         let length = self.read_u32()? as usize;
         // A corrupt length must not ask for gigabytes of capacity: the most
@@ -216,176 +289,42 @@ impl<'a> CdrDeserializer<'a> {
     }
 
     /// Read a sequence of bytes (for data fields)
-    pub fn read_byte_sequence(&mut self) -> Result<Vec<u8>> {
+    pub fn read_byte_sequence(&mut self) -> CdrResult<Vec<u8>> {
         let length = self.read_u32()? as usize;
-
-        if self.pos + length > self.data.len() {
-            return Err(ReaderError::generic(format!(
-                "CDR data truncated: need {} bytes at pos {}, but only {} bytes available",
-                length,
-                self.pos,
-                self.data.len()
-            )));
-        }
-
-        let bytes = self.data[self.pos..self.pos + length].to_vec();
-        self.pos += length;
-
-        Ok(bytes)
+        Ok(self.take_bytes(length)?.to_vec())
     }
 
     /// Read a boolean value
-    pub fn read_bool(&mut self) -> Result<bool> {
+    pub fn read_bool(&mut self) -> CdrResult<bool> {
         let byte = self.read_u8()?;
         Ok(byte != 0)
-    }
-
-    /// Read an f32 value
-    pub fn read_f32(&mut self) -> Result<f32> {
-        self.align(4);
-
-        if self.pos + 4 > self.data.len() {
-            return Err(ReaderError::generic(format!(
-                "CDR data truncated: need 4 bytes at pos {}, but only {} bytes available",
-                self.pos,
-                self.data.len()
-            )));
-        }
-
-        let bytes = &self.data[self.pos..self.pos + 4];
-        self.pos += 4;
-
-        f32::from_bytes(bytes, self.endianness)
     }
 }
 
 impl CdrHeader {
     /// Parse CDR header from the first 4 bytes
-    pub fn parse(header_bytes: &[u8]) -> Result<Self> {
-        if header_bytes.len() != 4 {
-            return Err(ReaderError::generic("CDR header must be exactly 4 bytes"));
-        }
+    pub fn parse(header_bytes: &[u8]) -> CdrResult<Self> {
+        let error = |kind| CdrError {
+            kind,
+            position: 0,
+            len: header_bytes.len(),
+        };
+        let [_, flag, kind, _] = header_bytes else {
+            return Err(error(CdrErrorKind::MissingHeader));
+        };
 
-        let endianness = match header_bytes[1] {
+        let endianness = match flag {
             0 => Endianness::BigEndian,
             1 => Endianness::LittleEndian,
-            _ => return Err(ReaderError::generic("Invalid CDR endianness flag")),
+            &flag => return Err(error(CdrErrorKind::InvalidEndianness { flag })),
         };
 
         Ok(Self {
             endianness,
-            encapsulation_kind: header_bytes[2],
+            encapsulation_kind: *kind,
         })
     }
 }
-
-/// Trait for converting bytes to primitive types with endianness handling
-trait FromBytes: Sized {
-    fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self>;
-}
-
-impl FromBytes for i8 {
-    fn from_bytes(bytes: &[u8], _endianness: Endianness) -> Result<Self> {
-        if bytes.len() != 1 {
-            return Err(ReaderError::generic("Invalid i8 bytes"));
-        }
-        Ok(bytes[0] as i8)
-    }
-}
-
-impl FromBytes for u8 {
-    fn from_bytes(bytes: &[u8], _endianness: Endianness) -> Result<Self> {
-        if bytes.len() != 1 {
-            return Err(ReaderError::generic("Invalid u8 bytes"));
-        }
-        Ok(bytes[0])
-    }
-}
-
-impl FromBytes for u16 {
-    fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self> {
-        let array: [u8; 2] = bytes
-            .try_into()
-            .map_err(|_| ReaderError::generic("Invalid u16 bytes"))?;
-
-        Ok(match endianness {
-            Endianness::LittleEndian => u16::from_le_bytes(array),
-            Endianness::BigEndian => u16::from_be_bytes(array),
-        })
-    }
-}
-
-impl FromBytes for i32 {
-    fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self> {
-        let array: [u8; 4] = bytes
-            .try_into()
-            .map_err(|_| ReaderError::generic("Invalid i32 bytes"))?;
-
-        Ok(match endianness {
-            Endianness::LittleEndian => i32::from_le_bytes(array),
-            Endianness::BigEndian => i32::from_be_bytes(array),
-        })
-    }
-}
-
-impl FromBytes for u32 {
-    fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self> {
-        let array: [u8; 4] = bytes
-            .try_into()
-            .map_err(|_| ReaderError::generic("Invalid u32 bytes"))?;
-
-        Ok(match endianness {
-            Endianness::LittleEndian => u32::from_le_bytes(array),
-            Endianness::BigEndian => u32::from_be_bytes(array),
-        })
-    }
-}
-
-impl FromBytes for i64 {
-    fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self> {
-        Ok(u64::from_bytes(bytes, endianness)? as i64)
-    }
-}
-
-impl FromBytes for u64 {
-    fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self> {
-        let array: [u8; 8] = bytes
-            .try_into()
-            .map_err(|_| ReaderError::generic("Invalid u64 bytes"))?;
-
-        Ok(match endianness {
-            Endianness::LittleEndian => u64::from_le_bytes(array),
-            Endianness::BigEndian => u64::from_be_bytes(array),
-        })
-    }
-}
-
-impl FromBytes for f32 {
-    fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self> {
-        let array: [u8; 4] = bytes
-            .try_into()
-            .map_err(|_| ReaderError::generic("Invalid f32 bytes"))?;
-
-        Ok(match endianness {
-            Endianness::LittleEndian => f32::from_le_bytes(array),
-            Endianness::BigEndian => f32::from_be_bytes(array),
-        })
-    }
-}
-
-impl FromBytes for f64 {
-    fn from_bytes(bytes: &[u8], endianness: Endianness) -> Result<Self> {
-        let array: [u8; 8] = bytes
-            .try_into()
-            .map_err(|_| ReaderError::generic("Invalid f64 bytes"))?;
-
-        Ok(match endianness {
-            Endianness::LittleEndian => f64::from_le_bytes(array),
-            Endianness::BigEndian => f64::from_be_bytes(array),
-        })
-    }
-}
-
 /// CDR serializer for writing binary message data (little-endian, basic encapsulation).
 ///
 /// Writes the 4-byte CDR header `[0x00, 0x01, 0x00, 0x00]` on construction, then

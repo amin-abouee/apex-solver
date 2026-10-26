@@ -29,13 +29,17 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::rosbag::error::ReaderError;
+use super::error::{McapError, McapResult};
 
 /// MCAP file magic (`0x89 "MCAP0" CR LF`).
 const MAGIC: &[u8] = b"\x89MCAP0\r\n";
 
 /// Footer record: opcode (1) + length (8) + 20 content bytes, then magic (8).
 const FOOTER_SPAN: u64 = 9 + 20 + MAGIC.len() as u64;
+
+/// Cap on the buffer reserved for a decompressed chunk; the declared size is
+/// untrusted, so a larger chunk grows its buffer while it inflates.
+const MAX_CHUNK_BYTES: usize = 1 << 28;
 
 /// Opcodes used by this reader.
 const OP_HEADER: u8 = 0x01;
@@ -105,6 +109,16 @@ impl McapSummary {
     }
 }
 
+/// The channel a message was recorded on.
+#[derive(Debug, Clone)]
+pub(crate) struct ChannelMeta {
+    pub topic: Rc<str>,
+    /// Payload encoding, e.g. `cdr` or `ros1`.
+    pub encoding: Rc<str>,
+    /// Schema name, or the encoding when the channel has no schema.
+    pub message_type: Rc<str>,
+}
+
 /// A message yielded by [`ChunkMessageStream`], with its payload copied out
 /// of the transient chunk buffer.
 #[derive(Debug, Clone)]
@@ -120,12 +134,40 @@ pub(crate) struct RawMcapMessage {
     pub data: Vec<u8>,
 }
 
-/// Little-endian u64 from exactly 8 bytes.
-fn le_u64(bytes: &[u8]) -> Result<u64, ReaderError> {
-    let array: [u8; 8] = bytes
-        .try_into()
-        .map_err(|_| ReaderError::generic("MCAP record truncated: u64 needs 8 bytes"))?;
-    Ok(u64::from_le_bytes(array))
+/// Little-endian u64 from the first 8 bytes of `bytes`.
+fn le_u64(bytes: &[u8]) -> McapResult<u64> {
+    let (array, _) = bytes.split_first_chunk::<8>().ok_or(McapError::Truncated {
+        what: "u64 field",
+        offset: 0,
+        need: 8,
+        available: bytes.len() as u64,
+    })?;
+    Ok(u64::from_le_bytes(*array))
+}
+
+/// The record `[start, start + 9 + len)` of a `buf_len`-byte buffer whose
+/// 9-byte prefix declared `len`, or why it does not fit.
+fn record_end(start: usize, len: u64, buf_len: usize, what: &'static str) -> McapResult<usize> {
+    let body = start.checked_add(9).ok_or(McapError::LengthOverflow {
+        offset: start as u64,
+        len,
+    })?;
+    let end = usize::try_from(len)
+        .ok()
+        .and_then(|len| body.checked_add(len))
+        .ok_or(McapError::LengthOverflow {
+            offset: start as u64,
+            len,
+        })?;
+    if end > buf_len {
+        return Err(McapError::Truncated {
+            what,
+            offset: body as u64,
+            need: len,
+            available: buf_len.saturating_sub(body) as u64,
+        });
+    }
+    Ok(end)
 }
 
 /// IEEE CRC-32 (the polynomial MCAP and zlib share), SIMD-accelerated.
@@ -149,42 +191,42 @@ impl<'a> Buf<'a> {
         self.data.len().saturating_sub(self.pos)
     }
 
-    fn take(&mut self, n: usize) -> Result<&'a [u8], ReaderError> {
+    fn take(&mut self, n: usize) -> McapResult<&'a [u8]> {
         if self.remaining() < n {
-            return Err(ReaderError::generic(format!(
-                "MCAP record truncated: need {n} bytes at offset {}, have {}",
-                self.pos,
-                self.remaining()
-            )));
+            return Err(McapError::Truncated {
+                what: "record field",
+                offset: self.pos as u64,
+                need: n as u64,
+                available: self.remaining() as u64,
+            });
         }
         let slice = &self.data[self.pos..self.pos + n];
         self.pos += n;
         Ok(slice)
     }
 
-    fn read_u16(&mut self) -> Result<u16, ReaderError> {
+    fn read_u16(&mut self) -> McapResult<u16> {
         let bytes = self.take(2)?;
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
-    fn read_u32(&mut self) -> Result<u32, ReaderError> {
+    fn read_u32(&mut self) -> McapResult<u32> {
         let bytes = self.take(4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
-    fn read_u64(&mut self) -> Result<u64, ReaderError> {
+    fn read_u64(&mut self) -> McapResult<u64> {
         le_u64(self.take(8)?)
     }
 
-    fn read_str(&mut self) -> Result<String, ReaderError> {
+    fn read_str(&mut self) -> McapResult<String> {
         let len = self.read_u32()? as usize;
         let bytes = self.take(len)?;
-        String::from_utf8(bytes.to_vec())
-            .map_err(|e| ReaderError::generic(format!("MCAP string is not UTF-8: {e}")))
+        String::from_utf8(bytes.to_vec()).map_err(McapError::NotUtf8)
     }
 
     /// Skip a `Map<K, V>` by its byte length (readers may ignore entries).
-    fn skip_map(&mut self) -> Result<(), ReaderError> {
+    fn skip_map(&mut self) -> McapResult<()> {
         let len = self.read_u32()? as usize;
         self.take(len)?;
         Ok(())
@@ -192,11 +234,7 @@ impl<'a> Buf<'a> {
 }
 
 /// Parse one summary-section record into the summary accumulator.
-fn parse_summary_record(
-    op: u8,
-    content: &[u8],
-    summary: &mut McapSummary,
-) -> Result<(), ReaderError> {
+fn parse_summary_record(op: u8, content: &[u8], summary: &mut McapSummary) -> McapResult<()> {
     match op {
         OP_SCHEMA => {
             let mut buf = Buf::new(content);
@@ -243,7 +281,7 @@ fn parse_summary_record(
             let mut channel_counts = BTreeMap::new();
             if buf.remaining() >= 4 {
                 let byte_len = buf.read_u32()? as usize;
-                let end = buf.pos + byte_len;
+                let end = buf.pos.saturating_add(byte_len);
                 while buf.pos + 10 <= end.min(content.len()) {
                     let id = buf.read_u16()?;
                     let count = buf.read_u64()?;
@@ -290,28 +328,26 @@ fn parse_summary_record(
 /// Never reads message data: the region parsed is bounded by the footer's
 /// own offsets, and its size is validated against the file length before
 /// being read into memory.
-pub(crate) fn read_summary(file: &mut File) -> Result<Option<McapSummary>, ReaderError> {
+pub(crate) fn read_summary(file: &mut File) -> McapResult<Option<McapSummary>> {
     let file_len = file
         .metadata()
-        .map_err(|e| ReaderError::generic(format!("Failed to stat MCAP file: {e}")))?
+        .map_err(McapError::io("reading the file size"))?
         .len();
 
     if file_len < MAGIC.len() as u64 {
-        return Err(ReaderError::generic(format!(
-            "File too small ({file_len} bytes) to be an MCAP container"
-        )));
+        return Err(McapError::TooSmall { len: file_len });
     }
 
     // Leading magic.
     file.seek(SeekFrom::Start(0))
-        .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP file: {e}")))?;
+        .map_err(McapError::io("seeking the leading magic"))?;
     let mut magic = [0u8; MAGIC.len()];
     file.read_exact(&mut magic)
-        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP magic: {e}")))?;
+        .map_err(McapError::io("reading the leading magic"))?;
     if magic != MAGIC {
-        return Err(ReaderError::generic(
-            "Leading bytes are not the MCAP magic; not an MCAP file",
-        ));
+        return Err(McapError::BadMagic {
+            position: "leading",
+        });
     }
 
     // Structure sanity for anything claiming to have a footer: magic +
@@ -322,34 +358,33 @@ pub(crate) fn read_summary(file: &mut File) -> Result<Option<McapSummary>, Reade
 
     // Trailing magic.
     file.seek(SeekFrom::Start(file_len - MAGIC.len() as u64))
-        .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP file: {e}")))?;
+        .map_err(McapError::io("seeking the trailing magic"))?;
     let mut magic = [0u8; MAGIC.len()];
     file.read_exact(&mut magic)
-        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP magic: {e}")))?;
+        .map_err(McapError::io("reading the trailing magic"))?;
     if magic != MAGIC {
-        return Err(ReaderError::generic(
-            "Trailing bytes are not the MCAP magic; file may be truncated",
-        ));
+        return Err(McapError::BadMagic {
+            position: "trailing",
+        });
     }
 
     // Footer record: 9-byte prefix + 20 content bytes, ending right before
     // the trailing magic.
     file.seek(SeekFrom::Start(file_len - FOOTER_SPAN))
-        .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP file: {e}")))?;
+        .map_err(McapError::io("seeking the footer"))?;
     let mut footer = [0u8; 9 + 20];
     file.read_exact(&mut footer)
-        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP footer: {e}")))?;
+        .map_err(McapError::io("reading the footer"))?;
     if footer[0] != 0x02 {
-        return Err(ReaderError::generic(format!(
-            "Expected Footer record before trailing magic, found opcode 0x{:02x}",
-            footer[0]
-        )));
+        return Err(McapError::UnexpectedOpcode {
+            expected: "Footer",
+            found: footer[0],
+            offset: file_len - FOOTER_SPAN,
+        });
     }
     let content_len = le_u64(&footer[1..9])?;
     if content_len != 20 {
-        return Err(ReaderError::generic(format!(
-            "Footer content length is {content_len}, expected 20"
-        )));
+        return Err(McapError::FooterLength { len: content_len });
     }
     let summary_start = le_u64(&footer[9..17])?;
     let summary_offset_start = le_u64(&footer[17..25])?;
@@ -366,29 +401,27 @@ pub(crate) fn read_summary(file: &mut File) -> Result<Option<McapSummary>, Reade
         file_len - FOOTER_SPAN
     };
     if summary_start > summary_end || summary_end > file_len - FOOTER_SPAN {
-        return Err(ReaderError::generic(format!(
-            "Footer summary offsets are inconsistent: start {summary_start}, end {summary_end}, file {file_len}"
-        )));
+        return Err(McapError::SummaryOffsets {
+            start: summary_start,
+            end: summary_end,
+            file_len,
+        });
     }
 
     let summary_len = (summary_end - summary_start) as usize;
     file.seek(SeekFrom::Start(summary_start))
-        .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP summary: {e}")))?;
+        .map_err(McapError::io("seeking the summary"))?;
     let mut section = vec![0u8; summary_len];
     file.read_exact(&mut section)
-        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP summary: {e}")))?;
+        .map_err(McapError::io("reading the summary"))?;
 
     let mut summary = McapSummary::default();
     let mut cursor = 0usize;
     while cursor + 9 <= section.len() {
         let op = section[cursor];
-        let len = le_u64(&section[cursor + 1..cursor + 9])? as usize;
-        cursor += 9;
-        let end = cursor + len as usize;
-        if end > section.len() {
-            return Err(ReaderError::generic("Summary section truncated mid-record"));
-        }
-        parse_summary_record(op, &section[cursor..end], &mut summary)?;
+        let len = le_u64(&section[cursor + 1..cursor + 9])?;
+        let end = record_end(cursor, len, section.len(), "summary record")?;
+        parse_summary_record(op, &section[cursor + 9..end], &mut summary)?;
         cursor = end;
     }
 
@@ -397,20 +430,26 @@ pub(crate) fn read_summary(file: &mut File) -> Result<Option<McapSummary>, Reade
 
 /// Locate the data section start (just past the Header record) for the
 /// unindexed linear walk.
-fn data_section_start(file: &mut File) -> Result<u64, ReaderError> {
+fn data_section_start(file: &mut File) -> McapResult<u64> {
     file.seek(SeekFrom::Start(MAGIC.len() as u64))
-        .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP file: {e}")))?;
+        .map_err(McapError::io("seeking the header record"))?;
     let mut prefix = [0u8; 9];
     file.read_exact(&mut prefix)
-        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP header: {e}")))?;
+        .map_err(McapError::io("reading the header record"))?;
     if prefix[0] != OP_HEADER {
-        return Err(ReaderError::generic(format!(
-            "Expected Header record after magic, found opcode 0x{:02x}",
-            prefix[0]
-        )));
+        return Err(McapError::UnexpectedOpcode {
+            expected: "Header",
+            found: prefix[0],
+            offset: MAGIC.len() as u64,
+        });
     }
     let len = le_u64(&prefix[1..9])?;
-    Ok(MAGIC.len() as u64 + 9 + len)
+    (MAGIC.len() as u64 + 9)
+        .checked_add(len)
+        .ok_or(McapError::LengthOverflow {
+            offset: MAGIC.len() as u64,
+            len,
+        })
 }
 
 /// Decompress a chunk's `records` payload according to its declared
@@ -421,37 +460,66 @@ fn decompress_chunk_records(
     compressed: &[u8],
     uncompressed_size: u64,
     uncompressed_crc: u32,
-) -> Result<Vec<u8>, ReaderError> {
-    let expected = uncompressed_size as usize;
+) -> McapResult<Vec<u8>> {
+    // The declared size is untrusted: it caps the zstd output and seeds the
+    // lz4 buffer only up to a sane bound.
+    let expected = usize::try_from(uncompressed_size).unwrap_or(usize::MAX);
     let records = match compression {
         "" => compressed.to_vec(),
-        "zstd" => zstd::bulk::decompress(compressed, expected).map_err(|e| {
-            ReaderError::generic(format!("Failed to decompress zstd MCAP chunk: {e}"))
-        })?,
+        // The one-shot decoder reserves its whole capacity up front, so it
+        // only gets sizes that are safe to allocate; anything larger streams
+        // and grows with the bytes actually produced.
+        "zstd" if expected <= MAX_CHUNK_BYTES => zstd::bulk::decompress(compressed, expected)
+            .map_err(|source| McapError::Decompress {
+                codec: "zstd",
+                source,
+            })?,
+        "zstd" => {
+            let mut out = Vec::with_capacity(MAX_CHUNK_BYTES);
+            zstd::stream::read::Decoder::new(compressed)
+                .and_then(|decoder| {
+                    decoder
+                        .take(uncompressed_size.saturating_add(1))
+                        .read_to_end(&mut out)
+                })
+                .map_err(|source| McapError::Decompress {
+                    codec: "zstd",
+                    source,
+                })?;
+            out
+        }
         "lz4" => {
-            let mut reader = lz4_flex::frame::FrameDecoder::new(std::io::Cursor::new(compressed));
-            let mut out = Vec::with_capacity(expected);
-            reader.read_to_end(&mut out).map_err(|e| {
-                ReaderError::generic(format!("Failed to decompress lz4 MCAP chunk: {e}"))
-            })?;
+            let reader = lz4_flex::frame::FrameDecoder::new(std::io::Cursor::new(compressed));
+            let mut out = Vec::with_capacity(expected.min(MAX_CHUNK_BYTES));
+            reader
+                .take(uncompressed_size.saturating_add(1))
+                .read_to_end(&mut out)
+                .map_err(|source| McapError::Decompress {
+                    codec: "lz4",
+                    source,
+                })?;
             out
         }
         other => {
-            return Err(ReaderError::generic(format!(
-                "Unsupported MCAP chunk compression: {other:?}"
-            )));
+            return Err(McapError::UnsupportedCompression {
+                compression: other.to_string(),
+            });
         }
     };
-    if records.len() != expected {
-        return Err(ReaderError::generic(format!(
-            "MCAP chunk decompressed to {} bytes, header declared {expected}",
-            records.len()
-        )));
+    if records.len() as u64 != uncompressed_size {
+        return Err(McapError::ChunkSize {
+            expected: uncompressed_size,
+            actual: records.len(),
+        });
     }
-    if uncompressed_crc != 0 && crc32(&records) != uncompressed_crc {
-        return Err(ReaderError::generic(
-            "MCAP chunk CRC mismatch (payload corrupt)",
-        ));
+    if uncompressed_crc != 0 {
+        let actual = crc32(&records);
+        if actual != uncompressed_crc {
+            return Err(McapError::ChunkCrc {
+                expected: uncompressed_crc,
+                actual,
+            });
+        }
     }
     Ok(records)
 }
@@ -463,33 +531,46 @@ fn read_chunk_records(
     file: &mut File,
     file_len: u64,
     chunk: &ChunkIndexLite,
-) -> Result<Vec<u8>, ReaderError> {
-    let record_len = 8 + 8 + 8 + 4 + 4 + chunk.compression.len() as u64 + 8 + chunk.compressed_size;
-    let end = chunk
-        .chunk_start_offset
-        .checked_add(9 + record_len)
-        .ok_or_else(|| ReaderError::generic("MCAP chunk offset overflow"))?;
+) -> McapResult<Vec<u8>> {
+    let overflow = McapError::LengthOverflow {
+        offset: chunk.chunk_start_offset,
+        len: chunk.compressed_size,
+    };
+    let record_len = (8 + 8 + 8 + 4 + 4 + 8 + chunk.compression.len() as u64)
+        .checked_add(chunk.compressed_size)
+        .ok_or(overflow)?;
+    let end = record_len
+        .checked_add(9)
+        .and_then(|len| chunk.chunk_start_offset.checked_add(len))
+        .ok_or(McapError::LengthOverflow {
+            offset: chunk.chunk_start_offset,
+            len: record_len,
+        })?;
     if end > file_len {
-        return Err(ReaderError::generic(format!(
-            "MCAP chunk at {} extends past end of file",
-            chunk.chunk_start_offset
-        )));
+        return Err(McapError::Truncated {
+            what: "chunk record",
+            offset: chunk.chunk_start_offset,
+            need: record_len,
+            available: file_len.saturating_sub(chunk.chunk_start_offset),
+        });
     }
 
     file.seek(SeekFrom::Start(chunk.chunk_start_offset))
-        .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP chunk: {e}")))?;
+        .map_err(McapError::io("seeking a chunk"))?;
     let mut prefix = [0u8; 9];
     file.read_exact(&mut prefix)
-        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP chunk: {e}")))?;
+        .map_err(McapError::io("reading a chunk"))?;
     if prefix[0] != OP_CHUNK {
-        return Err(ReaderError::generic(format!(
-            "Chunk index points to opcode 0x{:02x}, expected a Chunk record",
-            prefix[0]
-        )));
+        return Err(McapError::UnexpectedOpcode {
+            expected: "Chunk",
+            found: prefix[0],
+            offset: chunk.chunk_start_offset,
+        });
     }
+    // Bounded by the file length checked above.
     let mut content = vec![0u8; record_len as usize];
     file.read_exact(&mut content)
-        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP chunk: {e}")))?;
+        .map_err(McapError::io("reading a chunk"))?;
 
     let mut buf = Buf::new(&content);
     let _message_start_time = buf.read_u64()?;
@@ -501,16 +582,18 @@ fn read_chunk_records(
     let compressed = buf.take(records_len)?;
 
     if compression != chunk.compression {
-        return Err(ReaderError::generic(format!(
-            "Chunk declares compression {compression:?}, its index said {:?}",
-            chunk.compression
-        )));
+        return Err(McapError::ChunkCompressionMismatch {
+            offset: chunk.chunk_start_offset,
+            found: compression,
+            indexed: chunk.compression.clone(),
+        });
     }
     if uncompressed_size != chunk.uncompressed_size {
-        return Err(ReaderError::generic(format!(
-            "Chunk decompressed size {uncompressed_size} disagrees with its index ({})",
-            chunk.uncompressed_size
-        )));
+        return Err(McapError::ChunkSizeMismatch {
+            offset: chunk.chunk_start_offset,
+            found: uncompressed_size,
+            indexed: chunk.uncompressed_size,
+        });
     }
 
     decompress_chunk_records(
@@ -533,7 +616,7 @@ const PREFETCH_DEPTH: usize = 2;
 /// `i` from worker `i % W`. Order is therefore exact without any reordering
 /// buffer, and memory is bounded by `W * (PREFETCH_DEPTH + 1)` chunks.
 struct Prefetch {
-    receivers: Vec<std::sync::mpsc::Receiver<Result<Vec<u8>, ReaderError>>>,
+    receivers: Vec<std::sync::mpsc::Receiver<McapResult<Vec<u8>>>>,
     handles: Vec<std::thread::JoinHandle<()>>,
     next: usize,
     total: usize,
@@ -559,11 +642,9 @@ impl Prefetch {
                 .spawn(move || {
                     let mut file = match File::open(&path) {
                         Ok(f) => f,
-                        Err(e) => {
-                            let _ = tx.send(Err(ReaderError::generic(format!(
-                                "Failed to open MCAP file {}: {e}",
-                                path.display()
-                            ))));
+                        Err(source) => {
+                            // A failed send means the reader is gone.
+                            let _ = tx.send(Err(McapError::Open { path, source }));
                             return;
                         }
                     };
@@ -581,11 +662,15 @@ impl Prefetch {
                     receivers.push(rx);
                     handles.push(handle);
                 }
-                Err(_) => {
-                    // Cannot start this worker: abandon the pool.
+                Err(error) => {
+                    // Cannot start this worker: abandon the pool and let the
+                    // caller decompress inline.
+                    tracing::warn!(%error, "cannot start an MCAP chunk worker, reading inline");
                     drop(rx);
                     drop(receivers);
                     for h in handles {
+                        // The workers end when their channel closes; a join
+                        // error would only repeat a worker panic.
                         let _ = h.join();
                     }
                     return None;
@@ -600,7 +685,7 @@ impl Prefetch {
         })
     }
 
-    fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, ReaderError> {
+    fn next_chunk(&mut self) -> McapResult<Option<Vec<u8>>> {
         if self.next >= self.total {
             return Ok(None);
         }
@@ -608,9 +693,7 @@ impl Prefetch {
         self.next += 1;
         match self.receivers[worker].recv() {
             Ok(result) => result.map(Some),
-            Err(_) => Err(ReaderError::generic(
-                "MCAP chunk worker stopped unexpectedly",
-            )),
+            Err(_) => Err(McapError::WorkerStopped),
         }
     }
 }
@@ -620,6 +703,8 @@ impl Drop for Prefetch {
         // Closing the channels unblocks workers waiting to send.
         self.receivers.clear();
         for handle in self.handles.drain(..) {
+            // Drop cannot report; a worker panic already surfaced as
+            // `WorkerStopped` to the consumer.
             let _ = handle.join();
         }
     }
@@ -669,13 +754,14 @@ pub(crate) struct ChunkMessageStream {
 
 impl ChunkMessageStream {
     /// Open the file and prepare the stream from its summary.
-    pub(crate) fn open(path: &Path, summary: Option<McapSummary>) -> Result<Self, ReaderError> {
-        let file = File::open(path).map_err(|e| {
-            ReaderError::generic(format!("Failed to open MCAP file {}: {e}", path.display()))
+    pub(crate) fn open(path: &Path, summary: Option<McapSummary>) -> McapResult<Self> {
+        let file = File::open(path).map_err(|source| McapError::Open {
+            path: path.to_path_buf(),
+            source,
         })?;
         let file_len = file
             .metadata()
-            .map_err(|e| ReaderError::generic(format!("Failed to stat MCAP file: {e}")))?
+            .map_err(McapError::io("reading the file size"))?
             .len();
 
         let mut stream = Self {
@@ -728,20 +814,19 @@ impl ChunkMessageStream {
         Ok(stream)
     }
 
-    /// Topic for a channel ID, from the summary or from chunk-embedded
-    /// Channel records seen so far.
-    pub(crate) fn topic(&self, channel_id: u16) -> Option<Rc<str>> {
-        self.topics.get(&channel_id).cloned()
+    /// Topic, message encoding and message type of a channel, from the
+    /// summary or from chunk-embedded Channel records seen so far.
+    pub(crate) fn channel(&self, channel_id: u16) -> Option<ChannelMeta> {
+        Some(ChannelMeta {
+            topic: self.topics.get(&channel_id)?.clone(),
+            encoding: self.encodings.get(&channel_id)?.clone(),
+            message_type: self.types.get(&channel_id)?.clone(),
+        })
     }
 
     /// Register schema/channel records encountered while draining a chunk
     /// (files may embed them rather than relying on the summary).
-    fn register_record(
-        &mut self,
-        op: u8,
-        content: &[u8],
-        filters: &Filters,
-    ) -> Result<(), ReaderError> {
+    fn register_record(&mut self, op: u8, content: &[u8], filters: &Filters) -> McapResult<()> {
         match op {
             OP_CHANNEL => {
                 let mut buf = Buf::new(content);
@@ -799,7 +884,7 @@ impl ChunkMessageStream {
     ///
     /// With enough chunks to read, decompression runs on a small worker pool
     /// (see [`Prefetch`]); otherwise it happens inline.
-    fn load_next_chunk(&mut self, filters: &Filters) -> Result<bool, ReaderError> {
+    fn load_next_chunk(&mut self, filters: &Filters) -> McapResult<bool> {
         if self.prefetch.is_none() && !self.prefetch_tried {
             self.prefetch_tried = true;
             let eligible: Vec<ChunkIndexLite> = self
@@ -846,10 +931,7 @@ impl ChunkMessageStream {
 
     /// Parse the next message record out of `inner`, registering any
     /// schema/channel records that precede it.
-    fn next_inner_message(
-        &mut self,
-        filters: &Filters,
-    ) -> Result<Option<RawMcapMessage>, ReaderError> {
+    fn next_inner_message(&mut self, filters: &Filters) -> McapResult<Option<RawMcapMessage>> {
         loop {
             if self.cursor + 9 > self.inner.len() {
                 self.inner = Vec::new();
@@ -857,13 +939,8 @@ impl ChunkMessageStream {
                 return Ok(None);
             }
             let op = self.inner[self.cursor];
-            let len = le_u64(&self.inner[self.cursor + 1..self.cursor + 9])? as usize;
-            let end = self.cursor + 9 + len;
-            if end > self.inner.len() {
-                return Err(ReaderError::generic(
-                    "MCAP chunk records truncated mid-record",
-                ));
-            }
+            let len = le_u64(&self.inner[self.cursor + 1..self.cursor + 9])?;
+            let end = record_end(self.cursor, len, self.inner.len(), "chunk record")?;
 
             match op {
                 OP_MESSAGE => {
@@ -872,9 +949,7 @@ impl ChunkMessageStream {
                     // exactly once (this is the per-message hot path).
                     let base = self.cursor + 9;
                     if base + 22 > end {
-                        return Err(ReaderError::generic(
-                            "MCAP message record shorter than its fixed header",
-                        ));
+                        return Err(McapError::ShortMessage { len });
                     }
                     let channel_id = u16::from_le_bytes([self.inner[base], self.inner[base + 1]]);
                     let sequence = u32::from_le_bytes([
@@ -939,13 +1014,14 @@ impl ChunkMessageStream {
     /// Does channel `id` pass the topic filter? Decided once per channel and
     /// memoized, so the per-message cost is one small map lookup instead of
     /// a topic string clone plus a hash lookup.
-    fn channel_wanted(&mut self, id: u16, filters: &Filters) -> Result<bool, ReaderError> {
+    fn channel_wanted(&mut self, id: u16, filters: &Filters) -> McapResult<bool> {
         if let Some(wanted) = self.wanted.get(&id) {
             return Ok(*wanted);
         }
-        let topic = self.topics.get(&id).ok_or_else(|| {
-            ReaderError::generic(format!("MCAP message references unknown channel id {id}"))
-        })?;
+        let topic = self
+            .topics
+            .get(&id)
+            .ok_or(McapError::UnknownChannel { id })?;
         let wanted = filters
             .topics
             .as_ref()
@@ -955,20 +1031,17 @@ impl ChunkMessageStream {
     }
 
     /// Parse the next record out of the data section for the unindexed walk.
-    fn next_section_message(
-        &mut self,
-        filters: &Filters,
-    ) -> Result<Option<RawMcapMessage>, ReaderError> {
+    fn next_section_message(&mut self, filters: &Filters) -> McapResult<Option<RawMcapMessage>> {
         loop {
             let Some(mut offset) = self.section_cursor else {
                 return Ok(None);
             };
-            if offset + 9 > self.file_len {
+            if offset.saturating_add(9) > self.file_len {
                 return Ok(None);
             }
             self.file
                 .seek(SeekFrom::Start(offset))
-                .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP record: {e}")))?;
+                .map_err(McapError::io("seeking a record"))?;
             let mut prefix = [0u8; 9];
             match self.file.read_exact(&mut prefix) {
                 Ok(()) => {}
@@ -976,15 +1049,27 @@ impl ChunkMessageStream {
                     self.section_cursor = None;
                     return Ok(None);
                 }
-                Err(e) => {
-                    return Err(ReaderError::generic(format!(
-                        "Failed to read MCAP record: {e}"
-                    )));
+                Err(source) => {
+                    return Err(McapError::Io {
+                        what: "reading a record",
+                        source,
+                    });
                 }
             }
             let op = prefix[0];
             let len = le_u64(&prefix[1..9])?;
-            offset += 9 + len;
+            // A record must end inside the file: this bounds every buffer
+            // allocated below by the file length, not by the untrusted `len`.
+            let record_start = offset + 9;
+            offset = record_start
+                .checked_add(len)
+                .filter(|&end| end <= self.file_len)
+                .ok_or(McapError::Truncated {
+                    what: "data section record",
+                    offset: record_start,
+                    need: len,
+                    available: self.file_len.saturating_sub(record_start),
+                })?;
             self.section_cursor = Some(offset);
 
             match op {
@@ -993,18 +1078,15 @@ impl ChunkMessageStream {
                     // straight into its final buffer: one allocation, no
                     // extra copy (this is the per-message hot path).
                     if len < 22 {
-                        return Err(ReaderError::generic(
-                            "MCAP message record shorter than its fixed header",
-                        ));
+                        return Err(McapError::ShortMessage { len });
                     }
-                    let record_start = offset - len;
                     let mut head = [0u8; 22];
-                    self.file.seek(SeekFrom::Start(record_start)).map_err(|e| {
-                        ReaderError::generic(format!("Failed to seek MCAP message: {e}"))
-                    })?;
-                    self.file.read_exact(&mut head).map_err(|e| {
-                        ReaderError::generic(format!("Failed to read MCAP message: {e}"))
-                    })?;
+                    self.file
+                        .seek(SeekFrom::Start(record_start))
+                        .map_err(McapError::io("seeking a message"))?;
+                    self.file
+                        .read_exact(&mut head)
+                        .map_err(McapError::io("reading a message"))?;
                     let channel_id = u16::from_le_bytes([head[0], head[1]]);
                     let sequence = u32::from_le_bytes([head[2], head[3], head[4], head[5]]);
                     let log_time = u64::from_le_bytes([
@@ -1022,10 +1104,10 @@ impl ChunkMessageStream {
                     {
                         continue;
                     }
-                    let mut data = vec![0u8; len as usize - 22];
-                    self.file.read_exact(&mut data).map_err(|e| {
-                        ReaderError::generic(format!("Failed to read MCAP message: {e}"))
-                    })?;
+                    let mut data = vec![0u8; (len - 22) as usize];
+                    self.file
+                        .read_exact(&mut data)
+                        .map_err(McapError::io("reading a message"))?;
                     return Ok(Some(RawMcapMessage {
                         channel_id,
                         sequence,
@@ -1036,27 +1118,24 @@ impl ChunkMessageStream {
                 }
                 OP_SCHEMA | OP_CHANNEL => {
                     let mut content = vec![0u8; len as usize];
-                    self.file.seek(SeekFrom::Start(offset - len)).map_err(|e| {
-                        ReaderError::generic(format!("Failed to seek MCAP record: {e}"))
-                    })?;
-                    self.file.read_exact(&mut content).map_err(|e| {
-                        ReaderError::generic(format!("Failed to read MCAP record: {e}"))
-                    })?;
+                    self.file
+                        .seek(SeekFrom::Start(record_start))
+                        .map_err(McapError::io("seeking a record"))?;
+                    self.file
+                        .read_exact(&mut content)
+                        .map_err(McapError::io("reading a record"))?;
                     self.register_record(op, &content, filters)?;
                 }
                 OP_CHUNK => {
                     // Read the whole chunk record, decompress, and drain it
                     // before resuming the section walk.
-                    let chunk_start = offset - 9 - len;
                     let mut content = vec![0u8; len as usize];
                     self.file
-                        .seek(SeekFrom::Start(chunk_start + 9))
-                        .map_err(|e| {
-                            ReaderError::generic(format!("Failed to seek MCAP chunk: {e}"))
-                        })?;
-                    self.file.read_exact(&mut content).map_err(|e| {
-                        ReaderError::generic(format!("Failed to read MCAP chunk: {e}"))
-                    })?;
+                        .seek(SeekFrom::Start(record_start))
+                        .map_err(McapError::io("seeking a chunk"))?;
+                    self.file
+                        .read_exact(&mut content)
+                        .map_err(McapError::io("reading a chunk"))?;
                     let mut buf = Buf::new(&content);
                     let _message_start_time = buf.read_u64()?;
                     let _message_end_time = buf.read_u64()?;
@@ -1086,7 +1165,7 @@ impl ChunkMessageStream {
     }
 
     /// Next message passing the filters, in the file's own log-time order.
-    fn next_filtered(&mut self, filters: &Filters) -> Result<Option<RawMcapMessage>, ReaderError> {
+    fn next_filtered(&mut self, filters: &Filters) -> McapResult<Option<RawMcapMessage>> {
         loop {
             if self.section_cursor.is_some() {
                 if let Some(message) = self.next_section_message(filters)? {
@@ -1126,7 +1205,8 @@ impl Filters {
     }
 }
 
-/// Global log-time-order message stream across several MCAP files.///
+/// Global log-time-order message stream across several MCAP files.
+///
 /// K-way merge over per-file streams: each file emits its own messages in
 /// log-time order (writers record chunks in order), and the heap interleaves
 /// them without buffering everything first.
@@ -1134,11 +1214,11 @@ pub(crate) struct MergedMcapStream {
     streams: Vec<Option<ChunkMessageStream>>,
     /// Next in-filter message per stream, with its topic resolved at
     /// advance time (the stream is still alive to answer the lookup).
-    heads: Vec<Option<(Rc<str>, RawMcapMessage)>>,
+    heads: Vec<Option<(ChannelMeta, RawMcapMessage)>>,
     heap: std::collections::BinaryHeap<std::cmp::Reverse<(u64, usize)>>,
     filters: Filters,
     /// First stream error, surfaced as the next yielded item.
-    pending_error: Option<ReaderError>,
+    pending_error: Option<McapError>,
 }
 
 impl MergedMcapStream {
@@ -1147,7 +1227,7 @@ impl MergedMcapStream {
         paths: &[std::path::PathBuf],
         summaries: &[Option<McapSummary>],
         filters: Filters,
-    ) -> Result<Self, ReaderError> {
+    ) -> McapResult<Self> {
         let mut streams = Vec::with_capacity(paths.len());
         for (path, summary) in paths.iter().zip(summaries) {
             streams.push(Some(ChunkMessageStream::open(path, summary.clone())?));
@@ -1168,17 +1248,22 @@ impl MergedMcapStream {
 
     /// Pull stream `idx` forward to its next in-filter message and schedule
     /// it on the heap.
-    fn advance(&mut self, idx: usize) -> Result<(), ReaderError> {
+    fn advance(&mut self, idx: usize) -> McapResult<()> {
         let Some(stream) = self.streams[idx].as_mut() else {
             return Ok(());
         };
         match stream.next_filtered(&self.filters) {
             Ok(Some(message)) => {
-                let topic = stream
-                    .topic(message.channel_id)
-                    .unwrap_or_else(|| Rc::from(""));
+                // `next_filtered` passed the channel through `channel_wanted`,
+                // so it is known; a miss is a corrupt stream, not a blank topic.
+                let Some(channel) = stream.channel(message.channel_id) else {
+                    self.streams[idx] = None;
+                    return Err(McapError::UnknownChannel {
+                        id: message.channel_id,
+                    });
+                };
                 self.heap.push(std::cmp::Reverse((message.log_time, idx)));
-                self.heads[idx] = Some((topic, message));
+                self.heads[idx] = Some((channel, message));
                 Ok(())
             }
             Ok(None) => {
@@ -1197,7 +1282,7 @@ impl MergedMcapStream {
 }
 
 impl Iterator for MergedMcapStream {
-    type Item = Result<(Rc<str>, RawMcapMessage), ReaderError>;
+    type Item = McapResult<(ChannelMeta, RawMcapMessage)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(error) = self.pending_error.take() {
@@ -1212,5 +1297,100 @@ impl Iterator for MergedMcapStream {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// Magic plus a Header record with empty profile and library strings.
+    fn file_start() -> Vec<u8> {
+        let mut bytes = MAGIC.to_vec();
+        bytes.push(OP_HEADER);
+        bytes.extend_from_slice(&8u64.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 8]);
+        bytes
+    }
+
+    fn write_temp(bytes: &[u8]) -> Result<tempfile::NamedTempFile, Box<dyn std::error::Error>> {
+        let mut file = tempfile::NamedTempFile::new()?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        Ok(file)
+    }
+
+    #[test]
+    fn record_lengths_that_overflow_or_overrun_are_errors() {
+        assert!(matches!(
+            record_end(0, u64::MAX, 100, "record"),
+            Err(McapError::LengthOverflow { .. })
+        ));
+        assert!(matches!(
+            record_end(usize::MAX - 3, 1, usize::MAX, "record"),
+            Err(McapError::LengthOverflow { .. })
+        ));
+        assert!(matches!(
+            record_end(10, 1 << 40, 100, "record"),
+            Err(McapError::Truncated { .. })
+        ));
+        assert!(matches!(record_end(0, 5, 14, "record"), Ok(14)));
+    }
+
+    #[test]
+    fn a_huge_data_section_record_fails_without_allocating() -> TestResult {
+        for len in [1u64 << 40, u64::MAX - 4] {
+            let mut bytes = file_start();
+            bytes.push(OP_MESSAGE);
+            bytes.extend_from_slice(&len.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 30]);
+            let file = write_temp(&bytes)?;
+            let mut stream = ChunkMessageStream::open(file.path(), None)?;
+            let result = stream.next_filtered(&Filters::default());
+            assert!(
+                matches!(result, Err(McapError::Truncated { .. })),
+                "len {len}: {result:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_chunk_index_with_an_absurd_size_is_an_error() -> TestResult {
+        let bytes = file_start();
+        let file = write_temp(&bytes)?;
+        let mut handle = File::open(file.path())?;
+        for compressed_size in [u64::MAX, u64::MAX - 40, 1 << 40] {
+            let chunk = ChunkIndexLite {
+                message_start_time: 0,
+                message_end_time: 0,
+                chunk_start_offset: 0,
+                compression: String::new(),
+                compressed_size,
+                uncompressed_size: 0,
+            };
+            let result = read_chunk_records(&mut handle, bytes.len() as u64, &chunk);
+            assert!(
+                matches!(
+                    result,
+                    Err(McapError::LengthOverflow { .. } | McapError::Truncated { .. })
+                ),
+                "size {compressed_size}: {result:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_declared_chunk_size_is_not_trusted_for_allocation() {
+        // 4 GiB declared, 3 bytes stored: rejected by size, not by an
+        // allocation of the declared size.
+        let result = decompress_chunk_records("", b"abc", 1 << 32, 0);
+        assert!(matches!(result, Err(McapError::ChunkSize { .. })));
+        let result = decompress_chunk_records("lz4", b"not lz4", u64::MAX, 0);
+        assert!(matches!(result, Err(McapError::Decompress { .. })));
     }
 }
