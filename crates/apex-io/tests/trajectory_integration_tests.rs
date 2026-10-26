@@ -108,7 +108,9 @@ fn dispatch_reads_an_asl_csv_by_extension() -> TestResult {
 
 #[test]
 fn dispatch_rejects_an_unsupported_extension() -> TestResult {
-    let Err(TrajectoryError::UnsupportedFormat(ext)) = load_trajectory("trajectory.bin") else {
+    let Err(TrajectoryError::UnsupportedFormat { extension: ext, .. }) =
+        load_trajectory("trajectory.bin")
+    else {
         return Err("an unknown extension must be refused".into());
     };
     assert_eq!(ext, "bin");

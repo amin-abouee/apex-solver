@@ -17,6 +17,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use apex_error::ErrorLogging;
 use nalgebra::Vector3;
 
 use super::error::{Result, TrajectoryError};
@@ -42,7 +43,7 @@ impl TrajectoryLoader for TumLoader {
     fn load<P: AsRef<Path>>(path: P) -> Result<Trajectory> {
         let path = path.as_ref();
         let content = read_file(path)?;
-        Self::parse(&content, path)
+        Self::parse(&content, path).map_err(ErrorLogging::log)
     }
 
     fn write<P: AsRef<Path>>(trajectory: &Trajectory, path: P) -> Result<()> {
@@ -85,7 +86,7 @@ impl TrajectoryLoader for TumNanosLoader {
     fn load<P: AsRef<Path>>(path: P) -> Result<Trajectory> {
         let path = path.as_ref();
         let content = read_file(path)?;
-        Self::parse(&content, path)
+        Self::parse(&content, path).map_err(ErrorLogging::log)
     }
 
     fn write<P: AsRef<Path>>(trajectory: &Trajectory, path: P) -> Result<()> {
@@ -116,7 +117,7 @@ fn parse_nanos_timestamp(raw: &str, path: &Path, line: usize) -> Result<u64> {
         .map_err(|_| TrajectoryError::InvalidNumber {
             path: path.to_path_buf(),
             line,
-            field: "timestamp (integer nanoseconds)".to_owned(),
+            field: "timestamp (integer nanoseconds)",
             value: raw.to_owned(),
         })
 }
@@ -214,7 +215,7 @@ fn parse_timestamp(raw: &str, path: &Path, line: usize) -> Result<u64> {
     let invalid = || TrajectoryError::InvalidNumber {
         path: path.to_path_buf(),
         line,
-        field: "timestamp".to_owned(),
+        field: "timestamp",
         value: raw.to_owned(),
     };
 

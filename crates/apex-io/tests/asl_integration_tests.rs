@@ -128,7 +128,7 @@ fn camera_not_found_returns_error() -> TestResult {
     require_dataset!(ds);
     let result = ds.load_image(99, 0);
     assert!(
-        matches!(result, Err(AslError::CameraNotFound { index: 99 })),
+        matches!(result, Err(AslError::CameraNotFound { index: 99, .. })),
         "unexpected: {result:?}"
     );
     Ok(())

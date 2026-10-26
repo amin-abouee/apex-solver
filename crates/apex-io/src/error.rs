@@ -9,6 +9,7 @@
 //! - [`TrajectoryError`]: TUM / EuRoC / KITTI trajectory files.
 //! - [`AslError`]: ASL (EuRoC) dataset folders.
 //! - [`LamariaError`]: LaMAria sequence folders.
+//! - [`DatasetError`]: the dataset registry and its downloads.
 //! - `VrsError` (feature `vrs`): VRS containers.
 //! - `BagError` (feature `rosbag`): ROS1 / ROS2 / MCAP bags, itself the root of
 //!   the rosbag module errors.
@@ -23,6 +24,7 @@ pub use crate::bal::BalError;
 pub use crate::graph::GraphError;
 pub use crate::lamaria::LamariaError;
 pub use crate::trajectory::TrajectoryError;
+pub use crate::utils::DatasetError;
 
 /// Result type for any apex-io operation.
 pub type IoResult<T> = Result<T, IoError>;
@@ -45,6 +47,9 @@ pub enum IoError {
 
     #[error(transparent)]
     Lamaria(#[from] LamariaError),
+
+    #[error(transparent)]
+    Dataset(#[from] DatasetError),
 
     #[cfg(feature = "vrs")]
     #[error(transparent)]
@@ -99,6 +104,11 @@ mod tests {
             GraphError::DuplicateVertex { id: 3 }.into(),
             BalError::MissingHeader.into(),
             TrajectoryError::MissingInertialColumns.into(),
+            AslError::CameraNotFound { index: 2, count: 1 }.into(),
+            DatasetError::DownloadDisabled {
+                name: "intel".to_string(),
+            }
+            .into(),
         ];
         let messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
         assert_eq!(
@@ -107,6 +117,8 @@ mod tests {
                 "duplicate vertex id 3",
                 "BAL file has no header line",
                 "cannot write EuRoC 17-column layout: this trajectory has no inertial columns",
+                "camera index 2 not found, the dataset has 1 cameras",
+                "dataset intel is not present locally and apex-io was built without the download feature",
             ]
         );
     }

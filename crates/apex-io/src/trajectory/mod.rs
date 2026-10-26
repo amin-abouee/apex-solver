@@ -32,10 +32,11 @@ pub mod types;
 
 use std::path::Path;
 
+use apex_error::ErrorLogging;
 use apex_manifolds::se3::SE3;
 use nalgebra::Vector3;
 
-pub use error::{Result, TrajectoryError};
+pub use error::{Result, TrajectoryError, TrajectoryResult};
 pub use tum::{TumLoader, TumNanosLoader};
 pub use types::{InertialState, TrajectoryFormat, TrajectoryPose};
 
@@ -115,7 +116,8 @@ impl Trajectory {
                 what: "trajectory poses vs inertial states",
                 got: inertial.len(),
                 expected: poses.len(),
-            });
+            }
+            .log());
         }
 
         let mut order: Vec<usize> = (0..poses.len()).collect();
@@ -144,7 +146,8 @@ impl Trajectory {
                 what: "timestamps vs poses",
                 got: poses.len(),
                 expected: timestamps_s.len(),
-            });
+            }
+            .log());
         }
 
         let mut samples = Vec::with_capacity(poses.len());
@@ -154,7 +157,8 @@ impl Trajectory {
                     path: Path::new("<memory>").to_path_buf(),
                     line: index + 1,
                     value: *seconds,
-                });
+                }
+                .log());
             }
             let nanos = (seconds * NANOS_PER_SECOND).round();
             samples.push(TrajectoryPose::from_se3(nanos as u64, pose));
@@ -173,7 +177,8 @@ impl Trajectory {
                 what: "timestamps vs poses",
                 got: poses.len(),
                 expected: timestamps_ns.len(),
-            });
+            }
+            .log());
         }
         Ok(Self::from_poses(
             timestamps_ns
@@ -342,17 +347,23 @@ impl Trajectory {
 
 /// Read a trajectory file into memory, mapping failure to [`TrajectoryError::Io`].
 pub(crate) fn read_file(path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).map_err(|source| TrajectoryError::Io {
-        path: path.to_path_buf(),
-        source,
+    std::fs::read_to_string(path).map_err(|source| {
+        TrajectoryError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+        .log()
     })
 }
 
 /// Write trajectory text to `path`, mapping failure to [`TrajectoryError::Io`].
 pub(crate) fn write_file(path: &Path, text: &str) -> Result<()> {
-    std::fs::write(path, text).map_err(|source| TrajectoryError::Io {
-        path: path.to_path_buf(),
-        source,
+    std::fs::write(path, text).map_err(|source| {
+        TrajectoryError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+        .log()
     })
 }
 
@@ -360,7 +371,7 @@ pub(crate) fn write_file(path: &Path, text: &str) -> Result<()> {
 pub(crate) fn parse_field(
     row: &[&str],
     index: usize,
-    name: &str,
+    name: &'static str,
     path: &Path,
     line: usize,
 ) -> Result<f64> {
@@ -371,7 +382,7 @@ pub(crate) fn parse_field(
         .ok_or_else(|| TrajectoryError::InvalidNumber {
             path: path.to_path_buf(),
             line,
-            field: name.to_owned(),
+            field: name,
             value: raw.to_owned(),
         })
 }
@@ -380,12 +391,17 @@ pub(crate) fn parse_field(
 ///
 /// ASL timestamps are integer nanoseconds, so a fractional stamp is refused
 /// rather than silently rounded.
-pub(crate) fn parse_u64_field(raw: &str, name: &str, path: &Path, line: usize) -> Result<u64> {
+pub(crate) fn parse_u64_field(
+    raw: &str,
+    name: &'static str,
+    path: &Path,
+    line: usize,
+) -> Result<u64> {
     raw.parse::<u64>()
         .map_err(|_| TrajectoryError::InvalidNumber {
             path: path.to_path_buf(),
             line,
-            field: name.to_owned(),
+            field: name,
             value: raw.to_owned(),
         })
 }
@@ -447,7 +463,11 @@ pub fn load_trajectory<P: AsRef<Path>>(path: P) -> Result<Trajectory> {
     match extension.as_str() {
         "tum" | "txt" => TumLoader::load(path),
         "csv" => crate::asl::AslTrajectoryLoader::load(path),
-        other => Err(TrajectoryError::UnsupportedFormat(other.to_owned())),
+        other => Err(TrajectoryError::UnsupportedFormat {
+            path: path.to_path_buf(),
+            extension: other.to_owned(),
+        }
+        .log()),
     }
 }
 
@@ -685,7 +705,9 @@ mod tests {
 
     #[test]
     fn dispatch_rejects_an_unsupported_extension() -> TestResult {
-        let Err(TrajectoryError::UnsupportedFormat(ext)) = load_trajectory("a.bin") else {
+        let Err(TrajectoryError::UnsupportedFormat { extension: ext, .. }) =
+            load_trajectory("a.bin")
+        else {
             return Err("an unknown extension must be refused".into());
         };
         assert_eq!(ext, "bin");

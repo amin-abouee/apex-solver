@@ -55,3 +55,4 @@ pub use trajectory::{
     InertialState, Trajectory, TrajectoryError, TrajectoryFormat, TrajectoryLoader, TrajectoryPose,
     TumLoader, TumNanosLoader, load_trajectory, load_trajectory_as,
 };
+pub use utils::DatasetError;

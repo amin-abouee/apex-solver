@@ -1,32 +1,33 @@
+//! Errors raised while reading an ASL (EuRoC-style) dataset folder.
+
 use std::path::PathBuf;
 
+/// An ASL dataset folder, CSV or image that cannot be read.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AslError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("not a valid mav0 directory: {path}")]
-    InvalidMav0Directory { path: PathBuf },
-
-    #[error("no sensors found in: {path}")]
-    NoSensorsFound { path: PathBuf },
-
-    #[error("invalid CSV at {path}:{line}: {message}")]
-    InvalidCsvFormat {
+    #[error("failed to read {}", path.display())]
+    Read {
         path: PathBuf,
-        line: usize,
-        message: String,
+        #[source]
+        source: std::io::Error,
     },
 
-    #[error("invalid number at {path}:{line} field '{field}': '{value}'")]
+    #[error("not a valid mav0 directory: {}", path.display())]
+    InvalidMav0Directory { path: PathBuf },
+
+    #[error("no sensors found in {}", path.display())]
+    NoSensorsFound { path: PathBuf },
+
+    #[error("{}:{line}: field {field} is not a number: {value:?}", path.display())]
     InvalidNumber {
         path: PathBuf,
         line: usize,
-        field: String,
+        field: &'static str,
         value: String,
     },
 
-    #[error("missing CSV columns at {path}:{line}: expected {expected}, got {got}")]
+    #[error("{}:{line}: {got} CSV columns, expected at least {expected}", path.display())]
     MissingCsvColumns {
         path: PathBuf,
         line: usize,
@@ -34,15 +35,8 @@ pub enum AslError {
         got: usize,
     },
 
-    #[error("invalid quaternion at {path}:{line}: norm={norm:.6}")]
-    InvalidQuaternion {
-        path: PathBuf,
-        line: usize,
-        norm: f64,
-    },
-
-    #[error("camera index {index} not found")]
-    CameraNotFound { index: usize },
+    #[error("camera index {index} not found, the dataset has {count} cameras")]
+    CameraNotFound { index: usize, count: usize },
 
     #[error("frame {frame_idx} out of bounds for camera {cam_idx} (total: {total})")]
     FrameOutOfBounds {
@@ -51,13 +45,44 @@ pub enum AslError {
         total: usize,
     },
 
-    #[error("image load error: {0}")]
-    ImageLoad(#[from] image::ImageError),
+    #[error("failed to load image {}", path.display())]
+    ImageLoad {
+        path: PathBuf,
+        #[source]
+        source: image::ImageError,
+    },
+
+    #[cfg(feature = "asl-async")]
+    #[error("the image loading task for {} did not finish", path.display())]
+    ImageTask {
+        path: PathBuf,
+        #[source]
+        source: tokio::task::JoinError,
+    },
 
     /// Ground-truth CSV parsing is delegated to the trajectory reader, which
     /// is the one implementation of the ASL pose formats.
-    #[error("ground truth: {0}")]
+    #[error(transparent)]
     GroundTruth(#[from] crate::trajectory::TrajectoryError),
 }
 
+impl AslError {
+    pub(crate) fn read(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+        Self::Read {
+            path: path.into(),
+            source,
+        }
+    }
+
+    pub(crate) fn image(path: impl Into<PathBuf>, source: image::ImageError) -> Self {
+        Self::ImageLoad {
+            path: path.into(),
+            source,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, AslError>;
+
+/// Result alias for ASL dataset operations, named like the other module aliases.
+pub type AslResult<T> = Result<T>;

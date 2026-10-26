@@ -2,7 +2,7 @@ pub mod error;
 pub mod ground_truth;
 pub mod types;
 
-pub use error::{AslError, Result};
+pub use error::{AslError, AslResult, Result};
 pub use ground_truth::{AslLayout, AslTrajectoryLoader};
 pub use types::{AslDataset, CameraData, CameraFrame, GroundTruthPose, ImuMeasurement};
 
@@ -29,7 +29,11 @@ impl AslStream {
     pub fn open_camera<P: AsRef<Path>>(mav0_path: P, cam_idx: usize) -> Result<Self> {
         let dataset = AslReader::load(mav0_path)?;
         if cam_idx >= dataset.cameras.len() {
-            return Err(AslError::CameraNotFound { index: cam_idx });
+            return Err(AslError::CameraNotFound {
+                index: cam_idx,
+                count: dataset.cameras.len(),
+            }
+            .log());
         }
         Ok(Self {
             dataset,
@@ -68,7 +72,7 @@ impl AslStream {
         Some(
             image::open(&path)
                 .map(|img| (ts, img))
-                .map_err(AslError::ImageLoad),
+                .map_err(|e| AslError::image(&path, e).log()),
         )
     }
 
@@ -116,6 +120,7 @@ impl AslStream {
     }
 }
 
+use apex_error::ErrorLogging;
 use nalgebra::Vector3;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -131,7 +136,8 @@ impl AslReader {
         if !mav0.is_dir() {
             return Err(AslError::InvalidMav0Directory {
                 path: mav0.to_path_buf(),
-            });
+            }
+            .log());
         }
 
         let sensor_entries = discover_sensors(mav0)?;
@@ -184,7 +190,7 @@ impl AslDataset {
 
     pub fn load_image(&self, cam_idx: usize, frame_idx: usize) -> Result<image::DynamicImage> {
         let path = self.frame_path(cam_idx, frame_idx)?;
-        image::open(&path).map_err(AslError::ImageLoad)
+        image::open(&path).map_err(|e| AslError::image(&path, e).log())
     }
 
     #[cfg(feature = "asl-async")]
@@ -194,24 +200,30 @@ impl AslDataset {
         frame_idx: usize,
     ) -> Result<image::DynamicImage> {
         let path = self.frame_path(cam_idx, frame_idx)?;
-        tokio::task::spawn_blocking(move || image::open(&path).map_err(AslError::ImageLoad))
-            .await
-            .map_err(|e| AslError::Io(std::io::Error::other(e.to_string())))?
+        let task_path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            image::open(&task_path).map_err(|e| AslError::image(&task_path, e).log())
+        })
+        .await
+        .map_err(|source| AslError::ImageTask { path, source }.log())?
     }
 
     fn frame_path(&self, cam_idx: usize, frame_idx: usize) -> Result<PathBuf> {
-        let cam = self
-            .cameras
-            .get(cam_idx)
-            .ok_or(AslError::CameraNotFound { index: cam_idx })?;
-        let frame = cam
-            .frames
-            .get(frame_idx)
-            .ok_or(AslError::FrameOutOfBounds {
+        let cam = self.cameras.get(cam_idx).ok_or_else(|| {
+            AslError::CameraNotFound {
+                index: cam_idx,
+                count: self.cameras.len(),
+            }
+            .log()
+        })?;
+        let frame = cam.frames.get(frame_idx).ok_or_else(|| {
+            AslError::FrameOutOfBounds {
                 cam_idx,
                 frame_idx,
                 total: cam.frames.len(),
-            })?;
+            }
+            .log()
+        })?;
         Ok(frame.image_path.clone())
     }
 }
@@ -252,9 +264,7 @@ pub fn load_mav0_trajectory<P: AsRef<Path>>(mav0: P) -> Result<Option<Trajectory
     for sensor in ["state_groundtruth_estimate0", "mocap0"] {
         let candidate = base.join(sensor).join("data.csv");
         if candidate.is_file() {
-            return AslTrajectoryLoader::load(&candidate)
-                .map(Some)
-                .map_err(AslError::GroundTruth);
+            return Ok(Some(AslTrajectoryLoader::load(&candidate)?));
         }
     }
     Ok(None)
@@ -306,9 +316,10 @@ enum LoadedSensor {
 fn discover_sensors(mav0: &Path) -> Result<Vec<SensorEntry>> {
     let mut entries: Vec<SensorEntry> = Vec::new();
 
-    for dir_entry in std::fs::read_dir(mav0)? {
-        let dir_entry = dir_entry?;
-        if !dir_entry.file_type()?.is_dir() {
+    let read_error = |e: std::io::Error| AslError::read(mav0, e).log();
+    for dir_entry in std::fs::read_dir(mav0).map_err(read_error)? {
+        let dir_entry = dir_entry.map_err(read_error)?;
+        if !dir_entry.file_type().map_err(read_error)?.is_dir() {
             continue;
         }
         let name = dir_entry.file_name();
@@ -349,7 +360,8 @@ fn discover_sensors(mav0: &Path) -> Result<Vec<SensorEntry>> {
     if entries.is_empty() {
         return Err(AslError::NoSensorsFound {
             path: mav0.to_path_buf(),
-        });
+        }
+        .log());
     }
 
     Ok(entries)
@@ -382,7 +394,7 @@ fn load_sensor(entry: &SensorEntry) -> Result<LoadedSensor> {
         }
         SensorEntry::GroundTruth { source, path } => {
             let csv_path = path.join("data.csv");
-            let trajectory = AslTrajectoryLoader::load(&csv_path).map_err(AslError::GroundTruth)?;
+            let trajectory = AslTrajectoryLoader::load(&csv_path)?;
             Ok(LoadedSensor::GroundTruth(
                 *source,
                 trajectory.poses().to_vec(),
@@ -395,20 +407,20 @@ fn load_sensor(entry: &SensorEntry) -> Result<LoadedSensor> {
 // Shared CSV helper
 // ---------------------------------------------------------------------------
 
-fn parse_f64(path: &Path, line: usize, field: &str, value: &str) -> Result<f64> {
+fn parse_f64(path: &Path, line: usize, field: &'static str, value: &str) -> Result<f64> {
     value.parse::<f64>().map_err(|_| AslError::InvalidNumber {
         path: path.to_path_buf(),
         line,
-        field: field.to_owned(),
+        field,
         value: value.to_owned(),
     })
 }
 
-fn parse_u64(path: &Path, line: usize, field: &str, value: &str) -> Result<u64> {
+fn parse_u64(path: &Path, line: usize, field: &'static str, value: &str) -> Result<u64> {
     value.parse::<u64>().map_err(|_| AslError::InvalidNumber {
         path: path.to_path_buf(),
         line,
-        field: field.to_owned(),
+        field,
         value: value.to_owned(),
     })
 }
@@ -418,8 +430,13 @@ fn parse_u64(path: &Path, line: usize, field: &str, value: &str) -> Result<u64> 
 // ---------------------------------------------------------------------------
 
 fn parse_imu_csv(csv_path: &Path) -> Result<Vec<ImuMeasurement>> {
-    let content = std::fs::read_to_string(csv_path)?;
-    let rows = crate::csv::split_rows(&content, Some(','));
+    let content =
+        std::fs::read_to_string(csv_path).map_err(|e| AslError::read(csv_path, e).log())?;
+    parse_imu_rows(&content, csv_path).map_err(ErrorLogging::log)
+}
+
+fn parse_imu_rows(content: &str, csv_path: &Path) -> Result<Vec<ImuMeasurement>> {
+    let rows = crate::csv::split_rows(content, Some(','));
     let mut measurements = Vec::with_capacity(rows.len());
 
     for (row_idx, fields) in rows.iter().enumerate() {
@@ -451,8 +468,13 @@ fn parse_imu_csv(csv_path: &Path) -> Result<Vec<ImuMeasurement>> {
 }
 
 fn parse_camera_csv(csv_path: &Path, data_dir: &Path) -> Result<Vec<CameraFrame>> {
-    let content = std::fs::read_to_string(csv_path)?;
-    let rows = crate::csv::split_rows(&content, Some(','));
+    let content =
+        std::fs::read_to_string(csv_path).map_err(|e| AslError::read(csv_path, e).log())?;
+    parse_camera_rows(&content, csv_path, data_dir).map_err(ErrorLogging::log)
+}
+
+fn parse_camera_rows(content: &str, csv_path: &Path, data_dir: &Path) -> Result<Vec<CameraFrame>> {
+    let rows = crate::csv::split_rows(content, Some(','));
     let mut frames = Vec::with_capacity(rows.len());
 
     for (row_idx, fields) in rows.iter().enumerate() {
