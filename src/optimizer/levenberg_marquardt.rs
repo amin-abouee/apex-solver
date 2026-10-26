@@ -143,7 +143,6 @@
 //! - Nielsen, H. B. (1999). "Damping Parameter in Marquardt's Method". Technical Report IMM-REP-1999-05.
 
 use crate::core::problem::Problem;
-use crate::error;
 use crate::error::ErrorLogging;
 use crate::linalg::{
     CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, ExplicitDenseSchur,
@@ -1017,14 +1016,13 @@ impl LevenbergMarquardt {
             self.config.min_diagonal,
             self.config.max_diagonal,
         )?;
-        let scaled_step = linear_solver
-            .solve_augmented_equation(residuals, scaled_jacobian, &damping)
-            .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
+        let scaled_step =
+            linear_solver.solve_augmented_equation(residuals, scaled_jacobian, &damping)?;
 
         // Get the cached gradient (Jᵀr) and un-damped Hessian (JᵀJ) from the solver
-        let gradient = linear_solver.get_gradient().ok_or_else(|| {
-            OptimizerError::NumericalInstability("Gradient not available".into()).log()
-        })?;
+        let gradient = linear_solver
+            .get_gradient()
+            .ok_or_else(|| OptimizerError::MissingSolverState { what: "gradient" }.log())?;
         // `gradient` is the (possibly Jacobi-scaled) gradient against
         // `scaled_jacobian`; report `gradient_tolerance`'s convergence check
         // against the un-scaled one (GitHub #57). `predicted_reduction`
@@ -1041,9 +1039,7 @@ impl LevenbergMarquardt {
         };
         let hessian_step = linear_solver
             .hessian_vec_product(&scaled_step)
-            .ok_or_else(|| {
-                OptimizerError::NumericalInstability("Hessian not available".into()).log()
-            })?;
+            .ok_or_else(|| OptimizerError::MissingSolverState { what: "Hessian" }.log())?;
 
         // Compute the predicted reduction BEFORE un-scaling the step: the
         // solver's cached gradient and Hessian are the *scaled* ones, and all
@@ -1078,13 +1074,13 @@ impl LevenbergMarquardt {
         step_result: &StepResult,
         state: &mut InitializedState,
         problem: &Problem,
-    ) -> error::ApexSolverResult<StepEvaluation> {
+    ) -> crate::optimizer::OptimizerResult<StepEvaluation> {
         // Apply parameter updates using manifold operations
         let _step_norm = apply_parameter_step(
             &mut state.variables,
             step_result.step.as_ref(),
             &state.sorted_vars,
-        );
+        )?;
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
         let (_new_residual, new_cost) = problem.compute_residual_and_cost_sparse_with_workspace(
@@ -1117,7 +1113,7 @@ impl LevenbergMarquardt {
                 &mut state.variables,
                 step_result.step.as_ref(),
                 &state.sorted_vars,
-            );
+            )?;
             0.0
         };
 
@@ -1412,27 +1408,22 @@ impl LevenbergMarquardt {
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ExplicitDenseSchur => {
-                    let init = |e: crate::linalg::LinAlgError| {
-                        OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ExplicitDenseSchur::new();
                     solver
                         .initialize_structure(
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
-                other => Err(OptimizerError::InvalidParameters(format!(
-                    "Levenberg-Marquardt in dense Jacobian mode supports DenseCholesky, \
-                     DenseQR and ExplicitDenseSchur only; requested {other}"
-                ))
-                .into()),
+                other => Err(OptimizerError::UnsupportedSolver {
+ optimizer: "Levenberg-Marquardt",
+ mode: "dense",
+ supported: "DenseCholesky, DenseQR and ExplicitDenseSchur",
+ requested: other,
+ }
+ .log()),
             },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 LinearSolverType::SparseQR => {
@@ -1440,12 +1431,6 @@ impl LevenbergMarquardt {
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ExplicitSparseSchur => {
-                    let init = |e: crate::linalg::LinAlgError| {
-                        OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ExplicitSparseSchur::new()
                         .with_variant(self.config.schur_variant)
                         .with_preconditioner(self.config.schur_preconditioner)
@@ -1459,8 +1444,7 @@ impl LevenbergMarquardt {
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ImplicitSparseSchur => {
@@ -1468,12 +1452,6 @@ impl LevenbergMarquardt {
                     // than a mode of the explicit one — this is what keeps
                     // both the O(kept_dof²) buffer and `JᵀJ` itself out of
                     // the picture entirely.
-                    let init = |e: crate::linalg::LinAlgError| {
-                        OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ImplicitSparseSchur::with_config(
                         self.config.schur_cg_max_iterations,
                         self.config.schur_cg_tolerance,
@@ -1485,19 +1463,20 @@ impl LevenbergMarquardt {
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::SparseCholesky => {
                     let mut solver = SparseCholeskySolver::new();
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
-                other => Err(OptimizerError::InvalidParameters(format!(
-                    "Levenberg-Marquardt in sparse Jacobian mode supports SparseCholesky, \
-                     SparseQR, ExplicitSparseSchur and ImplicitSparseSchur only; requested {other}"
-                ))
-                .into()),
+                other => Err(OptimizerError::UnsupportedSolver {
+ optimizer: "Levenberg-Marquardt",
+ mode: "sparse",
+ supported: "SparseCholesky, SparseQR, ExplicitSparseSchur and ImplicitSparseSchur",
+ requested: other,
+ }
+ .log()),
             },
         }
     }

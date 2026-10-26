@@ -192,7 +192,7 @@
 //! - Ceres Solver: <http://ceres-solver.org/> - Google's C++ nonlinear least squares library
 
 use crate::error::ErrorLogging;
-use crate::{core::problem, error, linalg, optimizer};
+use crate::{core::problem, linalg, optimizer};
 use std::{fmt, time};
 use tracing::debug;
 
@@ -860,6 +860,11 @@ impl Default for DogLeg {
     }
 }
 
+/// The linear solver holds no `what` (gradient or Hessian) after a solve.
+fn missing(what: &'static str) -> optimizer::OptimizerError {
+    optimizer::OptimizerError::MissingSolverState { what }.log()
+}
+
 impl DogLeg {
     /// Create a new Dog Leg solver with default configuration.
     pub fn new() -> Self {
@@ -1107,7 +1112,7 @@ impl DogLeg {
         residuals: &faer::Mat<f64>,
         scaled_jacobian: &M::Jacobian,
         linear_solver: &mut dyn LinearSolver<M>,
-    ) -> Option<StepResult> {
+    ) -> optimizer::OptimizerResult<StepResult> {
         // Check if we can reuse cached step (Ceres-style optimization)
         // Safety limit: prevent excessive reuse that could lead to stale gradient/Hessian
         const MAX_CACHE_REUSE: usize = 5;
@@ -1129,7 +1134,7 @@ impl DogLeg {
             // solver cached; report `gradient_tolerance`'s convergence check
             // against the un-scaled one (GitHub #57).
             let gradient_norm = if self.config.use_jacobi_scaling {
-                optimizer::unscaled_gradient_norm(cached_grad, self.jacobi_scaling.as_ref()?)
+                optimizer::unscaled_gradient_norm(cached_grad, self.scaling()?)
             } else {
                 cached_grad.norm_l2()
             };
@@ -1147,7 +1152,7 @@ impl DogLeg {
 
             let scaled_step_norm = scaled_step.norm_l2();
             let step = if self.config.use_jacobi_scaling {
-                let scaling = self.jacobi_scaling.as_ref()?;
+                let scaling = self.scaling()?;
                 M::apply_inverse_scaling(&scaled_step, scaling)
             } else {
                 scaled_step.clone()
@@ -1155,11 +1160,13 @@ impl DogLeg {
 
             // For cached reuse, we need the hessian for predicted reduction.
             // Use hessian from linear solver if available.
-            let hessian_step = linear_solver.hessian_vec_product(&scaled_step)?;
+            let hessian_step = linear_solver
+                .hessian_vec_product(&scaled_step)
+                .ok_or_else(|| missing("Hessian"))?;
             let predicted_reduction =
                 optimizer::compute_predicted_reduction(&scaled_step, cached_grad, &hessian_step);
 
-            return Some(StepResult {
+            return Ok(StepResult {
                 step,
                 gradient_norm,
                 predicted_reduction,
@@ -1171,6 +1178,7 @@ impl DogLeg {
         // 1. Solve for Gauss-Newton step with adaptive mu regularization (Ceres-style)
         let mut scaled_gn_step = None;
         let mut mu_attempts = 0;
+        let mut last_failure = None;
 
         // Try to solve with current mu, increasing if necessary
         while mu_attempts < 10 && self.mu <= self.max_mu {
@@ -1180,11 +1188,14 @@ impl DogLeg {
             // Marquardt diagonal.
             let damping = Damping::identity(self.mu);
 
-            if let Ok(step) =
-                linear_solver.solve_augmented_equation(residuals, scaled_jacobian, &damping)
-            {
-                scaled_gn_step = Some(step);
-                break;
+            match linear_solver.solve_augmented_equation(residuals, scaled_jacobian, &damping) {
+                Ok(step) => {
+                    scaled_gn_step = Some(step);
+                    break;
+                }
+                // A failed solve is retried with a larger μ; only the last
+                // failure is kept as the cause if every attempt fails.
+                Err(error) => last_failure = Some(error),
             }
 
             // Increase mu (Ceres-style)
@@ -1192,10 +1203,19 @@ impl DogLeg {
             mu_attempts += 1;
         }
 
-        let scaled_gn_step = scaled_gn_step?;
+        let Some(scaled_gn_step) = scaled_gn_step else {
+            return Err(optimizer::OptimizerError::DampingExhausted {
+                attempts: mu_attempts,
+                mu: self.mu,
+                source: last_failure,
+            }
+            .log());
+        };
 
         // 2. Get gradient and Hessian (cached by solve_augmented_equation)
-        let gradient = linear_solver.get_gradient()?;
+        let gradient = linear_solver
+            .get_gradient()
+            .ok_or_else(|| missing("gradient"))?;
         // `gradient` is the (possibly Jacobi-scaled) gradient against
         // `scaled_jacobian`; report `gradient_tolerance`'s convergence check
         // against the un-scaled one (GitHub #57). Every other use of
@@ -1203,7 +1223,7 @@ impl DogLeg {
         // reduction) deliberately stays in the scaled space it was computed
         // in — only this reported norm changes.
         let gradient_norm = if self.config.use_jacobi_scaling {
-            optimizer::unscaled_gradient_norm(gradient, self.jacobi_scaling.as_ref()?)
+            optimizer::unscaled_gradient_norm(gradient, self.scaling()?)
         } else {
             gradient.norm_l2()
         };
@@ -1215,7 +1235,9 @@ impl DogLeg {
         }
 
         // 4. Compute Cauchy point and optimal step length
-        let h_g = linear_solver.hessian_vec_product(gradient)?;
+        let h_g = linear_solver
+            .hessian_vec_product(gradient)
+            .ok_or_else(|| missing("Hessian"))?;
         let (alpha, cauchy_point) = self.compute_cauchy_point_and_alpha_generic(gradient, &h_g);
 
         // 5. Compute dog leg step based on trust region radius
@@ -1229,14 +1251,16 @@ impl DogLeg {
         // 6. Apply inverse Jacobi scaling if enabled
         let scaled_step_norm = scaled_step.norm_l2();
         let step = if self.config.use_jacobi_scaling {
-            let scaling = self.jacobi_scaling.as_ref()?;
+            let scaling = self.scaling()?;
             M::apply_inverse_scaling(&scaled_step, scaling)
         } else {
             scaled_step.clone()
         };
 
         // 7. Compute predicted reduction
-        let hessian_step = linear_solver.hessian_vec_product(&scaled_step)?;
+        let hessian_step = linear_solver
+            .hessian_vec_product(&scaled_step)
+            .ok_or_else(|| missing("Hessian"))?;
         let predicted_reduction =
             optimizer::compute_predicted_reduction(&scaled_step, gradient, &hessian_step);
 
@@ -1246,12 +1270,19 @@ impl DogLeg {
         self.cached_gradient = Some(gradient.clone());
         self.cached_alpha = Some(alpha);
 
-        Some(StepResult {
+        Ok(StepResult {
             step,
             gradient_norm,
             predicted_reduction,
             scaled_step_norm,
         })
+    }
+
+    /// The Jacobi scaling, which must exist when scaling is enabled.
+    fn scaling(&self) -> optimizer::OptimizerResult<&Vec<f64>> {
+        self.jacobi_scaling
+            .as_ref()
+            .ok_or_else(|| optimizer::OptimizerError::JacobiScalingNotInitialized.log())
     }
 
     /// Evaluate and apply step
@@ -1260,13 +1291,13 @@ impl DogLeg {
         step_result: &StepResult,
         state: &mut optimizer::InitializedState,
         problem: &problem::Problem,
-    ) -> error::ApexSolverResult<StepEvaluation> {
+    ) -> optimizer::OptimizerResult<StepEvaluation> {
         // Apply parameter updates
         let _step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
             step_result.step.as_ref(),
             &state.sorted_vars,
-        );
+        )?;
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation).
         // Reuses the solve workspace instead of allocating one per iteration,
@@ -1300,7 +1331,7 @@ impl DogLeg {
                 &mut state.variables,
                 step_result.step.as_ref(),
                 &state.sorted_vars,
-            );
+            )?;
             0.0
         };
 
@@ -1394,19 +1425,11 @@ impl DogLeg {
             };
 
             // Compute dog leg step
-            let step_result = match self.compute_optimization_step_generic::<M>(
+            let step_result = self.compute_optimization_step_generic::<M>(
                 &residuals,
                 &scaled_jacobian,
                 linear_solver,
-            ) {
-                Some(result) => result,
-                None => {
-                    return Err(optimizer::OptimizerError::LinearSolveFailed(
-                        "Linear solver failed to solve system".to_string(),
-                    )
-                    .into());
-                }
-            };
+            )?;
 
             // Update tracking
             max_gradient_norm = max_gradient_norm.max(step_result.gradient_norm);
@@ -1582,27 +1605,22 @@ impl DogLeg {
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ExplicitDenseSchur => {
-                    let init = |e: linalg::LinAlgError| {
-                        optimizer::OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ExplicitDenseSchur::new();
                     solver
                         .initialize_structure(
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
-                other => Err(optimizer::OptimizerError::InvalidParameters(format!(
-                    "Dog Leg in dense Jacobian mode supports DenseCholesky, DenseQR and \
-                     ExplicitDenseSchur only; requested {other}"
-                ))
-                .into()),
+                other => Err(optimizer::OptimizerError::UnsupportedSolver {
+ optimizer: "Dog Leg",
+ mode: "dense",
+ supported: "DenseCholesky, DenseQR and ExplicitDenseSchur",
+ requested: other,
+ }
+ .log()),
             },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 linalg::LinearSolverType::SparseQR => {
@@ -1614,12 +1632,6 @@ impl DogLeg {
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ExplicitSparseSchur => {
-                    let init = |e: linalg::LinAlgError| {
-                        optimizer::OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ExplicitSparseSchur::new()
                         .with_variant(self.config.schur_variant)
                         .with_preconditioner(self.config.schur_preconditioner)
@@ -1633,8 +1645,7 @@ impl DogLeg {
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ImplicitSparseSchur => {
@@ -1642,12 +1653,6 @@ impl DogLeg {
                     // than a mode of the explicit one — this is what keeps
                     // both the O(kept_dof²) buffer and `JᵀJ` itself out of
                     // the picture entirely.
-                    let init = |e: linalg::LinAlgError| {
-                        optimizer::OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ImplicitSparseSchur::with_config(
                         self.config.schur_cg_max_iterations,
                         self.config.schur_cg_tolerance,
@@ -1659,15 +1664,16 @@ impl DogLeg {
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
-                other => Err(optimizer::OptimizerError::InvalidParameters(format!(
-                    "Dog Leg in sparse Jacobian mode supports SparseCholesky, SparseQR, \
-                     ExplicitSparseSchur and ImplicitSparseSchur only; requested {other}"
-                ))
-                .into()),
+                other => Err(optimizer::OptimizerError::UnsupportedSolver {
+ optimizer: "Dog Leg",
+ mode: "sparse",
+ supported: "SparseCholesky, SparseQR, ExplicitSparseSchur and ImplicitSparseSchur",
+ requested: other,
+ }
+ .log()),
             },
         }
     }
@@ -2173,13 +2179,11 @@ mod tests {
         };
 
         let mut linear_solver = SparseCholeskySolver::new();
-        let step_result = solver
-            .compute_optimization_step_generic::<SparseMode>(
-                &residuals,
-                &solver_jacobian,
-                &mut linear_solver,
-            )
-            .ok_or("compute_optimization_step_generic returned None")?;
+        let step_result = solver.compute_optimization_step_generic::<SparseMode>(
+            &residuals,
+            &solver_jacobian,
+            &mut linear_solver,
+        )?;
 
         assert!(
             (step_result.gradient_norm - expected).abs() < 1e-6 * expected.max(1.0),

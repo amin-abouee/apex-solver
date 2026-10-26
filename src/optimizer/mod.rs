@@ -61,63 +61,34 @@ impl Display for OptimizerType {
     }
 }
 
-/// Optimizer-specific error types for apex-solver
+/// Errors of the optimization algorithms.
+///
+/// Module errors from below are wrapped with the context of the hop and keep
+/// the original as their source; they were logged where they were built, so
+/// the optimizer propagates them with a bare `?`.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum OptimizerError {
-    /// Linear system solve failed during optimization
-    #[error("Linear system solve failed: {0}")]
-    LinearSolveFailed(String),
-
-    /// Maximum iterations reached without achieving convergence
-    #[error("Maximum iterations ({max_iters}) reached without convergence")]
-    MaxIterationsReached { max_iters: usize },
-
-    /// Trust region radius became too small
-    #[error("Trust region radius became too small: {radius:.6e} < {min_radius:.6e}")]
-    TrustRegionFailure { radius: f64, min_radius: f64 },
-
-    /// Damping parameter became too large (LM-specific)
-    #[error("Damping parameter became too large: {damping:.6e} > {max_damping:.6e}")]
-    DampingFailure { damping: f64, max_damping: f64 },
-
-    /// Cost increased unexpectedly when it should decrease
-    #[error("Cost increased unexpectedly: {old_cost:.6e} -> {new_cost:.6e}")]
-    CostIncrease { old_cost: f64, new_cost: f64 },
-
-    /// Jacobian computation failed
-    #[error("Jacobian computation failed: {0}")]
-    JacobianFailed(String),
-
-    /// Invalid optimization parameters provided
-    #[error("Invalid optimization parameters: {0}")]
-    InvalidParameters(String),
-
-    /// Numerical instability detected (NaN, Inf in cost, gradient, or parameters)
-    #[error("Numerical instability detected: {0}")]
-    NumericalInstability(String),
-
-    /// Linear algebra operation failed
-    ///
-    /// **Convention**: When a `LinAlgError` occurs during optimization, it wraps
-    /// here via `?` to preserve optimizer context. This ensures the error
-    /// propagates as `ApexSolverError::Optimizer(OptimizerError::LinAlg(...))`
-    /// at the API level, not `ApexSolverError::LinearAlgebra(...)`.
-    #[error("Linear algebra error: {0}")]
+    /// The linear solver failed (factorization, Schur setup, PCG).
+    #[error("linear solve failed")]
     LinAlg(#[from] linalg::LinAlgError),
 
-    /// Core module error (problem construction, factor linearization)
-    ///
-    /// Wraps errors from the core module that occur during optimization,
-    /// such as symbolic structure failures or parallel computation errors.
-    #[error("Core error: {0}")]
+    /// Problem setup failed before the first iteration.
+    #[error("problem setup failed")]
     Core(#[from] crate::core::CoreError),
 
-    /// Linearizer error (Jacobian assembly, symbolic structure)
-    ///
-    /// Wraps errors from the linearizer module that occur during optimization,
-    /// such as symbolic structure failures or variable mapping errors.
-    #[error("Linearizer error: {0}")]
+    /// Residual or Jacobian assembly failed.
+    #[error("linearization failed")]
     Linearizer(#[from] crate::linearizer::LinearizerError),
+
+    /// A linear solver that does not match the problem's Jacobian mode.
+    #[error("{optimizer} in {mode} Jacobian mode supports {supported}; requested {requested}")]
+    UnsupportedSolver {
+        optimizer: &'static str,
+        mode: &'static str,
+        supported: &'static str,
+        requested: linalg::LinearSolverType,
+    },
 
     /// A finite variable bound, which no optimizer enforces yet: solving
     /// would silently return the unconstrained answer.
@@ -132,25 +103,31 @@ pub enum OptimizerError {
         upper: f64,
     },
 
-    /// Problem has no variables to optimize
-    #[error("Problem has no variables to optimize")]
-    EmptyProblem,
-
-    /// Problem has no residual blocks
-    #[error("Problem has no residual blocks")]
-    NoResidualBlocks,
-
-    /// Jacobi scaling matrix creation failed
-    #[error("Failed to create Jacobi scaling matrix: {0}")]
-    JacobiScalingCreation(String),
-
-    /// Jacobi scaling not initialized when expected
+    /// Jacobi scaling enabled but never built.
     #[error("Jacobi scaling not initialized")]
     JacobiScalingNotInitialized,
 
-    /// Unknown or unsupported linear solver type
-    #[error("Unknown linear solver type: {0}")]
-    UnknownLinearSolver(String),
+    /// The linear solver holds no gradient or Hessian after a solve.
+    #[error("the linear solver has no {what} after a successful solve")]
+    MissingSolverState { what: &'static str },
+
+    /// Dog Leg could not solve for its Gauss-Newton step at any damping.
+    #[error("Gauss-Newton step failed after {attempts} damping attempts (mu = {mu:.3e})")]
+    DampingExhausted {
+        attempts: usize,
+        mu: f64,
+        #[source]
+        source: Option<linalg::LinAlgError>,
+    },
+
+    /// A step vector whose length disagrees with the free columns of the
+    /// variables it is applied to.
+    #[error("step has {actual} entries, the variables have {expected} free columns")]
+    StepSize { expected: usize, actual: usize },
+
+    /// A step applied to a variable that is not in the variable map.
+    #[error("step applied to unknown variable {key:?}")]
+    UnknownVariable { key: crate::core::VarKey },
 }
 
 /// Result type for optimizer operations
@@ -215,8 +192,6 @@ pub enum OptimizationStatus {
     IllConditionedJacobian,
     /// NaN or Inf detected in cost or parameters
     InvalidNumericalValues,
-    /// Other failure
-    Failed(String),
 }
 
 impl Display for OptimizationStatus {
@@ -247,7 +222,6 @@ impl Display for OptimizationStatus {
             OptimizationStatus::InvalidNumericalValues => {
                 write!(f, "Invalid numerical values (NaN/Inf) detected")
             }
-            OptimizationStatus::Failed(msg) => write!(f, "Failed: {msg}"),
         }
     }
 }
@@ -281,7 +255,7 @@ pub struct SolverResult<T> {
 
 /// Type alias for the result returned by all optimizer `optimize()` calls.
 pub type OptimizeResult =
-    Result<SolverResult<SlotMap<VarKey, Box<dyn ManifoldVariable>>>, crate::error::ApexSolverError>;
+    Result<SolverResult<SlotMap<VarKey, Box<dyn ManifoldVariable>>>, OptimizerError>;
 
 /// Unified optimizer interface. Object-safe — `Box<dyn Optimizer>` is valid.
 ///
@@ -313,11 +287,17 @@ pub trait Optimizer {
 /// specified by `variable_order`. Each variable's tangent space dimension determines
 /// how many elements it occupies in the step vector.
 ///
+/// # Errors
+///
+/// [`OptimizerError::UnknownVariable`] for a key of `variable_order` that is
+/// not in `variables`, or [`OptimizerError::StepSize`] when `step` does not
+/// have exactly one entry per free column. Both are checked before any
+/// variable is touched.
 pub fn apply_parameter_step(
     variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     step: MatRef<f64>,
     variable_order: &[VarKey],
-) -> f64 {
+) -> OptimizerResult<f64> {
     apply_signed_parameter_step(variables, step, variable_order, 1.0)
 }
 
@@ -330,7 +310,21 @@ fn apply_signed_parameter_step(
     step: MatRef<f64>,
     variable_order: &[VarKey],
     sign: f64,
-) -> f64 {
+) -> OptimizerResult<f64> {
+    let mut free_columns = 0;
+    for &key in variable_order {
+        let var = variables
+            .get(key)
+            .ok_or_else(|| OptimizerError::UnknownVariable { key }.log())?;
+        free_columns += var.free_dof();
+    }
+    if step.nrows() != free_columns {
+        return Err(OptimizerError::StepSize {
+            expected: free_columns,
+            actual: step.nrows(),
+        }
+        .log());
+    }
     // `step` is sized to `total_dof` from `build_variable_index_map`, i.e.
     // free columns only (see ISSUE-0003) — its norm below is already the
     // norm of the step actually applied, with no fixed-coordinate entries
@@ -361,7 +355,7 @@ fn apply_signed_parameter_step(
         }
     }
 
-    step.norm_l2()
+    Ok(step.norm_l2())
 }
 
 /// Apply negative parameter step to rollback variables.
@@ -374,12 +368,16 @@ fn apply_signed_parameter_step(
 /// * `step` - Full step vector in tangent space (faer matrix view) to negate
 /// * `variable_order` - Ordered list of variable names (defines indexing into step vector)
 ///
+/// # Errors
+///
+/// As [`apply_parameter_step`].
 pub fn apply_negative_parameter_step(
     variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     step: MatRef<f64>,
     variable_order: &[VarKey],
-) {
-    apply_signed_parameter_step(variables, step, variable_order, -1.0);
+) -> OptimizerResult<()> {
+    apply_signed_parameter_step(variables, step, variable_order, -1.0)?;
+    Ok(())
 }
 
 pub fn compute_cost(residual: &Mat<f64>) -> f64 {
@@ -520,8 +518,17 @@ pub fn create_jacobi_scaling(
         })
         .collect();
 
-    SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec)
-        .map_err(|e| OptimizerError::JacobiScalingCreation(e.to_string()).log_with_source(e))
+    SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec).map_err(|e| {
+        OptimizerError::from(
+            linalg::LinAlgError::SparseMatrix {
+                context: "Jacobi scaling matrix",
+                rows: cols,
+                cols,
+                source: e.into(),
+            }
+            .log(),
+        )
+    })
 }
 
 /// Process Jacobian by applying Jacobi scaling (created on first iteration).
@@ -836,7 +843,7 @@ pub(crate) fn iteration_preamble<M: AssemblyBackend>(
     iteration: usize,
     max_condition_number: Option<f64>,
     jacobian_evaluations: &mut usize,
-) -> Result<IterationPreamble<M>, crate::error::ApexSolverError> {
+) -> OptimizerResult<IterationPreamble<M>> {
     // Evaluate residuals and Jacobian using the assembly mode
     let (residuals, jacobian) = M::assemble(
         problem,
@@ -1522,27 +1529,29 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_apply_parameter_step_advances_variable() {
+    fn test_apply_parameter_step_advances_variable() -> TestResult {
         let mut vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
         let k = vars.insert(Box::new(Variable::new(Rn::new(dvector![0.0]))));
         let order = vec![k];
         let step = Mat::from_fn(1, 1, |_, _| 3.0);
-        let norm = apply_parameter_step(&mut vars, step.as_ref(), &order);
+        let norm = apply_parameter_step(&mut vars, step.as_ref(), &order)?;
         assert!((norm - 3.0).abs() < 1e-12);
         let val = vars[k].as_param_slice()[0];
         assert!((val - 3.0).abs() < 1e-12, "expected 3.0, got {val}");
+        Ok(())
     }
 
     #[test]
-    fn test_apply_negative_parameter_step_reverts() {
+    fn test_apply_negative_parameter_step_reverts() -> TestResult {
         let mut vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
         let k = vars.insert(Box::new(Variable::new(Rn::new(dvector![5.0]))));
         let order = vec![k];
         let step = Mat::from_fn(1, 1, |_, _| 2.0);
-        apply_parameter_step(&mut vars, step.as_ref(), &order);
+        apply_parameter_step(&mut vars, step.as_ref(), &order)?;
         assert!((vars[k].as_param_slice()[0] - 7.0).abs() < 1e-12);
-        apply_negative_parameter_step(&mut vars, step.as_ref(), &order);
+        apply_negative_parameter_step(&mut vars, step.as_ref(), &order)?;
         assert!((vars[k].as_param_slice()[0] - 5.0).abs() < 1e-12);
+        Ok(())
     }
 
     // -------------------------------------------------------------------------
@@ -1752,37 +1761,57 @@ mod tests {
             format!("{}", OptimizationStatus::InvalidNumericalValues),
             "Invalid numerical values (NaN/Inf) detected"
         );
-        assert!(format!("{}", OptimizationStatus::Failed("oops".into())).contains("oops"));
     }
 
     #[test]
-    fn test_optimizer_error_variants() {
-        let e1 = OptimizerError::TrustRegionFailure {
-            radius: 1e-40,
-            min_radius: 1e-32,
+    fn a_linalg_error_reaches_the_root_through_the_optimizer() -> TestResult {
+        use crate::error::{ApexSolverError, ErrorChainExt};
+        fn solve() -> linalg::LinAlgResult<()> {
+            Err(linalg::LinAlgError::NotInitialized {
+                component: "chunk eliminator",
+            })
+        }
+        fn optimize() -> OptimizerResult<()> {
+            solve()?;
+            Ok(())
+        }
+        fn api() -> crate::error::ApexSolverResult<()> {
+            optimize()?;
+            Ok(())
+        }
+        let error = api().err().ok_or("expected an error")?;
+        assert!(matches!(
+            error,
+            ApexSolverError::Optimizer(OptimizerError::LinAlg(_))
+        ));
+        assert_eq!(
+            error.chain(),
+            "linear solve failed\n  → chunk eliminator used before it was initialized"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_step_of_the_wrong_length_is_rejected_before_any_variable_moves() -> TestResult {
+        let mut vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let order: Vec<VarKey> = [0.0, 1.0]
+            .iter()
+            .map(|x| vars.insert(Box::new(Variable::new(Rn::new(dvector![*x])))))
+            .collect();
+        let before: Vec<f64> = vars[order[0]].as_param_slice().to_vec();
+        let short = Mat::<f64>::zeros(1, 1);
+        let Err(err) = apply_parameter_step(&mut vars, short.as_ref(), &order) else {
+            return Err("a short step must be rejected".into());
         };
-        assert!(e1.to_string().contains("Trust region radius"));
-
-        let e2 = OptimizerError::DampingFailure {
-            damping: 1e13,
-            max_damping: 1e12,
-        };
-        assert!(e2.to_string().contains("Damping parameter"));
-
-        let e3 = OptimizerError::CostIncrease {
-            old_cost: 1.0,
-            new_cost: 2.0,
-        };
-        assert!(e3.to_string().contains("Cost increased"));
-
-        let e4 = OptimizerError::LinearSolveFailed("singular".into());
-        assert!(e4.to_string().contains("singular"));
-
-        let e5 = OptimizerError::EmptyProblem;
-        assert!(e5.to_string().contains("no variables"));
-
-        let e6 = OptimizerError::NoResidualBlocks;
-        assert!(e6.to_string().contains("residual blocks"));
+        assert!(matches!(
+            err,
+            OptimizerError::StepSize {
+                expected: 2,
+                actual: 1
+            }
+        ));
+        assert_eq!(vars[order[0]].as_param_slice(), before.as_slice());
+        Ok(())
     }
 
     // -------------------------------------------------------------------------

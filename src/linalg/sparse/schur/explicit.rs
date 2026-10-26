@@ -3015,7 +3015,7 @@ mod tests {
                 &mut state.variables,
                 step.as_ref(),
                 &state.sorted_vars,
-            );
+            )?;
         }
         Ok(())
     }
@@ -3107,7 +3107,7 @@ mod tests {
                 &mut state.variables,
                 reference.as_ref(),
                 &state.sorted_vars,
-            );
+            )?;
             let _ = costs(&state.variables)?;
         }
         Ok(())

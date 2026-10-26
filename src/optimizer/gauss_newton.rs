@@ -113,7 +113,7 @@
 //! - Björck, Å. (1996). *Numerical Methods for Least Squares Problems*. SIAM.
 
 use crate::error::ErrorLogging;
-use crate::{core::problem, error, linalg, optimizer};
+use crate::{core::problem, linalg, optimizer};
 use std::time;
 use tracing::debug;
 
@@ -615,15 +615,12 @@ impl GaussNewton {
             linear_solver.solve_augmented_equation(residuals, scaled_jacobian, &damping)
         } else {
             linear_solver.solve_normal_equation(residuals, scaled_jacobian)
-        }
-        .map_err(|e| {
-            optimizer::OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e)
-        })?;
+        }?;
 
         // Get gradient from the solver (J^T * r) — scaled when Jacobi scaling
         // is enabled, since `scaled_jacobian` is what the solver last saw.
         let gradient = linear_solver.get_gradient().ok_or_else(|| {
-            optimizer::OptimizerError::NumericalInstability("Gradient not available".into()).log()
+            optimizer::OptimizerError::MissingSolverState { what: "gradient" }.log()
         })?;
 
         // Apply inverse Jacobi scaling to get final step (if enabled), and
@@ -654,13 +651,13 @@ impl GaussNewton {
         step_result: &StepResult,
         state: &mut optimizer::InitializedState,
         problem: &problem::Problem,
-    ) -> error::ApexSolverResult<CostEvaluation> {
+    ) -> optimizer::OptimizerResult<CostEvaluation> {
         // Apply parameter updates using manifold operations
         let _step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
             step_result.step.as_ref(),
             &state.sorted_vars,
-        );
+        )?;
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation).
         // Reuses the solve workspace instead of allocating one per iteration,
@@ -916,27 +913,22 @@ impl GaussNewton {
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ExplicitDenseSchur => {
-                    let init = |e: linalg::LinAlgError| {
-                        optimizer::OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ExplicitDenseSchur::new();
                     solver
                         .initialize_structure(
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
-                other => Err(optimizer::OptimizerError::InvalidParameters(format!(
-                    "Gauss-Newton in dense Jacobian mode supports DenseCholesky, DenseQR and \
-                     ExplicitDenseSchur only; requested {other}"
-                ))
-                .into()),
+                other => Err(optimizer::OptimizerError::UnsupportedSolver {
+ optimizer: "Gauss-Newton",
+ mode: "dense",
+ supported: "DenseCholesky, DenseQR and ExplicitDenseSchur",
+ requested: other,
+ }
+ .log()),
             },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 linalg::LinearSolverType::SparseQR => {
@@ -948,12 +940,6 @@ impl GaussNewton {
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ExplicitSparseSchur => {
-                    let init = |e: linalg::LinAlgError| {
-                        optimizer::OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ExplicitSparseSchur::new()
                         .with_variant(self.config.schur_variant)
                         .with_preconditioner(self.config.schur_preconditioner)
@@ -967,8 +953,7 @@ impl GaussNewton {
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ImplicitSparseSchur => {
@@ -976,12 +961,6 @@ impl GaussNewton {
                     // than a mode of the explicit one — this is what keeps
                     // both the O(kept_dof²) buffer and `JᵀJ` itself out of
                     // the picture entirely.
-                    let init = |e: linalg::LinAlgError| {
-                        optimizer::OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ImplicitSparseSchur::with_config(
                         self.config.schur_cg_max_iterations,
                         self.config.schur_cg_tolerance,
@@ -993,15 +972,16 @@ impl GaussNewton {
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
-                other => Err(optimizer::OptimizerError::InvalidParameters(format!(
-                    "Gauss-Newton in sparse Jacobian mode supports SparseCholesky, SparseQR, \
-                     ExplicitSparseSchur and ImplicitSparseSchur only; requested {other}"
-                ))
-                .into()),
+                other => Err(optimizer::OptimizerError::UnsupportedSolver {
+ optimizer: "Gauss-Newton",
+ mode: "sparse",
+ supported: "SparseCholesky, SparseQR, ExplicitSparseSchur and ImplicitSparseSchur",
+ requested: other,
+ }
+ .log()),
             },
         }
     }
