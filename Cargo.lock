@@ -336,6 +336,7 @@ dependencies = [
 name = "apex-manifolds"
 version = "0.4.0"
 dependencies = [
+ "apex-error",
  "nalgebra",
  "rand 0.9.5",
  "thiserror 2.0.19",

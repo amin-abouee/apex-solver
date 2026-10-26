@@ -274,6 +274,7 @@ impl ApexSolverError {
 mod tests {
     use super::*;
     use crate::factors::FactorError;
+    use apex_manifolds::RnError;
     use faer::Mat;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -400,10 +401,10 @@ mod tests {
 
     #[test]
     fn test_transparent_error_conversion() {
-        let manifold_error = ManifoldError::DimensionMismatch {
+        let manifold_error = ManifoldError::from(RnError::DimensionMismatch {
             expected: 3,
             actual: 2,
-        };
+        });
 
         let apex_error: ApexSolverError = manifold_error.into();
         assert!(
@@ -576,10 +577,10 @@ mod tests {
             CoreError::Variable("var".into()).into(),
             OptimizerError::EmptyProblem.into(),
             LinAlgError::SingularMatrix("sing".into()).into(),
-            ManifoldError::DimensionMismatch {
+            ManifoldError::from(RnError::DimensionMismatch {
                 expected: 1,
                 actual: 2,
-            }
+            })
             .into(),
             ObserverError::InvalidState("bad".into()).into(),
             FactorError::InvalidDimension {

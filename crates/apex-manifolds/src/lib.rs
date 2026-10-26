@@ -38,7 +38,27 @@
 //! represents a Lie group with its associated tangent space (Lie algebra).
 //! Operations are differentiated with respect to perturbations on the local tangent space.
 //!
+//! # Errors
+//!
+//! [`ManifoldError`] is the root error. Every variant transparently wraps one
+//! per-concern enum, so `?` lifts a leaf error to the root and `source()` still
+//! reaches the leaf:
+//!
+//! - [`ElementError`]: bad group element (wrong parameter count, non-unit quaternion,
+//!   non-positive `Sim3` scale, NaN, zero rotation axis)
+//! - [`TangentError`]: bad tangent slice or generator index
+//! - [`RnError`]: `Rn` operands of different dimension
+//! - [`ManifoldTypeError`]: unknown manifold name
+//!
+//! The group operations (`compose`, `inverse`, `act`, `exp`, `log`, the Jacobians,
+//! `from_param_slice`) are infallible and never log, because the solver calls them
+//! per residual per iteration. Input is validated where it enters, by the checked
+//! constructors: [`LieGroup::try_from_param_slice`], [`Tangent::try_from_slice`],
+//! `SO3::try_from_quaternion_wxyz`, `SO3::try_from_axis_angle`, `Sim3::try_new`.
+//! These log the error once with `apex_error::ErrorLogging` and return it.
+//!
 
+use apex_error::ErrorLogging;
 use nalgebra::{Matrix3, Vector3};
 use std::ops::{Mul, Neg};
 
@@ -59,6 +79,7 @@ use std::ops::{Mul, Neg};
 pub const SMALL_ANGLE_THRESHOLD: f64 = 1e-10;
 
 pub mod capability;
+pub mod error;
 pub mod rn;
 pub mod se2;
 pub mod se23;
@@ -69,28 +90,10 @@ pub mod so2;
 pub mod so3;
 pub mod util;
 
-/// Errors that can occur during manifold operations.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
-pub enum ManifoldError {
-    /// Invalid tangent vector dimension
-    #[error("Invalid tangent dimension: expected {expected}, got {actual}")]
-    InvalidTangentDimension { expected: usize, actual: usize },
-    /// Numerical instability in computation
-    #[error("Numerical instability: {0}")]
-    NumericalInstability(String),
-    /// Invalid manifold element
-    #[error("Invalid manifold element: {0}")]
-    InvalidElement(String),
-    /// Dimension validation failed during conversion
-    #[error("Dimension mismatch: expected {expected}, got {actual}")]
-    DimensionMismatch { expected: usize, actual: usize },
-    /// NaN or Inf detected in manifold element
-    #[error("Invalid number: NaN or Inf detected")]
-    InvalidNumber,
-    /// Normalization failed for manifold element
-    #[error("Normalization failed: {0}")]
-    NormalizationFailed(String),
-}
+pub use error::{
+    ElementError, ElementResult, ManifoldError, ManifoldResult, ManifoldTypeError,
+    ManifoldTypeResult, RnError, RnResult, TangentError, TangentResult,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManifoldType {
@@ -120,10 +123,17 @@ impl ManifoldType {
             _ => None,
         }
     }
-}
 
-/// Result type for manifold operations.
-pub type ManifoldResult<T> = Result<T, ManifoldError>;
+    /// Like [`Self::from_name`], reporting the unknown name as an error.
+    pub fn try_from_name(name: &str) -> ManifoldTypeResult<Self> {
+        Self::from_name(name).ok_or_else(|| {
+            ManifoldTypeError::UnknownManifold {
+                name: name.to_string(),
+            }
+            .log()
+        })
+    }
+}
 
 /// Core trait for Lie group operations.
 ///
@@ -618,7 +628,7 @@ mod tests {
     use crate::Tangent;
     use crate::so2::{SO2, SO2Tangent};
     use crate::so3::{SO3, SO3Tangent};
-    use crate::{ManifoldError, ManifoldType};
+    use crate::{ManifoldError, ManifoldType, ManifoldTypeError};
     use nalgebra::Matrix1;
 
     fn make_so2(angle: f64) -> SO2 {
@@ -630,54 +640,25 @@ mod tests {
     }
 
     #[test]
-    fn manifold_error_display_invalid_tangent_dimension() {
-        let e = ManifoldError::InvalidTangentDimension {
-            expected: 3,
-            actual: 6,
-        };
-        let s = e.to_string();
-        assert!(s.contains("3"), "got: {s}");
-        assert!(s.contains("6"), "got: {s}");
+    fn try_from_name_resolves_every_group_name() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(ManifoldType::try_from_name("Rn")?, ManifoldType::RN);
+        assert_eq!(ManifoldType::try_from_name("SE3")?, ManifoldType::SE3);
+        assert_eq!(ManifoldType::try_from_name("Sim3")?, ManifoldType::Sim3);
+        Ok(())
     }
 
     #[test]
-    fn manifold_error_display_numerical_instability() {
-        let e = ManifoldError::NumericalInstability("singularity".to_string());
-        assert!(e.to_string().contains("singularity"));
-    }
-
-    #[test]
-    fn manifold_error_display_invalid_element() {
-        let e = ManifoldError::InvalidElement("bad quaternion".to_string());
-        assert!(e.to_string().contains("bad quaternion"));
-    }
-
-    #[test]
-    fn manifold_error_display_dimension_mismatch() {
-        let e = ManifoldError::DimensionMismatch {
-            expected: 4,
-            actual: 3,
-        };
-        let s = e.to_string();
-        assert!(s.contains("4") && s.contains("3"), "got: {s}");
-    }
-
-    #[test]
-    fn manifold_error_display_invalid_number() {
-        let e = ManifoldError::InvalidNumber;
-        assert!(!e.to_string().is_empty());
-    }
-
-    #[test]
-    fn manifold_error_display_normalization_failed() {
-        let e = ManifoldError::NormalizationFailed("zero vector".to_string());
-        assert!(e.to_string().contains("zero vector"));
-    }
-
-    #[test]
-    fn manifold_error_is_std_error() {
-        let e = ManifoldError::InvalidNumber;
-        let _: &dyn std::error::Error = &e;
+    fn try_from_name_reports_an_unknown_name() {
+        let error = ManifoldType::try_from_name("SE4");
+        assert_eq!(
+            error,
+            Err(ManifoldTypeError::UnknownManifold {
+                name: "SE4".to_string()
+            })
+        );
+        assert_eq!(ManifoldType::from_name("SE4"), None);
+        let root = error.map_err(ManifoldError::from);
+        assert!(matches!(root, Err(ManifoldError::ManifoldType(_))));
     }
 
     #[test]
@@ -822,39 +803,6 @@ mod tests {
     }
 
     #[test]
-    fn manifold_error_clone_and_partial_eq() {
-        let e = ManifoldError::InvalidTangentDimension {
-            expected: 1,
-            actual: 2,
-        };
-        let e2 = e.clone();
-        assert_eq!(e, e2);
-
-        let e3 = ManifoldError::NumericalInstability("x".to_string());
-        let e4 = e3.clone();
-        assert_eq!(e3, e4);
-
-        let e5 = ManifoldError::InvalidElement("y".to_string());
-        let e6 = e5.clone();
-        assert_eq!(e5, e6);
-
-        let e7 = ManifoldError::DimensionMismatch {
-            expected: 3,
-            actual: 4,
-        };
-        let e8 = e7.clone();
-        assert_eq!(e7, e8);
-
-        let e9 = ManifoldError::InvalidNumber;
-        let e10 = e9.clone();
-        assert_eq!(e9, e10);
-
-        let e11 = ManifoldError::NormalizationFailed("z".to_string());
-        let e12 = e11.clone();
-        assert_eq!(e11, e12);
-    }
-
-    #[test]
     fn manifold_type_clone_and_eq() {
         let all_types = [
             ManifoldType::RN,
@@ -890,13 +838,6 @@ mod tests {
         assert!(!s3.is_empty());
         let s4 = format!("{:?}", ManifoldType::Sim3);
         assert!(!s4.is_empty());
-    }
-
-    #[test]
-    fn manifold_error_debug() {
-        let e = ManifoldError::InvalidNumber;
-        let s = format!("{e:?}");
-        assert!(!s.is_empty());
     }
 
     // Test SO3-based defaults to exercise more code paths
