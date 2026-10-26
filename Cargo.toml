@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/apex-error",
     "crates/apex-manifolds",
     "crates/apex-io",
     "crates/apex-camera-models",
@@ -15,6 +16,7 @@ homepage = "https://github.com/amin-abouee/apex-solver"
 rust-version = "1.93"
 
 [workspace.dependencies]
+apex-error = { path = "crates/apex-error", version = "0.1.0" }
 apex-manifolds = { path = "crates/apex-manifolds", version = "0.4.0" }
 apex-io = { path = "crates/apex-io", version = "0.5.0" }
 apex-camera-models = { path = "crates/apex-camera-models", version = "0.4.0" }
@@ -84,6 +86,7 @@ expect_used = "deny"
 # user-facing console output (and --nocapture test notes) are their job.
 print_stdout = "deny"
 print_stderr = "deny"
+dbg_macro = "deny"
 
 # apex-solver package (root crate)
 [package]

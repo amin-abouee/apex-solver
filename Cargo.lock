@@ -287,6 +287,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-error"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
 name = "apex-io"
 version = "0.5.0"
 dependencies = [

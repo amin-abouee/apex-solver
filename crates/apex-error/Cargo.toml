@@ -1,0 +1,21 @@
+[package]
+name = "apex-error"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Log-at-origin and error-chain helpers shared by the apex crates"
+keywords = ["error", "tracing", "thiserror"]
+categories = ["rust-patterns"]
+
+[dependencies]
+tracing.workspace = true
+
+[dev-dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true
