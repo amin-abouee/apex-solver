@@ -1,11 +1,10 @@
 //! Integration tests against real EuRoC/ASL data from the apex-calibration project.
 //! Tests are skipped when the dataset is not present on the current machine.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Test diagnostics below print under `--nocapture` only.
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use apex_io::AslError;
 use apex_io::asl::{AslDataset, AslReader};
+use std::io::Write as _;
 use std::path::Path;
 
 const EUROC_MAV0: &str =
@@ -13,17 +12,20 @@ const EUROC_MAV0: &str =
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn load_dataset() -> Option<AslDataset> {
+fn load_dataset() -> Result<Option<AslDataset>, AslError> {
     if !Path::new(EUROC_MAV0).exists() {
-        return None;
+        return Ok(None);
     }
-    Some(AslReader::load(EUROC_MAV0).expect("failed to load EuRoC dataset"))
+    Ok(Some(AslReader::load(EUROC_MAV0)?))
 }
 
 macro_rules! require_dataset {
     ($ds:ident) => {
-        let Some($ds) = load_dataset() else {
-            eprintln!("Skipping: dataset not available at {EUROC_MAV0}");
+        let Some($ds) = load_dataset()? else {
+            writeln!(
+                std::io::stderr().lock(),
+                "Skipping: dataset not available at {EUROC_MAV0}"
+            )?;
             return Ok(());
         };
     };
@@ -56,7 +58,7 @@ fn camera_frame_counts() -> TestResult {
 #[test]
 fn ground_truth_sample_count() -> TestResult {
     require_dataset!(ds);
-    let gt = ds.ground_truth.as_ref().unwrap();
+    let gt = ds.ground_truth.as_ref().ok_or("missing value")?;
     assert_eq!(gt.len(), 5696);
     Ok(())
 }
@@ -105,7 +107,7 @@ fn camera_frame_paths_are_absolute_and_exist() -> TestResult {
 #[test]
 fn ground_truth_first_pose_values() -> TestResult {
     require_dataset!(ds);
-    let pose = &ds.ground_truth.as_ref().unwrap()[0];
+    let pose = &ds.ground_truth.as_ref().ok_or("missing value")?[0];
     assert_eq!(pose.timestamp_ns, 1520527960237865414);
     assert!((pose.position.x - (-0.1986969748)).abs() < 1e-6);
     assert!((pose.position.y - (-0.1762659604)).abs() < 1e-6);

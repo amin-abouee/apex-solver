@@ -378,8 +378,9 @@ impl IndexEntry {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
 
     /// First 80 bytes of `R_06_medium.vrs` (LaMaria).
@@ -396,39 +397,42 @@ mod tests {
     }
 
     #[test]
-    fn magic_constants_spell_the_file_signature() {
+    fn magic_constants_spell_the_file_signature() -> TestResult {
         let mut sig = Vec::new();
         sig.extend_from_slice(&MAGIC_1.to_le_bytes());
         sig.extend_from_slice(&MAGIC_2.to_le_bytes());
         sig.extend_from_slice(&MAGIC_3.to_le_bytes());
         sig.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
         assert_eq!(sig, b"VisionRecordVRS2");
+        Ok(())
     }
 
     #[test]
-    fn parses_a_real_file_header() {
+    fn parses_a_real_file_header() -> TestResult {
         let bytes = from_hex(REAL_HEADER);
         assert_eq!(bytes.len(), FILE_HEADER_SIZE);
-        let h = FileHeader::parse(&bytes).unwrap().unwrap();
+        let h = FileHeader::parse(&bytes)?.ok_or("missing value")?;
         assert_eq!(h.file_header_size, 80);
         assert_eq!(h.record_header_size, 32);
         assert_eq!(h.description_record_offset, 80);
         assert_eq!(h.index_record_offset, 37126);
         assert_eq!(h.first_user_record_offset, 4_783_915);
         assert_eq!(h.to_bytes().to_vec(), bytes);
+        Ok(())
     }
 
     #[test]
-    fn rejects_non_vrs_and_unknown_versions() {
-        assert!(FileHeader::parse(&[0u8; 80]).unwrap().is_none());
-        assert!(FileHeader::parse(&[0u8; 10]).unwrap().is_none());
+    fn rejects_non_vrs_and_unknown_versions() -> TestResult {
+        assert!(FileHeader::parse(&[0u8; 80])?.is_none());
+        assert!(FileHeader::parse(&[0u8; 10])?.is_none());
         let mut bytes = from_hex(REAL_HEADER);
         bytes[76..80].copy_from_slice(b"VRS9");
         assert!(FileHeader::parse(&bytes).is_err());
+        Ok(())
     }
 
     #[test]
-    fn record_header_round_trips() {
+    fn record_header_round_trips() -> TestResult {
         let h = RecordHeader {
             record_size: 4138,
             previous_record_size: 4_746_789,
@@ -440,14 +444,15 @@ mod tests {
             compression: Compression::Zstd,
             uncompressed_size: 321_737,
         };
-        let parsed = RecordHeader::parse(&h.to_bytes()).unwrap();
+        let parsed = RecordHeader::parse(&h.to_bytes())?;
         assert_eq!(parsed, h);
         assert_eq!(parsed.stream_id().to_string(), "214-1");
         assert_eq!(parsed.payload_size(), 4138 - 32);
+        Ok(())
     }
 
     #[test]
-    fn record_header_rejects_garbage() {
+    fn record_header_rejects_garbage() -> TestResult {
         assert!(RecordHeader::parse(&[0u8; 10]).is_err());
         let mut b = [0u8; 32];
         b[0] = 8; // record_size < header size
@@ -456,15 +461,15 @@ mod tests {
             let mut ok = [0u8; 32];
             ok[0] = 40;
             ok
-        })
-        .unwrap()
+        })?
         .to_bytes();
         b[27] = 9; // unknown compression
         assert!(RecordHeader::parse(&b).is_err());
+        Ok(())
     }
 
     #[test]
-    fn index_entry_round_trips_and_matches_a_real_one() {
+    fn index_entry_round_trips_and_matches_a_real_one() -> TestResult {
         // First real entry: config record of 214-1, 4138 bytes, ts 5e-324.
         let e = IndexEntry {
             timestamp: f64::from_bits(1),
@@ -472,14 +477,16 @@ mod tests {
             record_type: RecordType::Configuration,
             stream: StreamId::new(214, 1),
         };
-        assert_eq!(IndexEntry::parse(&e.to_bytes()).unwrap(), e);
+        assert_eq!(IndexEntry::parse(&e.to_bytes())?, e);
         assert_eq!(e.to_bytes().len(), INDEX_ENTRY_SIZE);
+        Ok(())
     }
 
     #[test]
-    fn stream_id_bytes_round_trip() {
+    fn stream_id_bytes_round_trip() -> TestResult {
         let s = StreamId::new(1202, 2);
-        assert_eq!(StreamId::from_bytes(&s.to_bytes()).unwrap(), s);
+        assert_eq!(StreamId::from_bytes(&s.to_bytes())?, s);
         assert!(StreamId::from_bytes(&[0; 3]).is_err());
+        Ok(())
     }
 }

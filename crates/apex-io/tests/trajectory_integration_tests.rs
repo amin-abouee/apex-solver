@@ -4,10 +4,9 @@
 //! agreement, and real datasets when present — so they belong beside the crate
 //! rather than inflating the modules they test.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Test diagnostics below print under `--nocapture` only.
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use std::io::Write as _;
 use std::path::Path;
 
 use apex_io::asl::{AslLayout, AslTrajectoryLoader, load_mav0_trajectory};
@@ -28,7 +27,11 @@ const EUROC_MAV0: &str =
 macro_rules! require_dataset {
     ($path:expr) => {
         if !Path::new($path).is_dir() {
-            eprintln!("Skipping: dataset not available at {}", $path);
+            writeln!(
+                std::io::stderr().lock(),
+                "Skipping: dataset not available at {}",
+                $path
+            )?;
             return Ok(());
         }
     };

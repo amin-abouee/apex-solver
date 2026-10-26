@@ -255,7 +255,6 @@ fn parse_timestamp(raw: &str, path: &Path, line: usize) -> Result<u64> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use apex_manifolds::so3::SO3;

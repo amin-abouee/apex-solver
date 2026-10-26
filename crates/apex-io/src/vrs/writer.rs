@@ -426,8 +426,11 @@ pub fn stream_tags(name: &str, user: BTreeMap<String, String>) -> StreamTags {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type Written = Vec<(StreamId, f64, Vec<u8>)>;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
     use crate::vrs::datalayout::LayoutWriter;
     use crate::vrs::reader::{RecordFilter, VrsReader};
@@ -438,45 +441,45 @@ mod tests {
         {"name":"seq","type":"DataPieceValue<uint32_t>","offset":0},
         {"name":"label","type":"DataPieceString","index":0}]}"#;
 
-    fn write_sample(path: &Path, n: u32) -> Vec<(StreamId, f64, Vec<u8>)> {
-        let layout = DataLayout::from_json(LAYOUT).unwrap();
+    fn write_sample(
+        path: &Path,
+        n: u32,
+    ) -> std::result::Result<Written, Box<dyn std::error::Error>> {
+        let layout = DataLayout::from_json(LAYOUT)?;
         let a = StreamId::new(500, 1);
         let b = StreamId::new(501, 1);
-        let mut w = VrsWriter::create(path, VrsWriteOptions::default()).unwrap();
-        w.set_file_tag("session_id", "test").unwrap();
+        let mut w = VrsWriter::create(path, VrsWriteOptions::default())?;
+        w.set_file_tag("session_id", "test")?;
         for id in [a, b] {
-            w.add_stream(id, stream_tags("Test Stream", BTreeMap::new()))
-                .unwrap();
-            w.define_record_format(id, RecordType::Data, 1, "data_layout+custom", &[&layout])
-                .unwrap();
+            w.add_stream(id, stream_tags("Test Stream", BTreeMap::new()))?;
+            w.define_record_format(id, RecordType::Data, 1, "data_layout+custom", &[&layout])?;
         }
         let mut expected = Vec::new();
         for i in 0..n {
             for (id, t0) in [(a, 0.0), (b, 0.0005)] {
                 let ts = f64::from(i) * 0.001 + t0;
                 let mut lw = LayoutWriter::new(&layout);
-                lw.set_u32("seq", i).unwrap();
-                lw.set_string("label", &format!("{id}#{i}")).unwrap();
+                lw.set_u32("seq", i)?;
+                lw.set_string("label", &format!("{id}#{i}"))?;
                 let mut payload = lw.finish();
                 payload.extend_from_slice(&vec![(i % 251) as u8; 300]); // custom block, compressible
-                w.write_record(id, RecordType::Data, 1, ts, &payload)
-                    .unwrap();
+                w.write_record(id, RecordType::Data, 1, ts, &payload)?;
                 expected.push((id, ts, payload));
             }
         }
-        w.finish().unwrap();
-        expected
+        w.finish()?;
+        Ok(expected)
     }
 
     #[test]
-    fn round_trip_through_the_reader() {
-        let dir = tempdir().unwrap();
+    fn round_trip_through_the_reader() -> TestResult {
+        let dir = tempdir()?;
         let path = dir.path().join("t.vrs");
-        let expected = write_sample(&path, 200);
+        let expected = write_sample(&path, 200)?;
 
-        let mut r = VrsReader::open(&path).unwrap();
+        let mut r = VrsReader::open(&path)?;
         assert_eq!(r.index_source(), IndexSource::File);
-        assert!(r.index_matches_scan().unwrap());
+        assert!(r.index_matches_scan()?);
         assert_eq!(
             r.file_tags().get("session_id").map(String::as_str),
             Some("test")
@@ -489,38 +492,43 @@ mod tests {
         let mut cur = r.cursor(&RecordFilter::all());
         let mut buf = Vec::new();
         for (id, ts, payload) in &expected {
-            let meta = r.next_record_into(&mut cur, &mut buf).unwrap().unwrap();
+            let meta = r
+                .next_record_into(&mut cur, &mut buf)?
+                .ok_or("missing value")?;
             assert_eq!((meta.stream, meta.timestamp), (*id, *ts));
             assert_eq!(&buf, payload);
         }
-        assert!(r.next_record_into(&mut cur, &mut buf).unwrap().is_none());
+        assert!(r.next_record_into(&mut cur, &mut buf)?.is_none());
 
         // Typed access through the stored RF/DL tags.
-        let idx = r.find_nearest(StreamId::new(501, 1), 0.0505).unwrap();
-        let meta = r.read_record_into(idx, &mut buf).unwrap();
-        let layout = r.record_layout(meta.stream, RecordType::Data, 1).unwrap();
-        let blocks = layout.split(&buf).unwrap();
+        let idx = r
+            .find_nearest(StreamId::new(501, 1), 0.0505)
+            .ok_or("missing value")?;
+        let meta = r.read_record_into(idx, &mut buf)?;
+        let layout = r
+            .record_layout(meta.stream, RecordType::Data, 1)
+            .ok_or("missing value")?;
+        let blocks = layout.split(&buf)?;
         match (&blocks[0], &blocks[1]) {
             (Block::Layout(v), Block::Custom(c)) => {
-                assert_eq!(v.get_u32("seq").unwrap(), 50);
-                assert_eq!(v.get_string("label").unwrap(), "501-1#50");
+                assert_eq!(v.get_u32("seq")?, 50);
+                assert_eq!(v.get_string("label")?, "501-1#50");
                 assert_eq!(c.len(), 300);
             }
             other => panic!("{other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn small_records_are_stored_and_large_ones_compressed() {
-        let dir = tempdir().unwrap();
+    fn small_records_are_stored_and_large_ones_compressed() -> TestResult {
+        let dir = tempdir()?;
         let path = dir.path().join("c.vrs");
         let id = StreamId::new(700, 1);
-        let mut w = VrsWriter::create(&path, VrsWriteOptions::default()).unwrap();
-        w.add_stream(id, StreamTags::default()).unwrap();
-        w.write_record(id, RecordType::Data, 1, 0.0, &[1u8; 16])
-            .unwrap();
-        w.write_record(id, RecordType::Data, 1, 1.0, &[2u8; 100_000])
-            .unwrap();
+        let mut w = VrsWriter::create(&path, VrsWriteOptions::default())?;
+        w.add_stream(id, StreamTags::default())?;
+        w.write_record(id, RecordType::Data, 1, 0.0, &[1u8; 16])?;
+        w.write_record(id, RecordType::Data, 1, 1.0, &[2u8; 100_000])?;
         w.write_record_with(
             id,
             RecordType::Data,
@@ -528,13 +536,12 @@ mod tests {
             2.0,
             &[3u8; 100_000],
             Compression::None,
-        )
-        .unwrap();
-        let summary = w.finish().unwrap();
+        )?;
+        let summary = w.finish()?;
         assert_eq!(summary.records, 3);
-        assert_eq!(summary.bytes, std::fs::metadata(&path).unwrap().len());
+        assert_eq!(summary.bytes, std::fs::metadata(&path)?.len());
 
-        let mut r = VrsReader::open(&path).unwrap();
+        let mut r = VrsReader::open(&path)?;
         let sizes: Vec<u32> = r.records().iter().map(|i| i.size).collect();
         assert_eq!(sizes[0] as usize, RECORD_HEADER_SIZE + 16);
         assert!(
@@ -544,123 +551,125 @@ mod tests {
         );
         assert_eq!(sizes[2] as usize, RECORD_HEADER_SIZE + 100_000);
         let mut buf = Vec::new();
-        r.read_record_into(1, &mut buf).unwrap();
+        r.read_record_into(1, &mut buf)?;
         assert_eq!(buf, vec![2u8; 100_000]);
+        Ok(())
     }
 
     #[test]
-    fn truncated_file_is_recovered_by_rebuilding_the_index() {
-        let dir = tempdir().unwrap();
+    fn truncated_file_is_recovered_by_rebuilding_the_index() -> TestResult {
+        let dir = tempdir()?;
         let path = dir.path().join("cut.vrs");
-        write_sample(&path, 100);
-        let full = std::fs::metadata(&path).unwrap().len();
+        write_sample(&path, 100)?;
+        let full = std::fs::metadata(&path)?.len();
         // Chop off the index record and part of the last data record.
-        let r = VrsReader::open(&path).unwrap();
-        let last = r.records().last().copied().unwrap();
+        let r = VrsReader::open(&path)?;
+        let last = r.records().last().copied().ok_or("missing value")?;
         drop(r);
-        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.set_len(last.offset + 10).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path)?;
+        file.set_len(last.offset + 10)?;
         assert!(full > last.offset + 10);
 
-        let r = VrsReader::open(&path).unwrap();
+        let r = VrsReader::open(&path)?;
         assert_eq!(r.index_source(), IndexSource::Rebuilt);
         assert_eq!(r.records().len(), 199, "all complete records survive");
+        Ok(())
     }
 
     #[test]
-    fn index_at_the_end_is_not_mistaken_for_a_record_by_a_scan() {
-        let dir = tempdir().unwrap();
+    fn index_at_the_end_is_not_mistaken_for_a_record_by_a_scan() -> TestResult {
+        let dir = tempdir()?;
         let path = dir.path().join("e.vrs");
-        write_sample(&path, 20);
-        let mut r = VrsReader::open(&path).unwrap();
-        assert!(r.index_matches_scan().unwrap());
+        write_sample(&path, 20)?;
+        let mut r = VrsReader::open(&path)?;
+        assert!(r.index_matches_scan()?);
+        Ok(())
     }
 
     #[test]
-    fn usage_errors_are_reported() {
-        let dir = tempdir().unwrap();
+    fn usage_errors_are_reported() -> TestResult {
+        let dir = tempdir()?;
         let id = StreamId::new(900, 1);
-        let mut w =
-            VrsWriter::create(dir.path().join("u.vrs"), VrsWriteOptions::default()).unwrap();
+        let mut w = VrsWriter::create(dir.path().join("u.vrs"), VrsWriteOptions::default())?;
         assert!(
             w.add_stream(StreamId::new(2, 1), StreamTags::default())
                 .is_err()
         );
-        w.add_stream(id, StreamTags::default()).unwrap();
+        w.add_stream(id, StreamTags::default())?;
         assert!(w.add_stream(id, StreamTags::default()).is_err());
         assert!(
             w.write_record(StreamId::new(901, 1), RecordType::Data, 1, 0.0, b"x")
                 .is_err()
         );
-        w.write_record(id, RecordType::Data, 1, 0.0, b"x").unwrap();
+        w.write_record(id, RecordType::Data, 1, 0.0, b"x")?;
         assert!(
             w.add_stream(StreamId::new(902, 1), StreamTags::default())
                 .is_err()
         );
         assert!(w.set_file_tag("a", "b").is_err());
-        w.finish().unwrap();
+        w.finish()?;
         assert!(w.write_record(id, RecordType::Data, 1, 1.0, b"y").is_err());
         // refuses to overwrite
         assert!(VrsWriter::create(dir.path().join("u.vrs"), VrsWriteOptions::default()).is_err());
+        Ok(())
     }
 
     #[test]
-    fn dropping_an_unfinished_writer_still_yields_a_valid_file() {
-        let dir = tempdir().unwrap();
+    fn dropping_an_unfinished_writer_still_yields_a_valid_file() -> TestResult {
+        let dir = tempdir()?;
         let path = dir.path().join("d.vrs");
         {
             let id = StreamId::new(800, 1);
-            let mut w = VrsWriter::create(&path, VrsWriteOptions::default()).unwrap();
-            w.add_stream(id, StreamTags::default()).unwrap();
-            w.write_record(id, RecordType::Data, 1, 0.5, b"hello")
-                .unwrap();
+            let mut w = VrsWriter::create(&path, VrsWriteOptions::default())?;
+            w.add_stream(id, StreamTags::default())?;
+            w.write_record(id, RecordType::Data, 1, 0.5, b"hello")?;
         }
-        let r = VrsReader::open(&path).unwrap();
+        let r = VrsReader::open(&path)?;
         assert_eq!(r.index_source(), IndexSource::File);
         assert_eq!(r.records().len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn record_chain_is_intact_for_written_files_and_detects_tampering() {
-        let dir = tempdir().unwrap();
+    fn record_chain_is_intact_for_written_files_and_detects_tampering() -> TestResult {
+        let dir = tempdir()?;
         let path = dir.path().join("chain.vrs");
-        write_sample(&path, 50);
+        write_sample(&path, 50)?;
 
-        let mut r = VrsReader::open(&path).unwrap();
-        assert_eq!(r.verify_record_chain().unwrap(), None);
+        let mut r = VrsReader::open(&path)?;
+        assert_eq!(r.verify_record_chain()?, None);
         let victim = r.records()[40];
         drop(r);
 
         // Corrupt previous_record_size (bytes 4..8 of the header) of record 40.
         {
             use std::io::{Seek, SeekFrom, Write};
-            let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-            f.seek(SeekFrom::Start(victim.offset + 4)).unwrap();
-            f.write_all(&1234u32.to_le_bytes()).unwrap();
+            let mut f = std::fs::OpenOptions::new().write(true).open(&path)?;
+            f.seek(SeekFrom::Start(victim.offset + 4))?;
+            f.write_all(&1234u32.to_le_bytes())?;
         }
-        let mut r = VrsReader::open(&path).unwrap();
-        let broken = r
-            .verify_record_chain()
-            .unwrap()
-            .expect("tampering must be found");
+        let mut r = VrsReader::open(&path)?;
+        let broken = r.verify_record_chain()?.ok_or("missing value")?;
         assert_eq!(broken.record_index, 40);
         assert_eq!(broken.offset, victim.offset);
         assert_eq!(broken.field, "previous_record_size");
         assert_eq!(broken.found, 1234);
         assert_eq!(broken.expected, r.records()[39].size);
+        Ok(())
     }
 
     #[test]
-    fn data_ordinal_is_the_position_within_the_stream() {
-        let dir = tempdir().unwrap();
+    fn data_ordinal_is_the_position_within_the_stream() -> TestResult {
+        let dir = tempdir()?;
         let path = dir.path().join("o.vrs");
-        write_sample(&path, 30);
-        let r = VrsReader::open(&path).unwrap();
+        write_sample(&path, 30)?;
+        let r = VrsReader::open(&path)?;
         for stream in r.streams() {
             for (n, &i) in r.data_records(stream).iter().enumerate() {
                 assert_eq!(r.data_ordinal(i as usize), Some(n), "{stream} #{n}");
             }
         }
         assert_eq!(r.data_ordinal(usize::MAX), None);
+        Ok(())
     }
 }

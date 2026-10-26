@@ -245,7 +245,6 @@ impl AslTrajectoryLoader {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use apex_manifolds::so3::SO3;

@@ -124,13 +124,7 @@ pub(crate) struct ChannelMeta {
 #[derive(Debug, Clone)]
 pub(crate) struct RawMcapMessage {
     pub channel_id: u16,
-    /// Part of the container record; `Message`/`RawMessage` don't carry
-    /// these two, but they're kept on the parsed form for format fidelity.
-    #[allow(dead_code)]
-    pub sequence: u32,
     pub log_time: u64,
-    #[allow(dead_code)]
-    pub publish_time: u64,
     pub data: Vec<u8>,
 }
 
@@ -952,7 +946,8 @@ impl ChunkMessageStream {
                         return Err(McapError::ShortMessage { len });
                     }
                     let channel_id = u16::from_le_bytes([self.inner[base], self.inner[base + 1]]);
-                    let sequence = u32::from_le_bytes([
+                    // Sequence and publish time are not surfaced by `Message`.
+                    let _sequence = u32::from_le_bytes([
                         self.inner[base + 2],
                         self.inner[base + 3],
                         self.inner[base + 4],
@@ -968,7 +963,7 @@ impl ChunkMessageStream {
                         self.inner[base + 12],
                         self.inner[base + 13],
                     ]);
-                    let publish_time = u64::from_le_bytes([
+                    let _publish_time = u64::from_le_bytes([
                         self.inner[base + 14],
                         self.inner[base + 15],
                         self.inner[base + 16],
@@ -991,9 +986,7 @@ impl ChunkMessageStream {
 
                     return Ok(Some(RawMcapMessage {
                         channel_id,
-                        sequence,
                         log_time,
-                        publish_time,
                         data,
                     }));
                 }
@@ -1088,11 +1081,12 @@ impl ChunkMessageStream {
                         .read_exact(&mut head)
                         .map_err(McapError::io("reading a message"))?;
                     let channel_id = u16::from_le_bytes([head[0], head[1]]);
-                    let sequence = u32::from_le_bytes([head[2], head[3], head[4], head[5]]);
+                    // Sequence and publish time are not surfaced by `Message`.
+                    let _sequence = u32::from_le_bytes([head[2], head[3], head[4], head[5]]);
                     let log_time = u64::from_le_bytes([
                         head[6], head[7], head[8], head[9], head[10], head[11], head[12], head[13],
                     ]);
-                    let publish_time = u64::from_le_bytes([
+                    let _publish_time = u64::from_le_bytes([
                         head[14], head[15], head[16], head[17], head[18], head[19], head[20],
                         head[21],
                     ]);
@@ -1110,9 +1104,7 @@ impl ChunkMessageStream {
                         .map_err(McapError::io("reading a message"))?;
                     return Ok(Some(RawMcapMessage {
                         channel_id,
-                        sequence,
                         log_time,
-                        publish_time,
                         data,
                     }));
                 }

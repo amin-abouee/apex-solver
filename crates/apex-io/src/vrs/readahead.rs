@@ -288,32 +288,32 @@ impl Drop for SequentialReader<'_> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type Scanned = Vec<(RecordMeta, Vec<u8>)>;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::super::writer::{VrsWriteOptions, VrsWriter, stream_tags};
     use super::super::{DataLayout, LayoutWriter};
     use super::*;
     use std::collections::BTreeMap;
 
     /// 300 small records + 30 large ones across two streams.
-    fn make(path: &std::path::Path) {
+    fn make(path: &std::path::Path) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let layout = DataLayout::from_json(
             r#"{"data_layout":[{"name":"seq","type":"DataPieceValue<uint32_t>","offset":0}]}"#,
-        )
-        .unwrap();
+        )?;
         let a = StreamId::new(600, 1);
         let b = StreamId::new(601, 1);
-        let mut w = VrsWriter::create(path, VrsWriteOptions::default()).unwrap();
+        let mut w = VrsWriter::create(path, VrsWriteOptions::default())?;
         for (id, name) in [(a, "A"), (b, "B")] {
-            w.add_stream(id, stream_tags(name, BTreeMap::new()))
-                .unwrap();
-            w.define_record_format(id, RecordType::Data, 1, "data_layout+custom", &[&layout])
-                .unwrap();
+            w.add_stream(id, stream_tags(name, BTreeMap::new()))?;
+            w.define_record_format(id, RecordType::Data, 1, "data_layout+custom", &[&layout])?;
         }
         for i in 0..300i64 {
             for (id, t0) in [(a, 0.0), (b, 0.0005)] {
                 let mut lw = LayoutWriter::new(&layout);
-                lw.set_u32("seq", i as u32).unwrap();
+                lw.set_u32("seq", i as u32)?;
                 let mut payload = lw.finish();
                 // Large every tenth record (compressed), small otherwise.
                 if i % 10 == 0 {
@@ -321,42 +321,42 @@ mod tests {
                 } else {
                     payload.extend(std::iter::repeat_n(0u8, 40));
                 }
-                w.write_record(id, RecordType::Data, 1, i as f64 * 0.001 + t0, &payload)
-                    .unwrap();
+                w.write_record(id, RecordType::Data, 1, i as f64 * 0.001 + t0, &payload)?;
             }
         }
-        w.finish().unwrap();
+        w.finish()?;
+        Ok(())
     }
 
-    fn scan(reader: &mut VrsReader, filter: &RecordFilter) -> Vec<(RecordMeta, Vec<u8>)> {
+    fn scan(
+        reader: &mut VrsReader,
+        filter: &RecordFilter,
+    ) -> std::result::Result<Scanned, Box<dyn std::error::Error>> {
         let mut out = Vec::new();
         let mut cur = reader.cursor(filter);
         let mut buf = Vec::new();
-        while let Some(meta) = reader.next_record_into(&mut cur, &mut buf).unwrap() {
+        while let Some(meta) = reader.next_record_into(&mut cur, &mut buf)? {
             out.push((meta, buf.clone()));
         }
-        out
+        Ok(out)
     }
 
     #[test]
-    fn sequential_read_ahead_matches_the_cursor_scan() {
-        let dir = tempfile::tempdir().unwrap();
+    fn sequential_read_ahead_matches_the_cursor_scan() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("t.vrs");
-        make(&path);
+        make(&path)?;
 
-        let mut r = VrsReader::open(&path).unwrap();
+        let mut r = VrsReader::open(&path)?;
         let all = RecordFilter::all();
-        let reference = scan(&mut r, &all);
+        let reference = scan(&mut r, &all)?;
 
         for depth in [1, 3, 16, 64] {
-            let mut r = VrsReader::open(&path).unwrap();
-            let mut seq = r
-                .sequential(&RecordFilter::all())
-                .unwrap()
-                .with_depth(depth);
+            let mut r = VrsReader::open(&path)?;
+            let mut seq = r.sequential(&RecordFilter::all())?.with_depth(depth);
             let mut buf = Vec::new();
             let mut got = Vec::new();
-            while let Some(meta) = seq.next_into(&mut buf).unwrap() {
+            while let Some(meta) = seq.next_into(&mut buf)? {
                 got.push((meta, buf.clone()));
             }
             assert_eq!(got, reference, "depth {depth}");
@@ -364,15 +364,16 @@ mod tests {
 
         // A filtered scan yields exactly the subset the cursor yields.
         let only_b = RecordFilter::streams([StreamId::new(601, 1)]);
-        let mut r = VrsReader::open(&path).unwrap();
-        let reference = scan(&mut r, &only_b);
-        let mut r = VrsReader::open(&path).unwrap();
-        let mut seq = r.sequential(&only_b).unwrap();
+        let mut r = VrsReader::open(&path)?;
+        let reference = scan(&mut r, &only_b)?;
+        let mut r = VrsReader::open(&path)?;
+        let mut seq = r.sequential(&only_b)?;
         let mut buf = Vec::new();
         let mut got = Vec::new();
-        while let Some(meta) = seq.next_into(&mut buf).unwrap() {
+        while let Some(meta) = seq.next_into(&mut buf)? {
             got.push((meta, buf.clone()));
         }
         assert_eq!(got, reference);
+        Ok(())
     }
 }

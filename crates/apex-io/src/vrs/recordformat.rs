@@ -281,29 +281,31 @@ impl RecordLayout {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
 
     #[test]
-    fn parses_real_aria_formats() {
-        let f = RecordFormat::parse("data_layout/size=92+image/jpg").unwrap();
+    fn parses_real_aria_formats() -> TestResult {
+        let f = RecordFormat::parse("data_layout/size=92+image/jpg")?;
         assert_eq!(f.blocks().len(), 2);
         assert_eq!(f.blocks()[0], BlockSpec::DataLayout { size: Some(92) });
         assert!(matches!(&f.blocks()[1], BlockSpec::Image(i) if i.format == ImageFormat::Jpg));
         assert_eq!(f.as_str(), "data_layout/size=92+image/jpg");
 
-        let f = RecordFormat::parse("data_layout+custom").unwrap();
+        let f = RecordFormat::parse("data_layout+custom")?;
         assert_eq!(f.blocks()[1], BlockSpec::Custom { size: None });
         assert_eq!(
-            RecordFormat::parse("data_layout").unwrap().blocks(),
+            RecordFormat::parse("data_layout")?.blocks(),
             [BlockSpec::DataLayout { size: None }]
         );
+        Ok(())
     }
 
     #[test]
-    fn parses_raw_image_parameters() {
-        let f = RecordFormat::parse("image/raw/640x480/pixel=grey8").unwrap();
+    fn parses_raw_image_parameters() -> TestResult {
+        let f = RecordFormat::parse("image/raw/640x480/pixel=grey8")?;
         match &f.blocks()[0] {
             BlockSpec::Image(i) => {
                 assert_eq!(i.format, ImageFormat::Raw);
@@ -314,6 +316,7 @@ mod tests {
         }
         assert!(RecordFormat::parse("audio/pcm/uint24be/rate=32000/channels=1").is_ok());
         assert!(RecordFormat::parse("bogus/thing").is_err());
+        Ok(())
     }
 
     fn tags(rf: &str) -> StreamTags {
@@ -327,17 +330,15 @@ mod tests {
     }
 
     #[test]
-    fn splits_layout_plus_image_and_layout_plus_custom() {
+    fn splits_layout_plus_image_and_layout_plus_custom() -> TestResult {
         let t = tags("data_layout/size=4+image/jpg");
-        let rl = RecordLayout::from_tags(&t, RecordType::Data, 1)
-            .unwrap()
-            .unwrap();
+        let rl = RecordLayout::from_tags(&t, RecordType::Data, 1).ok_or("missing value")??;
         let mut payload = 7u32.to_le_bytes().to_vec();
         payload.extend_from_slice(&[0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9]);
-        let blocks = rl.split(&payload).unwrap();
+        let blocks = rl.split(&payload)?;
         match (&blocks[0], &blocks[1]) {
             (Block::Layout(v), Block::Image { bytes, spec }) => {
-                assert_eq!(v.get_u32("n").unwrap(), 7);
+                assert_eq!(v.get_u32("n")?, 7);
                 assert_eq!(*bytes, &[0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9]);
                 assert_eq!(spec.format, ImageFormat::Jpg);
             }
@@ -345,26 +346,21 @@ mod tests {
         }
 
         let t = tags("data_layout+custom");
-        let rl = RecordLayout::from_tags(&t, RecordType::Data, 1)
-            .unwrap()
-            .unwrap();
-        let blocks = rl.split(&[1, 0, 0, 0, 9, 9]).unwrap();
+        let rl = RecordLayout::from_tags(&t, RecordType::Data, 1).ok_or("missing value")??;
+        let blocks = rl.split(&[1, 0, 0, 0, 9, 9])?;
         assert!(matches!(blocks[1], Block::Custom(b) if b == [9, 9]));
+        Ok(())
     }
 
     #[test]
-    fn mismatches_are_errors() {
+    fn mismatches_are_errors() -> TestResult {
         // announced size disagrees with the layout
         let t = tags("data_layout/size=8");
-        let rl = RecordLayout::from_tags(&t, RecordType::Data, 1)
-            .unwrap()
-            .unwrap();
+        let rl = RecordLayout::from_tags(&t, RecordType::Data, 1).ok_or("missing value")??;
         assert!(rl.split(&[0; 8]).is_err());
         // payload shorter than the layout
         let t = tags("data_layout");
-        let rl = RecordLayout::from_tags(&t, RecordType::Data, 1)
-            .unwrap()
-            .unwrap();
+        let rl = RecordLayout::from_tags(&t, RecordType::Data, 1).ok_or("missing value")??;
         assert!(rl.split(&[0; 2]).is_err());
         // no RF tag for that version
         assert!(RecordLayout::from_tags(&t, RecordType::Data, 9).is_none());
@@ -373,8 +369,9 @@ mod tests {
         t2.vrs.insert("RF:Data:1".into(), "data_layout".into());
         assert!(
             RecordLayout::from_tags(&t2, RecordType::Data, 1)
-                .unwrap()
+                .ok_or("missing value")?
                 .is_err()
         );
+        Ok(())
     }
 }

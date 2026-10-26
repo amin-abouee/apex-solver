@@ -1,24 +1,24 @@
 //! Cross-check the schema-driven transcoder against the crate's typed ROS1
 //! and CDR codecs (written and validated independently of it).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use apex_io::rosbag::cdr::CdrDeserializer;
 use apex_io::rosbag::messages::{FromCdr, Image as CdrImage, Imu as CdrImu};
 use apex_io::rosbag::ros1::deserialize::Ros1Serializer;
 use apex_io::rosbag::ros1::messages as r1;
 use apex_io::rosbag::transcode::{Dialect, Transcoder, catalog};
 
-fn to_cdr(name: &str, ros1: &[u8]) -> Vec<u8> {
-    let reg = catalog().expect("catalog");
-    let t = Transcoder::compile(reg, name, Dialect::Ros1, Dialect::Ros2).expect("compile");
+type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+fn to_cdr(name: &str, ros1: &[u8]) -> std::result::Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let reg = catalog()?;
+    let t = Transcoder::compile(reg, name, Dialect::Ros1, Dialect::Ros2)?;
     let mut out = Vec::new();
-    t.convert(ros1, &mut out).expect("convert");
-    out
+    t.convert(ros1, &mut out)?;
+    Ok(out)
 }
 
 #[test]
-fn imu_matches_typed_decoders() {
+fn imu_matches_typed_decoders() -> TestResult {
     let imu = r1::Imu {
         header: r1::Header {
             seq: 0,
@@ -47,10 +47,10 @@ fn imu_matches_typed_decoders() {
     };
     let mut s = Ros1Serializer::new();
     imu.to_ros1(&mut s);
-    let cdr = to_cdr("sensor_msgs/Imu", &s.into_bytes());
+    let cdr = to_cdr("sensor_msgs/Imu", &s.into_bytes())?;
 
-    let mut d = CdrDeserializer::new(&cdr).unwrap();
-    let got = CdrImu::from_cdr(&mut d).unwrap();
+    let mut d = CdrDeserializer::new(&cdr)?;
+    let got = CdrImu::from_cdr(&mut d)?;
     assert_eq!(got.header.frame_id, "imu_link");
     assert_eq!(got.header.stamp.sec, 1_700_000_123);
     assert_eq!(got.header.stamp.nanosec, 456_789_012);
@@ -59,10 +59,11 @@ fn imu_matches_typed_decoders() {
     assert_eq!(got.angular_velocity.y, 2.5);
     assert_eq!(got.linear_acceleration.x, 9.81);
     assert_eq!(got.linear_acceleration_covariance, [0.25; 9]);
+    Ok(())
 }
 
 #[test]
-fn image_matches_typed_decoders() {
+fn image_matches_typed_decoders() -> TestResult {
     let img = r1::Image {
         header: r1::Header {
             seq: 0,
@@ -78,13 +79,14 @@ fn image_matches_typed_decoders() {
     };
     let mut s = Ros1Serializer::new();
     img.to_ros1(&mut s);
-    let cdr = to_cdr("sensor_msgs/Image", &s.into_bytes());
+    let cdr = to_cdr("sensor_msgs/Image", &s.into_bytes())?;
 
-    let mut d = CdrDeserializer::new(&cdr).unwrap();
-    let got = CdrImage::from_cdr(&mut d).unwrap();
+    let mut d = CdrDeserializer::new(&cdr)?;
+    let got = CdrImage::from_cdr(&mut d)?;
     assert_eq!((got.height, got.width, got.step), (3, 5, 5));
     assert_eq!(got.encoding, "mono8");
     assert_eq!(got.header.stamp.sec, 42);
     assert_eq!(got.header.stamp.nanosec, 7);
     assert_eq!(got.data, img.data);
+    Ok(())
 }

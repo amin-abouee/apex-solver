@@ -3,12 +3,11 @@
 //! Validates reading ROS2 bag files in SQLite3 and MCAP formats against reference
 //! data extracted from the Python rosbags library.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Test diagnostics below print under `--nocapture` only.
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use apex_io::rosbag::types::{CompressionFormat, CompressionMode, StoragePlugin};
 use apex_io::rosbag::{Reader, Writer};
+use std::io::Write as _;
 use tempfile::tempdir;
 
 use std::collections::HashMap;
@@ -471,7 +470,10 @@ fn test_mcap_message_validation() -> TestResult {
         message_count += 1;
     }
     assert!(message_count > 0, "Should have read some messages");
-    println!("MCAP message validation: {message_count} messages read");
+    writeln!(
+        std::io::stdout().lock(),
+        "MCAP message validation: {message_count} messages read"
+    )?;
     Ok(())
 }
 

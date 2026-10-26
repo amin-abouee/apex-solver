@@ -20,10 +20,9 @@
 //! So the buffer below is assembled byte by byte from the specification, with
 //! every offset stated. It encodes the standard rather than an implementation.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Test diagnostics below print under `--nocapture` only.
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use std::io::Write as _;
 use std::path::Path;
 
 use apex_io::rosbag::Reader;
@@ -164,7 +163,10 @@ const EUROC_BAG: &str = "/Volumes/External/Workspace/rust/apex-vio/data/V1_01_ea
 #[test]
 fn a_real_ros2_bag_decodes_plausible_vicon_translations() -> TestResult {
     if !Path::new(EUROC_BAG).is_dir() {
-        eprintln!("Skipping: bag not available at {EUROC_BAG}");
+        writeln!(
+            std::io::stderr().lock(),
+            "Skipping: bag not available at {EUROC_BAG}"
+        )?;
         return Ok(());
     }
 

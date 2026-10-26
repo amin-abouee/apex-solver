@@ -665,27 +665,27 @@ fn encode_message_data_record(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     /// ROS1 tools read `lz4` chunks as LZ4 frames; make sure we emit that.
     #[test]
-    fn lz4_chunks_are_lz4_frames() {
-        let dir = tempdir().unwrap();
+    fn lz4_chunks_are_lz4_frames() -> TestResult {
+        let dir = tempdir()?;
         let path = dir.path().join("lz4.bag");
-        let mut w = Ros1Writer::new(&path).unwrap();
-        w.set_compression(Ros1Compression::Lz4).unwrap();
-        w.open().unwrap();
-        let c = w
-            .add_connection("/t", "std_msgs/String", "hash", "", false)
-            .unwrap();
-        w.write(&c, 1, &[0u8; 4096]).unwrap();
-        w.close().unwrap();
-        let bytes = std::fs::read(&path).unwrap();
+        let mut w = Ros1Writer::new(&path)?;
+        w.set_compression(Ros1Compression::Lz4)?;
+        w.open()?;
+        let c = w.add_connection("/t", "std_msgs/String", "hash", "", false)?;
+        w.write(&c, 1, &[0u8; 4096])?;
+        w.close()?;
+        let bytes = std::fs::read(&path)?;
         let magic = [0x04u8, 0x22, 0x4D, 0x18];
         assert!(
             bytes.windows(4).any(|w| w == magic),
             "no LZ4 frame magic found"
         );
+        Ok(())
     }
 
     use super::*;
@@ -693,13 +693,13 @@ mod tests {
 
     #[test]
     fn open_writes_magic_and_placeholder() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("a.bag");
         let mut w = Ros1Writer::new(&path)?;
         w.open()?;
         w.close()?;
 
-        let bytes = std::fs::read(&path).unwrap();
+        let bytes = std::fs::read(&path)?;
         assert!(bytes.starts_with(super::super::format::MAGIC));
         // Magic + 4096-byte reserved bag header + no chunks/conns.
         assert_eq!(
@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn add_connection_rejects_duplicates() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("dup.bag");
         let mut w = Ros1Writer::new(&path)?;
         w.open()?;
@@ -726,9 +726,9 @@ mod tests {
 
     #[test]
     fn cannot_open_existing_file() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("exists.bag");
-        std::fs::write(&path, b"x").unwrap();
+        std::fs::write(&path, b"x")?;
         let r = Ros1Writer::new(&path);
         assert!(matches!(r, Err(Ros1Error::BagAlreadyExists { .. })));
         Ok(())
@@ -736,7 +736,7 @@ mod tests {
 
     #[test]
     fn is_open_accessor() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("accessor.bag");
         let mut w = Ros1Writer::new(&path)?;
         assert!(!w.is_open());
@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn set_compression_after_open_errors() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("comp.bag");
         let mut w = Ros1Writer::new(&path)?;
         w.open()?;
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn set_chunk_threshold_after_open_errors() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("thresh.bag");
         let mut w = Ros1Writer::new(&path)?;
         w.open()?;
@@ -771,7 +771,7 @@ mod tests {
 
     #[test]
     fn write_before_open_errors() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("noopen.bag");
         let mut w = Ros1Writer::new(&path)?;
         let conn = Connection {
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn add_connection_before_open_errors() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("noopen2.bag");
         let mut w = Ros1Writer::new(&path)?;
         let result = w.add_connection("/t", "std_msgs/String", "md5", "", false);
@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn close_when_not_open_is_noop() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("noop.bag");
         let mut w = Ros1Writer::new(&path)?;
         assert!(w.close().is_ok());
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn write_unknown_connection_errors() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("unknown.bag");
         let mut w = Ros1Writer::new(&path)?;
         w.open()?;
@@ -831,7 +831,7 @@ mod tests {
 
     #[test]
     fn full_write_read_cycle() -> Result<()> {
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let path = dir.path().join("cycle.bag");
         let mut w = Ros1Writer::new(&path)?;
         w.open()?;

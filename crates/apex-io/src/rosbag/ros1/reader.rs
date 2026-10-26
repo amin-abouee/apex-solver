@@ -755,8 +755,9 @@ fn parse_connection_record(header: &RecordHeader, data: &[u8]) -> Result<Connect
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
 
     /// The chunk cache must stay bounded while iterating a multi-chunk bag.
@@ -768,7 +769,7 @@ mod tests {
         use crate::rosbag::ros1::format::Ros1Compression;
         use crate::rosbag::ros1::writer::Ros1Writer;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("many_chunks.bag");
 
         // A tiny chunk threshold forces many chunks for a small payload.
@@ -812,16 +813,17 @@ mod tests {
     }
 
     #[test]
-    fn open_missing_file_errors() {
+    fn open_missing_file_errors() -> TestResult {
         let r = Ros1Reader::new("/nonexistent/path.bag");
         assert!(matches!(r, Err(Ros1Error::BagNotFound { .. })));
+        Ok(())
     }
 
     #[test]
     fn accessors_before_open_return_defaults() -> Result<()> {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("empty.bag");
-        std::fs::write(&path, b"dummy").unwrap();
+        std::fs::write(&path, b"dummy")?;
         let r = Ros1Reader::new(&path)?;
         assert!(r.connections().is_empty());
         assert!(r.topics().is_empty());
@@ -834,9 +836,9 @@ mod tests {
 
     #[test]
     fn raw_messages_filtered_before_open_errors() -> Result<()> {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("empty.bag");
-        std::fs::write(&path, b"dummy").unwrap();
+        std::fs::write(&path, b"dummy")?;
         let mut r = Ros1Reader::new(&path)?;
         let result = r.raw_messages_filtered(None, None, None);
         assert!(matches!(result, Err(Ros1Error::NotOpen)));
@@ -845,9 +847,9 @@ mod tests {
 
     #[test]
     fn messages_filtered_before_open_errors() -> Result<()> {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("empty.bag");
-        std::fs::write(&path, b"dummy").unwrap();
+        std::fs::write(&path, b"dummy")?;
         let mut r = Ros1Reader::new(&path)?;
         let result = r.messages_filtered(None, None, None);
         assert!(matches!(result, Err(Ros1Error::NotOpen)));

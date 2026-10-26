@@ -485,7 +485,6 @@ pub fn load_trajectory_as<P: AsRef<Path>>(path: P, format: TrajectoryFormat) -> 
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use apex_manifolds::so3::SO3;

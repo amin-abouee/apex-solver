@@ -11,28 +11,31 @@
 //! Skipped silently when the variable is unset, so the regular suite never
 //! depends on a multi-gigabyte dataset being present.
 
-#![allow(clippy::print_stdout, clippy::print_stderr)]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use apex_io::rosbag::ros1::deserialize::Ros1Deserializer;
 use apex_io::rosbag::ros1::messages::{Image as Ros1Image, Imu as Ros1Imu};
 use apex_io::rosbag::{Connection, Reader};
 
+type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
 fn hilti_bag() -> Option<PathBuf> {
     std::env::var("APEX_HILTI_MCAP").ok().map(PathBuf::from)
 }
 
 #[test]
-fn hilti_ros1_mcap_summary_and_decode() {
+fn hilti_ros1_mcap_summary_and_decode() -> TestResult {
     let Some(path) = hilti_bag() else {
-        eprintln!("APEX_HILTI_MCAP not set; skipping");
-        return;
+        writeln!(
+            std::io::stderr().lock(),
+            "APEX_HILTI_MCAP not set; skipping"
+        )?;
+        return Ok(());
     };
 
-    let mut reader = Reader::new(&path).expect("open bare mcap");
-    reader.open().expect("open storage");
+    let mut reader = Reader::new(&path)?;
+    reader.open()?;
 
     // The bag-level view: six topics, five Image + one Imu, all ROS1.
     let connections = reader.connections().to_vec();
@@ -58,14 +61,12 @@ fn hilti_ros1_mcap_summary_and_decode() {
     assert_eq!(cam0.len(), 1);
 
     let first = reader
-        .raw_messages_filtered(Some(&cam0), None, None)
-        .expect("iterate")
+        .raw_messages_filtered(Some(&cam0), None, None)?
         .next()
-        .expect("at least one cam0 message")
-        .expect("read message");
+        .ok_or("missing value")??;
 
     let mut de = Ros1Deserializer::new(&first.raw_data);
-    let image = Ros1Image::from_ros1(&mut de).expect("decode ros1 Image");
+    let image = Ros1Image::from_ros1(&mut de)?;
     assert_eq!((image.width, image.height), (720, 540));
     assert_eq!(image.encoding, "mono8");
     assert_eq!(image.step, 720);
@@ -87,13 +88,11 @@ fn hilti_ros1_mcap_summary_and_decode() {
         .cloned()
         .collect();
     let first_imu = reader
-        .raw_messages_filtered(Some(&imu), None, None)
-        .expect("iterate imu")
+        .raw_messages_filtered(Some(&imu), None, None)?
         .next()
-        .expect("at least one imu message")
-        .expect("read message");
+        .ok_or("missing value")??;
     let mut de = Ros1Deserializer::new(&first_imu.raw_data);
-    let imu_msg = Ros1Imu::from_ros1(&mut de).expect("decode ros1 Imu");
+    let imu_msg = Ros1Imu::from_ros1(&mut de)?;
     assert!(
         imu_msg.linear_acceleration.x.abs() < 100.0,
         "accelerometer sample should be physical, got {}",
@@ -103,13 +102,11 @@ fn hilti_ros1_mcap_summary_and_decode() {
     // Time-bounded read must respect the window.
     let mid = (reader.start_time() + reader.end_time()) / 2;
     let early_count = reader
-        .raw_messages_filtered(Some(&cam0), None, Some(mid))
-        .expect("iterate window")
+        .raw_messages_filtered(Some(&cam0), None, Some(mid))?
         .filter_map(Result::ok)
         .count();
     let late_count = reader
-        .raw_messages_filtered(Some(&cam0), Some(mid), None)
-        .expect("iterate window")
+        .raw_messages_filtered(Some(&cam0), Some(mid), None)?
         .filter_map(Result::ok)
         .count();
     let total = reader.connections()[0]
@@ -121,12 +118,14 @@ fn hilti_ros1_mcap_summary_and_decode() {
         "splitting the bag at its midpoint must cover every cam0 message"
     );
 
-    println!(
+    writeln!(
+        std::io::stdout().lock(),
         "HILTI {}: {} topics, {} messages, cam0 first frame {}x{} mono8",
         path.display(),
         connections.len(),
         reader.message_count(),
         image.width,
         image.height
-    );
+    )?;
+    Ok(())
 }

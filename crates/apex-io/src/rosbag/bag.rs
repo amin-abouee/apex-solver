@@ -269,7 +269,7 @@ enum IterImpl<'a> {
 ///
 /// ```no_run
 /// # use apex_io::rosbag::{BagReader, Selection};
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 /// let mut bag = BagReader::open("recording.bag")?;
 /// let selection = Selection { include: vec!["/imu0".into()], ..Selection::default() };
 /// let mut it = bag.iter(&selection)?;
@@ -826,8 +826,9 @@ impl BagWriter {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type Triples = Vec<(u32, u64, Vec<u8>)>;
+
     use super::*;
     use tempfile::tempdir;
 
@@ -847,15 +848,15 @@ mod tests {
     /// Every kind can be written, sniffed, and read back identically.
     #[test]
     fn every_kind_round_trips() -> TestResult {
-        #[allow(unused_mut)]
-        let mut cases = vec![
+        let cases = [
             (BagKind::Ros1Bag, "out.bag", "pkg/Type", "ros1"),
             (BagKind::Ros2Sqlite, "sq", "pkg/msg/Type", "cdr"),
             (BagKind::Ros2Mcap, "mc", "pkg/msg/Type", "cdr"),
             (BagKind::McapFile, "out.mcap", "pkg/msg/Type", "cdr"),
-        ];
-        #[cfg(feature = "vrs")]
-        cases.push((BagKind::Vrs, "out.vrs", "pkg/msg/Type", "cdr"));
+            (BagKind::Vrs, "out.vrs", "pkg/msg/Type", "cdr"),
+        ]
+        .into_iter()
+        .filter(|(kind, ..)| cfg!(feature = "vrs") || *kind != BagKind::Vrs);
         for (kind, name, ty, fmt) in cases {
             let dir = tempdir()?;
             let path = dir.path().join(name);
@@ -942,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_combinations_are_rejected() {
+    fn unsupported_combinations_are_rejected() -> TestResult {
         let dir = tempdir().unwrap_or_else(|e| panic!("{e}"));
         assert!(
             BagWriter::create(
@@ -960,33 +961,36 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
     }
 
     /// `(connection id, stamp, payload)` triples via the callback API.
-    fn via_for_each(r: &mut BagReader, sel: &Selection) -> Vec<(u32, u64, Vec<u8>)> {
+    fn via_for_each(
+        r: &mut BagReader,
+        sel: &Selection,
+    ) -> std::result::Result<Triples, Box<dyn std::error::Error>> {
         let conns = r.selected_connections(sel);
         let mut out = Vec::new();
         r.for_each(&conns, sel, |c, ts, d| {
             out.push((c.id, ts, d.to_vec()));
             Ok(())
-        })
-        .unwrap();
-        out
+        })?;
+        Ok(out)
     }
 
     /// The pull iterator is the same stream as `for_each`, for every
     /// container, whatever the filter.
     #[test]
     fn pull_iterator_matches_for_each_for_every_kind() -> TestResult {
-        #[allow(unused_mut)]
-        let mut cases = vec![
+        let cases = [
             (BagKind::Ros1Bag, "out.bag", "pkg/Type", "ros1"),
             (BagKind::Ros2Sqlite, "sq", "pkg/msg/Type", "cdr"),
             (BagKind::Ros2Mcap, "mc", "pkg/msg/Type", "cdr"),
             (BagKind::McapFile, "out.mcap", "pkg/msg/Type", "cdr"),
-        ];
-        #[cfg(feature = "vrs")]
-        cases.push((BagKind::Vrs, "out.vrs", "pkg/msg/Type", "cdr"));
+            (BagKind::Vrs, "out.vrs", "pkg/msg/Type", "cdr"),
+        ]
+        .into_iter()
+        .filter(|(kind, ..)| cfg!(feature = "vrs") || *kind != BagKind::Vrs);
 
         for (kind, name, ty, fmt) in cases {
             let dir = tempdir()?;
@@ -1021,7 +1025,7 @@ mod tests {
                 },
             ];
             for sel in &selections {
-                let expect = via_for_each(&mut r, sel);
+                let expect = via_for_each(&mut r, sel)?;
                 let mut pulled = Vec::new();
                 let mut it = r.iter(sel)?;
                 let mut buf = Vec::new();
@@ -1036,7 +1040,7 @@ mod tests {
             // owned-message and Iterator forms agree too
             let all = Selection::default();
             let via_iter: Vec<_> = r.iter(&all)?.collect::<Result<Vec<_>>>()?;
-            let expect = via_for_each(&mut r, &all);
+            let expect = via_for_each(&mut r, &all)?;
             assert_eq!(via_iter.len(), expect.len(), "{kind:?}");
             assert_eq!(via_iter[7].data, expect[7].2, "{kind:?}");
 

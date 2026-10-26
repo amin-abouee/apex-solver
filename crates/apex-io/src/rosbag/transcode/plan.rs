@@ -321,8 +321,9 @@ impl Transcoder {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::super::catalog::catalog;
     use super::super::msgdef::{ArrayKind, FieldType, Registry};
     use super::*;
@@ -392,8 +393,12 @@ mod tests {
             self.cdr.extend_from_slice(&v.to_le_bytes());
         }
 
-        fn msg(&mut self, reg: &Registry, name: &str) {
-            let def = reg.get(name).expect("defined");
+        fn msg(
+            &mut self,
+            reg: &Registry,
+            name: &str,
+        ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let def = reg.get(name).ok_or("missing value")?;
             for f in &def.fields {
                 let count = match f.array {
                     ArrayKind::Scalar => 1,
@@ -420,17 +425,18 @@ mod tests {
                             self.scalar(4);
                             self.string();
                         }
-                        FieldType::Msg(dep) => self.msg(reg, dep),
+                        FieldType::Msg(dep) => self.msg(reg, dep)?,
                     }
                 }
             }
+            Ok(())
         }
     }
 
     /// Every standard type, random contents: the transcoder must reproduce
     /// the independently-encoded bytes in both directions.
     #[test]
-    fn matches_reference_encoders_for_every_catalog_type() {
+    fn matches_reference_encoders_for_every_catalog_type() -> TestResult {
         let reg = catalog().unwrap_or_else(|e| panic!("{e}"));
         let mut checked = 0;
         for name in reg.names() {
@@ -440,7 +446,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
             for seed in 1..=20u64 {
                 let mut b = Both::new(seed * 0x9E37_79B9 + checked);
-                b.msg(reg, &name);
+                b.msg(reg, &name)?;
                 let mut out = Vec::new();
                 to_cdr
                     .convert(&b.ros1, &mut out)
@@ -454,6 +460,7 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 100, "only {checked} types checked");
+        Ok(())
     }
 
     #[test]

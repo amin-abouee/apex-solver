@@ -312,8 +312,9 @@ fn rebuild_index_unlogged(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
 
     fn entry(ts: f64, size: u32, t: RecordType, s: StreamId) -> IndexEntry {
@@ -326,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn offsets_accumulate_from_the_first_record() {
+    fn offsets_accumulate_from_the_first_record() -> TestResult {
         let s = StreamId::new(1, 1);
         let e = [
             entry(0.0, 100, RecordType::Data, s),
@@ -338,10 +339,11 @@ mod tests {
             infos.iter().map(|i| i.offset).collect::<Vec<_>>(),
             [1000, 1100, 1150]
         );
+        Ok(())
     }
 
     #[test]
-    fn decodes_compressed_and_stored_index_payloads() {
+    fn decodes_compressed_and_stored_index_payloads() -> TestResult {
         let s = StreamId::new(214, 1);
         let entries: Vec<IndexEntry> = (0..100)
             .map(|i| entry(f64::from(i), 40 + i as u32, RecordType::Data, s))
@@ -353,7 +355,7 @@ mod tests {
             raw.extend_from_slice(&1u32.to_le_bytes());
             raw.extend_from_slice(&s.to_bytes());
             raw.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-            raw.extend_from_slice(&codec::compress(comp, &body).unwrap());
+            raw.extend_from_slice(&codec::compress(comp, &body)?);
             let header = RecordHeader {
                 record_size: 0,
                 previous_record_size: 0,
@@ -365,12 +367,13 @@ mod tests {
                 compression: comp,
                 uncompressed_size: 0,
             };
-            assert_eq!(decode_index(&header, &raw).unwrap(), entries, "{comp:?}");
+            assert_eq!(decode_index(&header, &raw)?, entries, "{comp:?}");
         }
+        Ok(())
     }
 
     #[test]
-    fn hostile_index_payloads_yield_none_not_panics() {
+    fn hostile_index_payloads_yield_none_not_panics() -> TestResult {
         let header = RecordHeader {
             record_size: 32,
             previous_record_size: 0,
@@ -388,5 +391,6 @@ mod tests {
         let mut raw = 0u32.to_le_bytes().to_vec();
         raw.extend_from_slice(&u32::MAX.to_le_bytes());
         assert!(decode_index(&header, &raw).is_err());
+        Ok(())
     }
 }

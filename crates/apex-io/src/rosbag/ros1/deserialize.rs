@@ -267,7 +267,6 @@ impl Default for Ros1Serializer {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::approx_constant)]
 mod tests {
     use super::*;
 
@@ -276,7 +275,7 @@ mod tests {
         let mut s = Ros1Serializer::new();
         s.write_u8(7);
         s.write_i32(-1234);
-        s.write_f64(3.14159265);
+        s.write_f64(1.234_567_89);
         s.write_string("hello");
         s.write_time_nanos(1_500_000_007);
         let bytes = s.into_bytes();
@@ -284,7 +283,7 @@ mod tests {
         let mut d = Ros1Deserializer::new(&bytes);
         assert_eq!(d.read_u8()?, 7);
         assert_eq!(d.read_i32()?, -1234);
-        assert!((d.read_f64()? - 3.14159265).abs() < 1e-12);
+        assert!((d.read_f64()? - 1.234_567_89).abs() < 1e-12);
         assert_eq!(d.read_string()?, "hello");
         assert_eq!(d.read_time_nanos()?, 1_500_000_007);
         assert_eq!(d.remaining(), 0);
@@ -526,7 +525,7 @@ mod tests {
         s.write_u64(u64::MAX);
         s.write_i64(i64::MIN);
         s.write_f32(2.5);
-        s.write_f64(3.14);
+        s.write_f64(2.5);
         s.write_string("test");
         s.write_bytes(&[1, 2, 3]);
         let bytes = s.into_bytes();
@@ -541,7 +540,7 @@ mod tests {
         assert_eq!(d.read_u64()?, u64::MAX);
         assert_eq!(d.read_i64()?, i64::MIN);
         assert!((d.read_f32()? - 2.5).abs() < 1e-6);
-        assert!((d.read_f64()? - 3.14).abs() < 1e-12);
+        assert!((d.read_f64()? - 2.5).abs() < 1e-12);
         assert_eq!(d.read_string()?, "test");
         assert_eq!(d.read_bytes()?, vec![1, 2, 3]);
         assert_eq!(d.remaining(), 0);

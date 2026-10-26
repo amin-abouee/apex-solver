@@ -683,8 +683,9 @@ impl<'a> LayoutView<'a> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
 
     /// The IMU data layout of real Aria files (79 bytes).
@@ -697,8 +698,8 @@ mod tests {
         {"name":"accelerometer","type":"DataPieceArray<float>","offset":43,"size":3}]}"#;
 
     #[test]
-    fn imu_layout_has_the_documented_size_and_values() {
-        let l = DataLayout::from_json(IMU_JSON).unwrap();
+    fn imu_layout_has_the_documented_size_and_values() -> TestResult {
+        let l = DataLayout::from_json(IMU_JSON)?;
         assert_eq!(l.fixed_size(), 55);
         assert_eq!(l.var_count(), 0);
 
@@ -709,43 +710,43 @@ mod tests {
         for (i, v) in [1.0f32, -2.0, 9.81].iter().enumerate() {
             d[43 + 4 * i..47 + 4 * i].copy_from_slice(&v.to_le_bytes());
         }
-        let v = l.bind(&d).unwrap();
-        assert!(v.get_bool("accelerometer_valid").unwrap());
-        assert!(!v.get_bool("gyroscope_valid").unwrap());
-        assert_eq!(v.get_f64("temperature_deg_c").unwrap(), 36.5);
-        assert_eq!(v.get_i64("capture_timestamp_ns").unwrap(), -7);
-        assert_eq!(
-            v.get_f32_array::<3>("accelerometer").unwrap(),
-            [1.0, -2.0, 9.81]
-        );
+        let v = l.bind(&d)?;
+        assert!(v.get_bool("accelerometer_valid")?);
+        assert!(!v.get_bool("gyroscope_valid")?);
+        assert_eq!(v.get_f64("temperature_deg_c")?, 36.5);
+        assert_eq!(v.get_i64("capture_timestamp_ns")?, -7);
+        assert_eq!(v.get_f32_array::<3>("accelerometer")?, [1.0, -2.0, 9.81]);
         assert_eq!(v.total_len(), 55);
+        Ok(())
     }
 
     #[test]
-    fn wrong_type_or_name_is_an_error() {
-        let l = DataLayout::from_json(IMU_JSON).unwrap();
+    fn wrong_type_or_name_is_an_error() -> TestResult {
+        let l = DataLayout::from_json(IMU_JSON)?;
         let d = vec![0u8; 55];
-        let v = l.bind(&d).unwrap();
+        let v = l.bind(&d)?;
         assert!(v.get_f64("capture_timestamp_ns").is_err());
         assert!(v.get_i64("nope").is_err());
         assert!(v.get_f32_array::<4>("accelerometer").is_err());
         assert!(v.get_string("accelerometer").is_err());
+        Ok(())
     }
 
     #[test]
-    fn short_record_is_rejected() {
-        let l = DataLayout::from_json(IMU_JSON).unwrap();
+    fn short_record_is_rejected() -> TestResult {
+        let l = DataLayout::from_json(IMU_JSON)?;
         assert!(l.bind(&[0u8; 54]).is_err());
+        Ok(())
     }
 
     #[test]
-    fn var_size_pieces_decode_like_a_real_wifi_record() {
+    fn var_size_pieces_decode_like_a_real_wifi_record() -> TestResult {
         let json = r#"{"data_layout":[
             {"name":"rssi","type":"DataPieceValue<float>","offset":0},
             {"name":"ssid","type":"DataPieceString","index":0},
             {"name":"antennas","type":"DataPieceVector<float>","index":1},
             {"name":"raw","type":"DataPieceVector<string>","index":2}]}"#;
-        let l = DataLayout::from_json(json).unwrap();
+        let l = DataLayout::from_json(json)?;
         assert_eq!((l.fixed_size(), l.var_count()), (4, 3));
 
         let mut vardata = Vec::new();
@@ -773,17 +774,18 @@ mod tests {
         d.extend_from_slice(&vardata);
         d.extend_from_slice(b"TRAILING-CONTENT-BLOCK");
 
-        let v = l.bind(&d).unwrap();
-        assert_eq!(v.get_f32("rssi").unwrap(), -60.0);
-        assert_eq!(v.get_string("ssid").unwrap(), "eth-visitors");
-        assert_eq!(v.get_f32_vector("antennas").unwrap(), [1.5, -2.5]);
-        assert_eq!(v.get_string_vector("raw").unwrap(), ["ab", "cde"]);
+        let v = l.bind(&d)?;
+        assert_eq!(v.get_f32("rssi")?, -60.0);
+        assert_eq!(v.get_string("ssid")?, "eth-visitors");
+        assert_eq!(v.get_f32_vector("antennas")?, [1.5, -2.5]);
+        assert_eq!(v.get_string_vector("raw")?, ["ab", "cde"]);
         // Content blocks begin right after the var data.
         assert_eq!(&d[v.total_len()..], b"TRAILING-CONTENT-BLOCK");
+        Ok(())
     }
 
     #[test]
-    fn layout_writer_output_reads_back_through_the_view() {
+    fn layout_writer_output_reads_back_through_the_view() -> TestResult {
         let json = r#"{"data_layout":[
             {"name":"ts","type":"DataPieceValue<int64_t>","offset":0},
             {"name":"ok","type":"DataPieceValue<Bool>","offset":8},
@@ -791,55 +793,56 @@ mod tests {
             {"name":"name","type":"DataPieceString","index":0},
             {"name":"v","type":"DataPieceVector<float>","index":1},
             {"name":"lines","type":"DataPieceVector<string>","index":2}]}"#;
-        let l = DataLayout::from_json(json).unwrap();
+        let l = DataLayout::from_json(json)?;
         let mut w = LayoutWriter::new(&l);
-        w.set_i64("ts", -42).unwrap();
-        w.set_bool("ok", true).unwrap();
-        w.set_f32_array("acc", &[1.0, 2.0, 3.0]).unwrap();
-        w.set_string("name", "héllo").unwrap();
-        w.set_f32_vector("v", &[0.5, 1.5]).unwrap();
-        w.set_string_vector("lines", &["a".into(), "bc".into()])
-            .unwrap();
+        w.set_i64("ts", -42)?;
+        w.set_bool("ok", true)?;
+        w.set_f32_array("acc", &[1.0, 2.0, 3.0])?;
+        w.set_string("name", "héllo")?;
+        w.set_f32_vector("v", &[0.5, 1.5])?;
+        w.set_string_vector("lines", &["a".into(), "bc".into()])?;
         assert!(w.set_i64("name", 1).is_err());
         assert!(w.set_f32_array("acc", &[1.0]).is_err());
         let mut bytes = w.finish();
         bytes.extend_from_slice(b"TAIL");
 
-        let v = l.bind(&bytes).unwrap();
-        assert_eq!(v.get_i64("ts").unwrap(), -42);
-        assert!(v.get_bool("ok").unwrap());
-        assert_eq!(v.get_f32_array::<3>("acc").unwrap(), [1.0, 2.0, 3.0]);
-        assert_eq!(v.get_string("name").unwrap(), "héllo");
-        assert_eq!(v.get_f32_vector("v").unwrap(), [0.5, 1.5]);
-        assert_eq!(v.get_string_vector("lines").unwrap(), ["a", "bc"]);
+        let v = l.bind(&bytes)?;
+        assert_eq!(v.get_i64("ts")?, -42);
+        assert!(v.get_bool("ok")?);
+        assert_eq!(v.get_f32_array::<3>("acc")?, [1.0, 2.0, 3.0]);
+        assert_eq!(v.get_string("name")?, "héllo");
+        assert_eq!(v.get_f32_vector("v")?, [0.5, 1.5]);
+        assert_eq!(v.get_string_vector("lines")?, ["a", "bc"]);
         assert_eq!(&bytes[v.total_len()..], b"TAIL");
+        Ok(())
     }
 
     #[test]
-    fn hostile_var_index_is_rejected() {
+    fn hostile_var_index_is_rejected() -> TestResult {
         let l = DataLayout::from_json(
             r#"{"data_layout":[{"name":"s","type":"DataPieceString","index":0}]}"#,
-        )
-        .unwrap();
+        )?;
         let mut d = Vec::new();
         d.extend_from_slice(&u32::MAX.to_le_bytes());
         d.extend_from_slice(&u32::MAX.to_le_bytes());
         assert!(l.bind(&d).is_err());
+        Ok(())
     }
 
     #[test]
-    fn json_round_trips_and_unknown_types_survive() {
+    fn json_round_trips_and_unknown_types_survive() -> TestResult {
         let json = r#"{"data_layout":[
             {"name":"a","type":"DataPieceValue<double>","offset":0},
             {"name":"w","type":"DataPieceWeird<x>","offset":8}]}"#;
-        let l = DataLayout::from_json(json).unwrap();
+        let l = DataLayout::from_json(json)?;
         assert!(matches!(l.pieces()[1].kind, PieceKind::Unknown(_)));
-        let again = DataLayout::from_json(&l.to_json()).unwrap();
+        let again = DataLayout::from_json(&l.to_json())?;
         assert_eq!(again, l);
+        Ok(())
     }
 
     #[test]
-    fn duplicate_or_malformed_pieces_are_rejected() {
+    fn duplicate_or_malformed_pieces_are_rejected() -> TestResult {
         assert!(DataLayout::from_json(
             r#"{"data_layout":[{"name":"a","type":"DataPieceValue<double>","offset":0},{"name":"a","type":"DataPieceValue<double>","offset":8}]}"#
         )
@@ -851,5 +854,6 @@ mod tests {
             .is_err()
         );
         assert!(DataLayout::from_json("not json").is_err());
+        Ok(())
     }
 }

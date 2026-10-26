@@ -205,65 +205,68 @@ pub fn compress(compression: Compression, src: &[u8]) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
 
     #[test]
-    fn every_codec_round_trips() {
+    fn every_codec_round_trips() -> TestResult {
         let data: Vec<u8> = (0..50_000u32)
             .flat_map(|i| (i % 97).to_le_bytes())
             .collect();
         for c in [Compression::None, Compression::Zstd, Compression::Lz4] {
-            let packed = compress(c, &data).unwrap();
+            let packed = compress(c, &data)?;
             let mut out = Vec::new();
-            decompress(c, &packed, data.len(), &mut out).unwrap();
+            decompress(c, &packed, data.len(), &mut out)?;
             assert_eq!(out, data, "{c:?}");
 
             // Reused contexts must behave identically, across several records.
             let mut de = Decompressor::new();
             let mut co = Compressor::new();
             for _ in 0..3 {
-                let packed = co.compress(c, &data).unwrap();
+                let packed = co.compress(c, &data)?;
                 out.clear();
-                de.decompress(c, &packed, data.len(), &mut out).unwrap();
+                de.decompress(c, &packed, data.len(), &mut out)?;
                 assert_eq!(out, data, "{c:?} (reused)");
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn decompress_out_is_overwritten_not_appended() {
+    fn decompress_out_is_overwritten_not_appended() -> TestResult {
         let data = vec![9u8; 1000];
-        let packed = compress(Compression::Zstd, &data).unwrap();
+        let packed = compress(Compression::Zstd, &data)?;
         let mut de = Decompressor::new();
         let mut out = vec![0xEE; 500];
-        de.decompress(Compression::Zstd, &packed, data.len(), &mut out)
-            .unwrap();
+        de.decompress(Compression::Zstd, &packed, data.len(), &mut out)?;
         assert_eq!(out, data);
         // A second, smaller record also fully replaces the buffer.
-        let small = compress(Compression::Zstd, &[1u8; 10]).unwrap();
-        de.decompress(Compression::Zstd, &small, 10, &mut out)
-            .unwrap();
+        let small = compress(Compression::Zstd, &[1u8; 10])?;
+        de.decompress(Compression::Zstd, &small, 10, &mut out)?;
         assert_eq!(out, vec![1u8; 10]);
+        Ok(())
     }
 
     #[test]
-    fn trailing_bytes_after_a_zstd_frame_are_ignored() {
+    fn trailing_bytes_after_a_zstd_frame_are_ignored() -> TestResult {
         let data = vec![7u8; 1000];
-        let mut packed = compress(Compression::Zstd, &data).unwrap();
+        let mut packed = compress(Compression::Zstd, &data)?;
         packed.extend_from_slice(&[0xAB; 100]);
         let mut out = Vec::new();
-        decompress(Compression::Zstd, &packed, data.len(), &mut out).unwrap();
+        decompress(Compression::Zstd, &packed, data.len(), &mut out)?;
         assert_eq!(out, data);
+        Ok(())
     }
 
     #[test]
-    fn size_mismatch_and_garbage_are_errors() {
-        let packed = compress(Compression::Zstd, &[1u8; 100]).unwrap();
+    fn size_mismatch_and_garbage_are_errors() -> TestResult {
+        let packed = compress(Compression::Zstd, &[1u8; 100])?;
         let mut out = Vec::new();
         assert!(decompress(Compression::Zstd, &packed, 99, &mut out).is_err());
         assert!(decompress(Compression::Zstd, &[1, 2, 3, 4], 4, &mut out).is_err());
         assert!(decompress(Compression::Lz4, &[1, 2, 3, 4], 4, &mut out).is_err());
+        Ok(())
     }
 }

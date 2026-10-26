@@ -1,7 +1,5 @@
 //! End-to-end checks of the `bag_*` command-line tools on small synthetic bags.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use apex_io::rosbag::ros1::deserialize::Ros1Serializer;
 use apex_io::rosbag::ros1::messages as r1;
 use apex_io::rosbag::transcode::{Dialect, catalog_definition};
@@ -9,8 +7,10 @@ use apex_io::rosbag::{BagKind, BagWriter, NewConnection, OutputCompression};
 use std::path::Path;
 use std::process::{Command, Output};
 
-fn run(bin: &str, args: &[&str]) -> Output {
-    Command::new(bin).args(args).output().expect("spawn")
+type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+fn run(bin: &str, args: &[&str]) -> std::result::Result<Output, Box<dyn std::error::Error>> {
+    Ok(Command::new(bin).args(args).output()?)
 }
 
 fn ros1_conn(topic: &str, ty: &str, definition: String) -> NewConnection {
@@ -25,27 +25,19 @@ fn ros1_conn(topic: &str, ty: &str, definition: String) -> NewConnection {
 }
 
 /// /imu (50 msgs, standard type), /str (10 msgs), /odd (unknown type, no definition).
-fn make_ros1_bag(path: &Path) {
-    let mut w = BagWriter::create(path, BagKind::Ros1Bag, OutputCompression::None).unwrap();
-    let imu = w
-        .add_connection(&ros1_conn(
-            "/imu",
-            "sensor_msgs/Imu",
-            catalog_definition("sensor_msgs/Imu", Dialect::Ros1)
-                .unwrap()
-                .unwrap(),
-        ))
-        .unwrap();
-    let string = w
-        .add_connection(&ros1_conn(
-            "/str",
-            "std_msgs/String",
-            "string data\n".into(),
-        ))
-        .unwrap();
-    let odd = w
-        .add_connection(&ros1_conn("/odd", "vendor_msgs/Mystery", String::new()))
-        .unwrap();
+fn make_ros1_bag(path: &Path) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut w = BagWriter::create(path, BagKind::Ros1Bag, OutputCompression::None)?;
+    let imu = w.add_connection(&ros1_conn(
+        "/imu",
+        "sensor_msgs/Imu",
+        catalog_definition("sensor_msgs/Imu", Dialect::Ros1)?.ok_or("missing value")?,
+    ))?;
+    let string = w.add_connection(&ros1_conn(
+        "/str",
+        "std_msgs/String",
+        "string data\n".into(),
+    ))?;
+    let odd = w.add_connection(&ros1_conn("/odd", "vendor_msgs/Mystery", String::new()))?;
 
     for i in 0..50u64 {
         let mut m = r1::Imu::default();
@@ -54,7 +46,7 @@ fn make_ros1_bag(path: &Path) {
         m.linear_acceleration.x = i as f64;
         let mut s = Ros1Serializer::new();
         m.to_ros1(&mut s);
-        w.write(imu, m.header.stamp_ns, &s.into_bytes()).unwrap();
+        w.write(imu, m.header.stamp_ns, &s.into_bytes())?;
     }
     for i in 0..10u64 {
         let mut s = Ros1Serializer::new();
@@ -62,22 +54,22 @@ fn make_ros1_bag(path: &Path) {
             data: format!("hello {i}"),
         }
         .to_ros1(&mut s);
-        w.write(string, 1_000_000_000 + i * 50_000_000, &s.into_bytes())
-            .unwrap();
+        w.write(string, 1_000_000_000 + i * 50_000_000, &s.into_bytes())?;
     }
-    w.write(odd, 1_000_000_000, b"opaque").unwrap();
-    w.close().unwrap();
+    w.write(odd, 1_000_000_000, b"opaque")?;
+    w.close()?;
+    Ok(())
 }
 
 #[test]
-fn convert_filter_info_verify_round_trip() {
-    let dir = tempfile::tempdir().unwrap();
+fn convert_filter_info_verify_round_trip() -> TestResult {
+    let dir = tempfile::tempdir()?;
     let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
     let (src, ros2, back, sub) = (p("src.bag"), p("ros2"), p("back.bag"), p("sub.mcap"));
-    make_ros1_bag(Path::new(&src));
+    make_ros1_bag(Path::new(&src))?;
 
     // bag_info sees all topics and flags the unconvertible one.
-    let info = run(env!("CARGO_BIN_EXE_bag_info"), &[&src]);
+    let info = run(env!("CARGO_BIN_EXE_bag_info"), &[&src])?;
     let text = String::from_utf8_lossy(&info.stdout);
     assert!(info.status.success(), "{text}");
     assert!(
@@ -93,7 +85,7 @@ fn convert_filter_info_verify_round_trip() {
     let conv = run(
         env!("CARGO_BIN_EXE_bag_convert"),
         &[&src, &ros2, "--format", "mcap"],
-    );
+    )?;
     let err = String::from_utf8_lossy(&conv.stderr);
     assert!(conv.status.success(), "{err}");
     assert!(err.contains("/odd") && err.contains("WARN"), "{err}");
@@ -102,7 +94,7 @@ fn convert_filter_info_verify_round_trip() {
     let verify = run(
         env!("CARGO_BIN_EXE_bag_verify"),
         &[&src, &ros2, "-t", "/imu,/str"],
-    );
+    )?;
     assert!(
         verify.status.success(),
         "{}",
@@ -113,7 +105,7 @@ fn convert_filter_info_verify_round_trip() {
     let conv = run(
         env!("CARGO_BIN_EXE_bag_convert"),
         &[&ros2, &back, "--compression", "lz4"],
-    );
+    )?;
     assert!(
         conv.status.success(),
         "{}",
@@ -122,7 +114,7 @@ fn convert_filter_info_verify_round_trip() {
     let verify = run(
         env!("CARGO_BIN_EXE_bag_verify"),
         &[&src, &back, "-t", "/imu,/str"],
-    );
+    )?;
     assert!(
         verify.status.success(),
         "{}",
@@ -142,7 +134,7 @@ fn convert_filter_info_verify_round_trip() {
             "-e",
             "1300000000",
         ],
-    );
+    )?;
     assert!(
         filt.status.success(),
         "{}",
@@ -161,40 +153,41 @@ fn convert_filter_info_verify_round_trip() {
             "-e",
             "1300000000",
         ],
-    );
+    )?;
     assert!(verify.status.success());
 
     // --strict refuses to drop the unsupported topic.
     let strict = run(
         env!("CARGO_BIN_EXE_bag_convert"),
         &[&src, &p("strict_out"), "--format", "mcap", "--strict"],
-    );
+    )?;
     assert!(!strict.status.success());
 
     // A raw filter copy cannot silently change the encoding.
-    let bad = run(env!("CARGO_BIN_EXE_bag_filter"), &[&ros2, &p("x.bag")]);
+    let bad = run(env!("CARGO_BIN_EXE_bag_filter"), &[&ros2, &p("x.bag")])?;
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("bag_convert"));
+    Ok(())
 }
 
 /// ROS bag -> VRS -> ROS bag keeps every message, whatever the type, and the
 /// unconvertible topic survives too (VRS stores raw bytes).
 #[cfg(feature = "vrs")]
 #[test]
-fn vrs_round_trip_is_lossless() {
-    let dir = tempfile::tempdir().unwrap();
+fn vrs_round_trip_is_lossless() -> TestResult {
+    let dir = tempfile::tempdir()?;
     let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
     let (src, vrs, back) = (p("src.bag"), p("out.vrs"), p("back.bag"));
-    make_ros1_bag(Path::new(&src));
+    make_ros1_bag(Path::new(&src))?;
 
-    let to_vrs = run(env!("CARGO_BIN_EXE_bag_convert"), &[&src, &vrs]);
+    let to_vrs = run(env!("CARGO_BIN_EXE_bag_convert"), &[&src, &vrs])?;
     assert!(
         to_vrs.status.success(),
         "{}",
         String::from_utf8_lossy(&to_vrs.stderr)
     );
 
-    let info = run(env!("CARGO_BIN_EXE_vrs_info"), &[&vrs, "--verify-index"]);
+    let info = run(env!("CARGO_BIN_EXE_vrs_info"), &[&vrs, "--verify-index"])?;
     let text = String::from_utf8_lossy(&info.stdout);
     assert!(info.status.success(), "{text}");
     assert!(
@@ -202,7 +195,7 @@ fn vrs_round_trip_is_lossless() {
         "{text}"
     );
 
-    let to_bag = run(env!("CARGO_BIN_EXE_bag_convert"), &[&vrs, &back]);
+    let to_bag = run(env!("CARGO_BIN_EXE_bag_convert"), &[&vrs, &back])?;
     assert!(
         to_bag.status.success(),
         "{}",
@@ -213,13 +206,13 @@ fn vrs_round_trip_is_lossless() {
     let verify = run(
         env!("CARGO_BIN_EXE_bag_verify"),
         &[&src, &back, "-t", "/imu,/str"],
-    );
+    )?;
     assert!(
         verify.status.success(),
         "{}",
         String::from_utf8_lossy(&verify.stdout)
     );
-    let info = run(env!("CARGO_BIN_EXE_bag_info"), &[&back]);
+    let info = run(env!("CARGO_BIN_EXE_bag_info"), &[&back])?;
     let text = String::from_utf8_lossy(&info.stdout);
     assert!(
         text.contains("/odd (vendor_msgs/Mystery, ros1, 1 msgs"),
@@ -229,4 +222,5 @@ fn vrs_round_trip_is_lossless() {
         text.contains("/imu (sensor_msgs/Imu, ros1, 50 msgs"),
         "{text}"
     );
+    Ok(())
 }
