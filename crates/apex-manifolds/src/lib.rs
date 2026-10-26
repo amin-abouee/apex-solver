@@ -603,7 +603,26 @@ pub trait Tangent<Group: LieGroup>: Clone + PartialEq {
     fn is_approx(&self, other: &Self, tolerance: f64) -> bool;
 
     /// Get the i-th generator of the Lie algebra.
+    ///
+    /// Total: an index outside the tangent space yields the zero matrix. Use
+    /// [`Self::try_generator`] to get an error for it.
     fn generator(&self, i: usize) -> Group::LieAlgebra;
+
+    /// Checked [`Self::generator`]: returns [`TangentError::GeneratorIndex`]
+    /// (logged once) when `i` is not smaller than the tangent dimension.
+    #[track_caller]
+    fn try_generator(&self, i: usize) -> TangentResult<Group::LieAlgebra> {
+        let dim = self.as_slice().len();
+        if i >= dim {
+            return Err(TangentError::GeneratorIndex {
+                group: Group::NAME,
+                index: i,
+                dim,
+            }
+            .log());
+        }
+        Ok(self.generator(i))
+    }
 
     // Utility functions
 

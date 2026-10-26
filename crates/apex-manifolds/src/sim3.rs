@@ -884,8 +884,6 @@ impl Tangent<Sim3> for Sim3Tangent {
     }
 
     fn generator(&self, i: usize) -> <Sim3 as LieGroup>::LieAlgebra {
-        assert!(i < 7, "Sim(3) only has generators for indices 0-6");
-
         let mut generator = Matrix4::zeros();
 
         match i {
@@ -909,7 +907,7 @@ impl Tangent<Sim3> for Sim3Tangent {
                         generator[(0, 1)] = -1.0;
                         generator[(1, 0)] = 1.0;
                     }
-                    _ => unreachable!(),
+                    _ => {}
                 }
             }
             6 => {
@@ -918,7 +916,7 @@ impl Tangent<Sim3> for Sim3Tangent {
                 generator[(1, 1)] = 1.0;
                 generator[(2, 2)] = 1.0;
             }
-            _ => unreachable!(),
+            _ => {}
         }
 
         generator
@@ -1301,14 +1299,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_sim3_generator_invalid_index() {
-        let tangent = Sim3Tangent::new(
-            Vector3::new(1.0, 1.0, 1.0),
-            Vector3::new(1.0, 1.0, 1.0),
-            1.0,
+    fn test_sim3_generator_out_of_range_is_zero_and_checked_form_errors() {
+        let tangent = Sim3Tangent::zero();
+        assert_eq!(tangent.generator(7), Matrix4::zeros());
+        assert_eq!(tangent.generator(usize::MAX), Matrix4::zeros());
+        assert_eq!(
+            tangent.try_generator(7).err(),
+            Some(crate::TangentError::GeneratorIndex {
+                group: "Sim3",
+                index: 7,
+                dim: 7
+            })
         );
-        let _generator = tangent.generator(7);
+        assert!(tangent.try_generator(7 - 1).is_ok());
     }
 
     #[test]

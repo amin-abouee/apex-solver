@@ -605,26 +605,12 @@ impl SGal3Tangent {
         self.data[9]
     }
 
-    /// Create SGal3Tangent from individual scalar components.
+    /// Create SGal3Tangent from its scalar components.
     ///
     /// Order: [ρ_x, ρ_y, ρ_z, ν_x, ν_y, ν_z, θ_x, θ_y, θ_z, s]
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_components(
-        rho_x: f64,
-        rho_y: f64,
-        rho_z: f64,
-        nu_x: f64,
-        nu_y: f64,
-        nu_z: f64,
-        theta_x: f64,
-        theta_y: f64,
-        theta_z: f64,
-        s: f64,
-    ) -> Self {
+    pub fn from_components(components: [f64; 10]) -> Self {
         SGal3Tangent {
-            data: Vector10::from_column_slice(&[
-                rho_x, rho_y, rho_z, nu_x, nu_y, nu_z, theta_x, theta_y, theta_z, s,
-            ]),
+            data: Vector10::from_column_slice(&components),
         }
     }
 }
@@ -859,8 +845,6 @@ impl Tangent<SGal3> for SGal3Tangent {
     }
 
     fn generator(&self, i: usize) -> <SGal3 as LieGroup>::LieAlgebra {
-        assert!(i < 10, "SGal(3) only has generators for indices 0-9");
-
         let mut generator = SMatrix::<f64, 6, 6>::zeros();
 
         match i {
@@ -889,14 +873,14 @@ impl Tangent<SGal3> for SGal3Tangent {
                         generator[(0, 1)] = -1.0;
                         generator[(1, 0)] = 1.0;
                     }
-                    _ => unreachable!(),
+                    _ => {}
                 }
             }
             9 => {
                 // Time generator (s)
                 generator[(3, 5)] = 1.0;
             }
-            _ => unreachable!(),
+            _ => {}
         }
 
         generator
@@ -1243,15 +1227,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_sgal3_generator_invalid_index() {
-        let tangent = SGal3Tangent::new(
-            Vector3::new(1.0, 1.0, 1.0),
-            Vector3::new(1.0, 1.0, 1.0),
-            Vector3::new(1.0, 1.0, 1.0),
-            1.0,
+    fn test_sgal3_generator_out_of_range_is_zero_and_checked_form_errors() {
+        let tangent = SGal3Tangent::zero();
+        assert_eq!(tangent.generator(10), SMatrix::<f64, 6, 6>::zeros());
+        assert_eq!(tangent.generator(usize::MAX), SMatrix::<f64, 6, 6>::zeros());
+        assert_eq!(
+            tangent.try_generator(10).err(),
+            Some(crate::TangentError::GeneratorIndex {
+                group: "SGal3",
+                index: 10,
+                dim: 10
+            })
         );
-        let _generator = tangent.generator(10);
+        assert!(tangent.try_generator(10 - 1).is_ok());
     }
 
     #[test]
@@ -1358,7 +1346,7 @@ mod tests {
     #[test]
     fn test_sgal3_tangent_from_components() {
         let tangent =
-            SGal3Tangent::from_components(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.1, 0.2, 0.3, 0.5);
+            SGal3Tangent::from_components([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.1, 0.2, 0.3, 0.5]);
 
         let expected = SGal3Tangent::new(
             Vector3::new(1.0, 2.0, 3.0),

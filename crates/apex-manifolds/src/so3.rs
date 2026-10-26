@@ -809,10 +809,8 @@ impl Tangent<SO3> for SO3Tangent {
     /// * `i` - Index of the generator (0, 1, or 2 for SO(3))
     ///
     /// # Returns
-    /// The generator matrix
+    /// The generator matrix, or the zero matrix when `i` is out of range
     fn generator(&self, i: usize) -> <SO3 as LieGroup>::LieAlgebra {
-        assert!(i < 3, "SO(3) only has generators for indices 0, 1, 2");
-
         match i {
             0 => {
                 // Generator E1 for x-axis rotation
@@ -826,7 +824,7 @@ impl Tangent<SO3> for SO3Tangent {
                 // Generator E3 for z-axis rotation
                 Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             }
-            _ => unreachable!(),
+            _ => Matrix3::zeros(),
         }
     }
 }
@@ -1404,10 +1402,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_so3_generator_invalid_index() {
+    fn test_so3_generator_out_of_range_is_zero_and_checked_form_errors() {
         let tangent = SO3Tangent::new(Vector3::new(1.0, 1.0, 1.0));
-        let _generator = tangent.generator(3); // Should panic for SO(3)
+        assert_eq!(tangent.generator(3), Matrix3::zeros());
+        assert_eq!(tangent.generator(usize::MAX), Matrix3::zeros());
+        assert_eq!(
+            tangent.try_generator(3).err(),
+            Some(crate::TangentError::GeneratorIndex {
+                group: "SO3",
+                index: 3,
+                dim: 3
+            })
+        );
+        assert!(tangent.try_generator(3 - 1).is_ok());
     }
 
     #[test]

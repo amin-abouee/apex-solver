@@ -45,6 +45,14 @@ impl Display for SE2 {
     }
 }
 
+/// Floor on `|2cosθ − 2|` in the Jacobian inverses of [`SE2Tangent`].
+///
+/// They divide by that gap, which is zero at every non-zero multiple of 2π
+/// where the Jacobian itself is singular. Clamping keeps the result finite
+/// there instead of NaN or infinity; away from those angles the gap is far above
+/// the floor and the formula is unchanged.
+const COS_GAP_FLOOR: f64 = 1e-12;
+
 impl SE2 {
     /// Space dimension - dimension of the ambient space that the group acts on
     pub const DIM: usize = 2;
@@ -567,11 +575,12 @@ impl Tangent<SE2> for SE2Tangent {
         if theta_sq > crate::SMALL_ANGLE_THRESHOLD {
             let a = theta * sin_theta;
             let b = theta * cos_theta;
+            let gap = (2.0 * cos_theta - 2.0).min(-COS_GAP_FLOOR);
 
-            jac_inv[(0, 0)] = -a / (2.0 * cos_theta - 2.0);
+            jac_inv[(0, 0)] = -a / gap;
             jac_inv[(1, 1)] = jac_inv[(0, 0)];
 
-            let den = 2.0 * theta * (cos_theta - 1.0);
+            let den = theta * gap;
             jac_inv[(0, 2)] = (a * self.x() + b * self.y() - theta * self.y()
                 + 2.0 * self.x() * cos_theta
                 - 2.0 * self.x())
@@ -606,11 +615,12 @@ impl Tangent<SE2> for SE2Tangent {
         if theta_sq > crate::SMALL_ANGLE_THRESHOLD {
             let a = theta * sin_theta;
             let b = theta * cos_theta;
+            let gap = (2.0 * cos_theta - 2.0).min(-COS_GAP_FLOOR);
 
-            jac_inv[(0, 0)] = -a / (2.0 * cos_theta - 2.0);
+            jac_inv[(0, 0)] = -a / gap;
             jac_inv[(1, 1)] = jac_inv[(0, 0)];
 
-            let den = 2.0 * theta * (cos_theta - 1.0);
+            let den = theta * gap;
             jac_inv[(0, 2)] =
                 (a * self.x() - b * self.y() + theta * self.y() + 2.0 * self.x() * cos_theta
                     - 2.0 * self.x())
@@ -738,10 +748,8 @@ impl Tangent<SE2> for SE2Tangent {
     /// * `i` - Index of the generator (0, 1, or 2 for SE(2))
     ///
     /// # Returns
-    /// The generator matrix
+    /// The generator matrix, or the zero matrix when `i` is out of range
     fn generator(&self, i: usize) -> <SE2 as LieGroup>::LieAlgebra {
-        assert!(i < 3, "SE(2) only has generators for indices 0, 1, 2");
-
         match i {
             0 => {
                 // Generator E1 for x translation
@@ -755,7 +763,7 @@ impl Tangent<SE2> for SE2Tangent {
                 // Generator E3 for rotation
                 Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             }
-            _ => unreachable!(),
+            _ => Matrix3::zeros(),
         }
     }
 }
@@ -1419,10 +1427,39 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_se2_generator_invalid_index() {
+    fn test_se2_jacobian_inverses_stay_finite_at_multiples_of_two_pi() {
+        for turns in 1..=3 {
+            let theta = 2.0 * std::f64::consts::PI * f64::from(turns);
+            for sign in [1.0, -1.0] {
+                let tangent = SE2Tangent::new(0.3, -0.2, sign * theta);
+                assert!(tangent.right_jacobian_inv().iter().all(|v| v.is_finite()));
+                assert!(tangent.left_jacobian_inv().iter().all(|v| v.is_finite()));
+            }
+        }
+    }
+
+    #[test]
+    fn test_se2_jacobian_inverses_stay_finite_when_cos_is_exactly_one() {
+        let exact = SE2Tangent::from_slice(&[1.0, 2.0, 2.0 * std::f64::consts::PI]);
+        assert_eq!(exact.angle().cos(), 1.0);
+        assert!(exact.right_jacobian_inv().iter().all(|v| v.is_finite()));
+        assert!(exact.left_jacobian_inv().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_se2_generator_out_of_range_is_zero_and_checked_form_errors() {
         let tangent = SE2Tangent::new(1.0, 1.0, 1.0);
-        let _generator = tangent.generator(3); // Should panic for SE(2)
+        assert_eq!(tangent.generator(3), Matrix3::zeros());
+        assert_eq!(tangent.generator(usize::MAX), Matrix3::zeros());
+        assert_eq!(
+            tangent.try_generator(3).err(),
+            Some(crate::TangentError::GeneratorIndex {
+                group: "SE2",
+                index: 3,
+                dim: 3
+            })
+        );
+        assert!(tangent.try_generator(3 - 1).is_ok());
     }
 
     #[test]
