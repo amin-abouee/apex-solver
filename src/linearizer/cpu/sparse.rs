@@ -97,10 +97,7 @@ pub fn build_symbolic_structure(
         for (i, &var_key) in block.variable_keys.iter().enumerate() {
             if let Some(variable) = variables.get(var_key) {
                 let Some(&global_col) = variable_index_map.get(var_key) else {
-                    return Err(LinearizerError::Variable(format!(
-                        "VarKey {var_key:?} missing in variable-to-column-index mapping"
-                    ))
-                    .log());
+                    return Err(LinearizerError::UnindexedVariable { key: var_key }.log());
                 };
                 let Some(&(local_col, var_size)) = var_local_sizes.get(i) else {
                     continue;
@@ -162,9 +159,10 @@ fn csc_from_triples(
     let mut bucket = vec![0usize; total_dof + 1];
     for &(c, _, _) in &triples {
         let Some(count) = bucket.get_mut(c + 1) else {
-            return Err(LinearizerError::SymbolicStructure(format!(
-                "Jacobian column {c} outside the {total_dof} solve columns"
-            ))
+            return Err(LinearizerError::ColumnOutOfRange {
+                column: c,
+                total: total_dof,
+            }
             .log());
         };
         *count += 1;

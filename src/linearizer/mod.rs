@@ -36,6 +36,7 @@ use crate::core::problem::Problem;
 use crate::core::variable::ManifoldVariable;
 use crate::core::{FactorKey, VarKey};
 use crate::error::ErrorLogging;
+use crate::linalg::FaerFailure;
 use crate::{
     core::{corrector::Corrector, residual_block::ResidualBlock},
     linearizer::cpu::{DenseMode, LinearizationMode, SparseMode},
@@ -47,40 +48,40 @@ pub use cpu::sparse::SymbolicStructure;
 // Linearizer error types
 // ============================================================================
 
-/// Linearizer-specific error types for Jacobian assembly and symbolic structure operations.
+/// Errors of residual and Jacobian assembly.
 ///
-/// These errors occur during the linearization phase of optimization, where
-/// the nonlinear factor graph is converted into a linear system (residual vector
-/// and Jacobian matrix).
-///
-/// # Error Hierarchy
-///
-/// `LinearizerError` is a Layer C (deep/module) error. It propagates up through:
-/// - `CoreError::Linearizer(LinearizerError)` → for core module callers
-/// - `ApexSolverError::Linearizer(LinearizerError)` → for direct API callers
-///
-
+/// Logged once where they are found; the optimizer, covariance and
+/// marginalization code propagate them with a bare `?`.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum LinearizerError {
-    /// Symbolic structure construction or usage failed
-    #[error("Symbolic structure error: {0}")]
-    SymbolicStructure(String),
+    /// A residual block references a key that is not in the variable map.
+    #[error("residual block references variable {key:?}, which is not in the variable map")]
+    UnknownVariable { key: VarKey },
 
-    /// Parallel computation error (thread/mutex failures during assembly)
-    #[error("Parallel computation error: {0}")]
-    ParallelComputation(String),
+    /// A variable that has no column in the solve.
+    #[error("variable {key:?} has no column in the variable index map")]
+    UnindexedVariable { key: VarKey },
 
-    /// Variable key missing in index mapping during Jacobian scatter
-    #[error("Variable error: {0}")]
-    Variable(String),
+    /// Sparse assembly without the symbolic structure it scatters into.
+    #[error("sparse assembly needs a symbolic structure, none was built")]
+    MissingSymbolicStructure,
 
-    /// Factor linearization returned no Jacobian when expected
-    #[error("Factor linearization failed: {0}")]
-    FactorLinearization(String),
+    /// A Jacobian column past the solve's columns.
+    #[error("Jacobian column {column} is outside the {total} solve columns")]
+    ColumnOutOfRange { column: usize, total: usize },
 
-    /// Invalid input (e.g., SparseMode requires symbolic structure)
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
+    /// A residual block that evaluated to NaN or infinity at the point it is
+    /// linearized at.
+    #[error("residual block {block:?} evaluated to a NaN or infinite residual")]
+    NonFiniteResidual { block: FactorKey },
+
+    /// The Jacobian's sparsity pattern could not be copied for scaling.
+    #[error("cannot copy the Jacobian pattern for column scaling")]
+    Pattern {
+        #[source]
+        source: FaerFailure,
+    },
 }
 
 /// Result type for linearizer module operations
@@ -247,13 +248,9 @@ pub(crate) fn compute_block_into_with(
         // the factor then indexes past its end deep inside `linearize`. The
         // scatter phase already reports this condition as an error; report it
         // here too rather than turning it into a panic downstream.
-        let variable = variables.get(var_key).ok_or_else(|| {
-            LinearizerError::Variable(format!(
-                "residual block references variable key {var_key:?}, which is not in the \
-                 variable map"
-            ))
-            .log()
-        })?;
+        let variable = variables
+            .get(var_key)
+            .ok_or_else(|| LinearizerError::UnknownVariable { key: var_key }.log())?;
         param_slices.push(variable.as_param_slice());
         let var_size = variable.dof();
         variable_local_idx_size_list.push((count_variable_local_idx, var_size));
@@ -328,6 +325,15 @@ pub(crate) fn compute_block_into_with(
     // The corrected residual/Jacobian drive the linear system; the returned
     // cost is the true robust cost `0.5·ρ(‖S·r‖²)`, not the corrected norm.
     let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
+    // One check per block, where a Jacobian is formed: a NaN there would
+    // poison the whole linear system. Cost-only trial evaluations keep the
+    // NaN, which the optimizer reports as `InvalidNumericalValues`.
+    if jacobian_buf.is_some() && !squared_norm.is_finite() {
+        return Err(LinearizerError::NonFiniteResidual {
+            block: residual_block.residual_block_id,
+        }
+        .log());
+    }
     let cost = if let Some(loss_func) = &residual_block.loss_func {
         let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
         // Jacobian correction must read the original (un-corrected) residual.
@@ -383,7 +389,10 @@ pub trait AssemblyBackend: LinearizationMode {
 
     /// Apply diagonal column scaling to the Jacobian.
     /// Returns a new Jacobian with columns scaled by `1 / (1 + norm)`.
-    fn apply_column_scaling(jacobian: &Self::Jacobian, scaling: &[f64]) -> Self::Jacobian;
+    fn apply_column_scaling(
+        jacobian: &Self::Jacobian,
+        scaling: &[f64],
+    ) -> LinearizerResult<Self::Jacobian>;
 
     /// Apply inverse scaling to a step vector: step_i *= scaling_i
     fn apply_inverse_scaling(step: &Mat<f64>, scaling: &[f64]) -> Mat<f64>;
@@ -401,9 +410,8 @@ impl AssemblyBackend for SparseMode {
         _total_dof: usize,
         workspace: &mut AssemblyWorkspace,
     ) -> LinearizerResult<(Mat<f64>, SparseColMat<usize, f64>)> {
-        let sym = symbolic_structure.ok_or_else(|| {
-            LinearizerError::InvalidInput("SparseMode requires symbolic structure".to_string())
-        })?;
+        let sym =
+            symbolic_structure.ok_or_else(|| LinearizerError::MissingSymbolicStructure.log())?;
         crate::linearizer::cpu::sparse::assemble_sparse(
             problem,
             variables,
@@ -429,7 +437,7 @@ impl AssemblyBackend for SparseMode {
     fn apply_column_scaling(
         jacobian: &SparseColMat<usize, f64>,
         scaling: &[f64],
-    ) -> SparseColMat<usize, f64> {
+    ) -> LinearizerResult<SparseColMat<usize, f64>> {
         // Scale the value array column-by-column in parallel. The sparsity
         // pattern is unchanged, so no triplet build, sort or sparse product is
         // needed — the previous diagonal-matrix product did exactly that.
@@ -451,13 +459,13 @@ impl AssemblyBackend for SparseMode {
                 }
             });
 
-        let symbolic = match jacobian.symbolic().to_owned() {
-            Ok(symbolic) => symbolic,
-            // Fall back to the unscaled Jacobian — mirrors the old behavior
-            // when the diagonal scaling matrix could not be built.
-            Err(_) => return jacobian.clone(),
-        };
-        SparseColMat::new(symbolic, values)
+        // Only an allocation failure can stop the copy. Returning the
+        // unscaled Jacobian instead would pair it with a scaled step.
+        let symbolic = jacobian
+            .symbolic()
+            .to_owned()
+            .map_err(|e| LinearizerError::Pattern { source: e.into() }.log())?;
+        Ok(SparseColMat::new(symbolic, values))
     }
 
     fn apply_inverse_scaling(step: &Mat<f64>, scaling: &[f64]) -> Mat<f64> {
@@ -506,14 +514,14 @@ impl AssemblyBackend for DenseMode {
             .collect()
     }
 
-    fn apply_column_scaling(jacobian: &Mat<f64>, scaling: &[f64]) -> Mat<f64> {
+    fn apply_column_scaling(jacobian: &Mat<f64>, scaling: &[f64]) -> LinearizerResult<Mat<f64>> {
         let mut result = jacobian.clone();
         for c in 0..jacobian.ncols() {
             for r in 0..jacobian.nrows() {
                 result[(r, c)] *= scaling[c];
             }
         }
-        result
+        Ok(result)
     }
 
     fn apply_inverse_scaling(step: &Mat<f64>, scaling: &[f64]) -> Mat<f64> {
@@ -575,14 +583,13 @@ mod tests {
         Ok((problem, k))
     }
 
-    #[allow(clippy::type_complexity)]
-    fn make_index_map(
-        problem: &Problem,
-    ) -> (
+    type IndexedVariables = (
         SlotMap<VarKey, Box<dyn crate::core::variable::ManifoldVariable>>,
         SecondaryMap<VarKey, usize>,
         usize,
-    ) {
+    );
+
+    fn make_index_map(problem: &Problem) -> IndexedVariables {
         let variables = problem.variables.clone();
         let mut index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
         let mut offset = 0;
@@ -624,10 +631,49 @@ mod tests {
             panic!("missing variable key must be an error, not a silent skip");
         };
         assert!(
-            matches!(err, LinearizerError::Variable(_)),
+            matches!(err, LinearizerError::UnknownVariable { .. }),
             "expected a Variable error, got {err:?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_nan_residual_is_an_error_where_a_jacobian_is_formed() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: f64::NAN }), None)?;
+        let (variables, _, _) = make_index_map(&problem);
+        let block = problem
+            .residual_blocks()
+            .values()
+            .next()
+            .ok_or("no blocks")?;
+        let mut residual = vec![0.0f64; 1];
+        let mut jacobian = vec![0.0f64; 1];
+        let Err(err) = compute_block_into(block, &variables, &mut residual, Some(&mut jacobian))
+        else {
+            return Err("a NaN residual must be rejected".into());
+        };
+        assert!(
+            matches!(err, LinearizerError::NonFiniteResidual { .. }),
+            "{err}"
+        );
+        // A cost-only evaluation keeps the NaN for the optimizer to report.
+        assert!(compute_block_into(block, &variables, &mut residual, None).is_ok());
+        assert!(residual[0].is_nan());
+        Ok(())
+    }
+
+    #[test]
+    fn a_linearizer_error_keeps_its_context_through_core() {
+        use crate::core::CoreError;
+        use crate::error::ErrorChainExt;
+        let error = CoreError::from(LinearizerError::MissingSymbolicStructure);
+        assert_eq!(
+            error.chain_compact(),
+            "problem linearization failed → sparse assembly needs a symbolic structure, none \
+             was built"
+        );
     }
 
     #[test]
@@ -788,7 +834,7 @@ mod tests {
             &mut AssemblyWorkspace::build(&problem),
         )?;
         let scaling = vec![0.5_f64];
-        let scaled = SparseMode::apply_column_scaling(&jacobian, &scaling);
+        let scaled = SparseMode::apply_column_scaling(&jacobian, &scaling)?;
         let val = scaled.as_ref().val_of_col(0)[0];
         assert!((val - 0.5).abs() < 1e-12);
         Ok(())
@@ -843,11 +889,12 @@ mod tests {
     }
 
     #[test]
-    fn test_dense_backend_apply_column_scaling() {
+    fn test_dense_backend_apply_column_scaling() -> TestResult {
         let jacobian = Mat::from_fn(1, 1, |_, _| 1.0_f64);
         let scaling = vec![0.5_f64];
-        let scaled = DenseMode::apply_column_scaling(&jacobian, &scaling);
+        let scaled = DenseMode::apply_column_scaling(&jacobian, &scaling)?;
         assert!((scaled[(0, 0)] - 0.5).abs() < 1e-12);
+        Ok(())
     }
 
     #[test]

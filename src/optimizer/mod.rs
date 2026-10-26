@@ -1046,7 +1046,7 @@ pub fn process_jacobian_generic<M: AssemblyBackend>(
     let scaling = jacobi_scaling
         .as_ref()
         .ok_or_else(|| OptimizerError::JacobiScalingNotInitialized.log())?;
-    Ok(M::apply_column_scaling(jacobian, scaling))
+    Ok(M::apply_column_scaling(jacobian, scaling)?)
 }
 
 /// Build a SolverResult from common optimization loop outputs.

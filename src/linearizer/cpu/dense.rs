@@ -96,13 +96,9 @@ fn scatter_dense_block(
     jacobian_dense: &mut Mat<f64>,
 ) -> LinearizerResult<()> {
     for (i, &var_key) in residual_block.variable_keys.iter().enumerate() {
-        let &global_col = variable_index_map.get(var_key).ok_or_else(|| {
-            LinearizerError::Variable(format!(
-                "VarKey {:?} missing in variable-to-column-index mapping",
-                var_key
-            ))
-            .log()
-        })?;
+        let &global_col = variable_index_map
+            .get(var_key)
+            .ok_or_else(|| LinearizerError::UnindexedVariable { key: var_key }.log())?;
         let var = &variables[var_key];
         let (local_col, var_size) = bl.variable_local_idx_size_list[i];
         for col in 0..var_size {
