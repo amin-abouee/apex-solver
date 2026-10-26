@@ -26,10 +26,11 @@
 
 // The run summary below is the point of a real-data test: the numbers say how
 // far the fusion actually got, not merely that an assertion held.
-#![allow(clippy::print_stderr)]
 
-mod common;
+// `pub` so helpers a given test binary does not call are not reported as dead code.
+pub mod common;
 use common::nclt;
+use std::io::Write;
 
 use apex_solver::JacobianMode;
 use apex_solver::apex_manifolds::LieGroup;
@@ -200,13 +201,15 @@ fn nclt_odometry_and_gnss_fusion_removes_drift() -> TestResult {
     let odometry_median = nclt::median(&mut odometry_errors);
     let fused_median = nclt::median(&mut fused_errors);
 
-    eprintln!(
+    writeln!(
+        std::io::stderr(),
         "NCLT 2013-01-10: {n} keyframes, {fix_count} GNSS fixes\n\
          cost {:.4e} -> {:.4e}\n\
          odometry  median {odometry_median:.1} m  final {odometry_final:.1} m\n\
          fused     median {fused_median:.1} m  final {fused_final:.1} m",
-        result.initial_cost, result.final_cost
-    );
+        result.initial_cost,
+        result.final_cost
+    )?;
 
     assert!(
         result.final_cost < result.initial_cost,

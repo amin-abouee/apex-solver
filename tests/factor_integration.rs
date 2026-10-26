@@ -18,13 +18,14 @@
 
 // Test diagnostics print convergence traces to stderr; the workspace-wide
 // `print_stderr` deny targets library code, not test output.
-#![allow(clippy::print_stderr)]
 
-mod common;
+// `pub` so helpers a given test binary does not call are not reported as dead code.
+pub mod common;
 use common::{
     BA_TRUE, BG_TRUE, Trajectory, anchor_rn, anchor_se3, build_imu_dataset, imu_params, lm_solver,
     pose_to_dvector, velocity_dvector,
 };
+use std::io::Write;
 
 use apex_camera_models::CameraModel;
 use apex_solver::JacobianMode;
@@ -430,16 +431,17 @@ fn stereo_vo_recovers_pose_and_points() -> Result<(), Box<dyn std::error::Error>
             factor.linearize(&[&pv, fixed], &mut r, None);
             cost += r.iter().map(|v| v * v).sum::<f64>();
         }
-        eprintln!("stereo cost(frac={frac}) = {cost:.6e}");
+        writeln!(std::io::stderr(), "stereo cost(frac={frac}) = {cost:.6e}")?;
     }
 
     let pose_hat = SE3::from_param_slice(result.parameters[pose_key].as_param_slice());
     let err = (pose_hat.translation() - pose_true.translation()).norm();
-    eprintln!(
+    writeln!(
+        std::io::stderr(),
         "stereo pose_hat={:?} truth={:?}",
         pose_hat.translation(),
         pose_true.translation()
-    );
+    )?;
     assert!(err < 1e-3, "stereo pose error {err:.5}");
     Ok(())
 }

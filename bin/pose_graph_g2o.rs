@@ -1076,8 +1076,7 @@ fn test_se3_dataset(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg_attr(not(feature = "visualization"), allow(unused_mut))]
-    let mut args = Args::parse();
+    let args = Args::parse();
 
     if args.verbose_iters {
         apex_solver::init_logger_with_directives(
@@ -1094,29 +1093,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let se2_datasets = vec!["M3500", "intel", "mit", "ring"];
     let se3_datasets = vec!["sphere2500", "parking-garage", "torus3D", "cubicle"];
 
-    let (se2_datasets_to_run, se3_datasets_to_run) = if args.dataset == "all" {
+    // An owned copy, so `args` itself stays free to be adjusted below.
+    let dataset = args.dataset.clone();
+    let (se2_datasets_to_run, se3_datasets_to_run) = if dataset == "all" {
         (se2_datasets, se3_datasets)
     } else {
         let mut se2_run = Vec::new();
         let mut se3_run = Vec::new();
-        if se2_datasets.contains(&args.dataset.as_str()) {
-            se2_run.push(args.dataset.as_str());
+        if se2_datasets.contains(&dataset.as_str()) {
+            se2_run.push(dataset.as_str());
         }
-        if se3_datasets.contains(&args.dataset.as_str()) {
-            se3_run.push(args.dataset.as_str());
+        if se3_datasets.contains(&dataset.as_str()) {
+            se3_run.push(dataset.as_str());
         }
         if se2_run.is_empty() && se3_run.is_empty() {
             // Any dataset file on disk is runnable standalone (grid3D, rim, …).
-            let se2_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, args.dataset);
-            let se3_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, args.dataset);
+            let se2_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset);
+            let se3_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset);
             if std::path::Path::new(&se2_path).exists() {
-                se2_run.push(args.dataset.as_str());
+                se2_run.push(dataset.as_str());
                 (se2_run, se3_run)
             } else if std::path::Path::new(&se3_path).exists() {
-                se3_run.push(args.dataset.as_str());
+                se3_run.push(dataset.as_str());
                 (se2_run, se3_run)
             } else {
-                warn!("Unknown dataset: {}", args.dataset);
+                warn!("Unknown dataset: {}", dataset);
                 warn!("Using default: running all datasets");
                 (se2_datasets, se3_datasets)
             }
@@ -1126,12 +1127,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     #[cfg(feature = "visualization")]
-    if args.with_visualizer && (se2_datasets_to_run.len() > 1 || se3_datasets_to_run.len() > 1) {
-        warn!("Visualization is not supported when running multiple datasets (--dataset all).");
-        warn!("Disabling visualization. To use visualization, specify a single dataset.");
-        warn!("Example: --dataset M3500 --with-visualizer");
-        args.with_visualizer = false;
-    }
+    let args = {
+        let mut args = args;
+        if args.with_visualizer && (se2_datasets_to_run.len() > 1 || se3_datasets_to_run.len() > 1)
+        {
+            warn!("Visualization is not supported when running multiple datasets (--dataset all).");
+            warn!("Disabling visualization. To use visualization, specify a single dataset.");
+            warn!("Example: --dataset M3500 --with-visualizer");
+            args.with_visualizer = false;
+        }
+        args
+    };
 
     let mut all_results = Vec::new();
 

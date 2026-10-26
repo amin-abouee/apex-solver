@@ -279,18 +279,6 @@ pub struct DogLegConfig {
     pub trust_region_increase_factor: f64,
     /// Trust region decrease factor (for poor steps, rho < 0.25)
     pub trust_region_decrease_factor: f64,
-    /// Deprecated: superseded by
-    /// [`min_relative_decrease`](Self::min_relative_decrease).
-    ///
-    /// Both named the same thing — the ρ below which a step is rejected — and
-    /// only one can be the gate. `min_relative_decrease` won because it carries
-    /// Ceres' name and semantics and exists on the Levenberg-Marquardt config
-    /// too, so the acceptance rule is the same across optimizers.
-    #[deprecated(
-        since = "1.6.0",
-        note = "never read; the acceptance threshold is `min_relative_decrease`"
-    )]
-    pub min_step_quality: f64,
     /// Good step quality threshold (typically 0.75)
     pub good_step_quality: f64,
     /// Poor step quality threshold (typically 0.25)
@@ -411,24 +399,9 @@ pub struct DogLegConfig {
     ///
     /// Default: 0.1
     pub schur_cg_q_tolerance: f64,
-
-    /// Deprecated: never read. Visualization goes through the observer pattern.
-    ///
-    /// Setting this has no effect. Attach an observer to the solver instead:
-    /// `solver.add_observer(RerunObserver::new(true)?)`, which is how
-    /// Levenberg-Marquardt has always done it and works for every optimizer.
-    ///
-    /// Default: false
-    #[cfg(feature = "visualization")]
-    #[deprecated(
-        since = "1.6.0",
-        note = "never read; attach a `RerunObserver` with `add_observer` instead"
-    )]
-    pub enable_visualization: bool,
 }
 
 impl Default for DogLegConfig {
-    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             linear_solver_type: linalg::LinearSolverType::default(),
@@ -449,7 +422,6 @@ impl Default for DogLegConfig {
             // but we keep factor for simpler config
             trust_region_increase_factor: 3.0,
             trust_region_decrease_factor: 0.5,
-            min_step_quality: 0.0,
             good_step_quality: 0.75,
             poor_step_quality: 0.25,
             // Ceres-style: Enable diagonal scaling by default for elliptical trust region
@@ -477,9 +449,6 @@ impl Default for DogLegConfig {
             schur_cg_max_iterations: 200,
             schur_cg_tolerance: 1e-6,
             schur_cg_q_tolerance: crate::linalg::schur::DEFAULT_ETA,
-            #[cfg(feature = "visualization")]
-            #[allow(deprecated)]
-            enable_visualization: false,
         }
     }
 }
@@ -546,20 +515,10 @@ impl DogLegConfig {
         self
     }
 
-    /// Set the trust region quality thresholds.
-    ///
-    /// `min_quality` is accepted for source compatibility but has no effect —
-    /// see [`DogLegConfig::min_step_quality`]. Use
-    /// [`with_min_relative_decrease`](Self::with_min_relative_decrease) to move
-    /// the acceptance threshold.
-    #[allow(deprecated)]
-    pub fn with_step_quality_thresholds(
-        mut self,
-        min_quality: f64,
-        poor_quality: f64,
-        good_quality: f64,
-    ) -> Self {
-        self.min_step_quality = min_quality;
+    /// Set the trust region quality thresholds: the step quality below which
+    /// the region shrinks and above which it grows. The acceptance threshold
+    /// is [`with_min_relative_decrease`](Self::with_min_relative_decrease).
+    pub fn with_step_quality_thresholds(mut self, poor_quality: f64, good_quality: f64) -> Self {
         self.poor_step_quality = poor_quality;
         self.good_step_quality = good_quality;
         self
@@ -670,23 +629,10 @@ impl DogLegConfig {
         self
     }
 
-    /// Deprecated: no-op. See [`enable_visualization`](Self::enable_visualization).
-    #[cfg(feature = "visualization")]
-    #[deprecated(
-        since = "1.6.0",
-        note = "no-op; attach a `RerunObserver` with `add_observer` instead"
-    )]
-    #[allow(deprecated)]
-    pub fn with_visualization(mut self, enable: bool) -> Self {
-        self.enable_visualization = enable;
-        self
-    }
-
     /// Print configuration parameters (info level logging)
-    #[allow(deprecated)]
     pub fn print_configuration(&self) {
         debug!(
-            "Configuration:\n  Solver:        Dog-Leg\n  Linear solver: {:?}\n  Schur variant: {:?}\n  Schur preconditioner: {:?}\n  Schur CG budget:     {} iters @ {:.2e}\n  Loss function: N/A\n\nConvergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n\nTrust Region:\n  Initial radius:      {:.2e}\n  Radius range:        [{:.2e}, {:.2e}]\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Poor step quality:   {:.2}\n\nRegularization:\n  Initial mu:          {:.2e}\n  Mu range:            [{:.2e}, {:.2e}]\n  Mu increase factor:  {:.2}\n\nNumerical Settings:\n  Jacobi scaling:      {}\n  Step reuse:          {}\n  Compute covariances: {}",
+            "Configuration:\n  Solver:        Dog-Leg\n  Linear solver: {:?}\n  Schur variant: {:?}\n  Schur preconditioner: {:?}\n  Schur CG budget:     {} iters @ {:.2e}\n  Loss function: N/A\n\nConvergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n\nTrust Region:\n  Initial radius:      {:.2e}\n  Radius range:        [{:.2e}, {:.2e}]\n  Good step quality:   {:.2}\n  Poor step quality:   {:.2}\n\nRegularization:\n  Initial mu:          {:.2e}\n  Mu range:            [{:.2e}, {:.2e}]\n  Mu increase factor:  {:.2}\n\nNumerical Settings:\n  Jacobi scaling:      {}\n  Step reuse:          {}\n  Compute covariances: {}",
             self.linear_solver_type,
             self.schur_variant,
             self.schur_preconditioner,
@@ -700,7 +646,6 @@ impl DogLegConfig {
             self.trust_region_radius,
             self.trust_region_min,
             self.trust_region_max,
-            self.min_step_quality,
             self.good_step_quality,
             self.poor_step_quality,
             self.initial_mu,
@@ -1415,10 +1360,12 @@ impl DogLeg {
                         iteration,
                         state,
                         elapsed,
-                        0.0,
-                        0.0,
-                        cost_evaluations,
-                        jacobian_evaluations,
+                        optimizer::ConvergenceInfo {
+                            final_gradient_norm: 0.0,
+                            final_parameter_update_norm: 0.0,
+                            cost_evaluations,
+                            jacobian_evaluations,
+                        },
                         None,
                     ));
                 }
@@ -1478,12 +1425,14 @@ impl DogLeg {
             optimizer::notify_observers_generic::<M>(
                 &mut self.observers,
                 &state.variables,
-                iteration,
-                state.current_cost,
-                step_result.gradient_norm,
-                Some(self.trust_region_radius),
-                step_norm,
-                Some(step_eval.rho),
+                optimizer::IterationReport {
+                    iteration,
+                    cost: state.current_cost,
+                    gradient_norm: step_result.gradient_norm,
+                    damping: Some(self.trust_region_radius),
+                    step_norm,
+                    step_quality: Some(step_eval.rho),
+                },
                 linear_solver,
             );
 
@@ -1518,25 +1467,25 @@ impl DogLeg {
             }) {
                 // Print summary only if debug level is enabled
                 if tracing::enabled!(tracing::Level::DEBUG) {
-                    let summary = optimizer::create_optimizer_summary(
-                        "Dog-Leg",
-                        state.initial_cost,
-                        state.current_cost,
-                        iteration + 1,
-                        Some(successful_steps),
-                        Some(unsuccessful_steps),
+                    let summary = optimizer::create_optimizer_summary(optimizer::SummaryTotals {
+                        optimizer_name: "Dog-Leg",
+                        initial_cost: state.initial_cost,
+                        final_cost: state.current_cost,
+                        iterations: iteration + 1,
+                        successful_steps: Some(successful_steps),
+                        unsuccessful_steps: Some(unsuccessful_steps),
                         max_gradient_norm,
                         final_gradient_norm,
                         max_parameter_update_norm,
                         final_parameter_update_norm,
                         total_cost_reduction,
-                        elapsed,
-                        iteration_stats.clone(),
-                        status.clone(),
-                        None,
-                        Some(self.trust_region_radius),
-                        None,
-                    );
+                        total_time: elapsed,
+                        iteration_history: iteration_stats.clone(),
+                        convergence_status: status.clone(),
+                        final_damping: None,
+                        final_trust_region_radius: Some(self.trust_region_radius),
+                        rho: None,
+                    });
                     debug!("{}", summary);
                 }
 
@@ -1555,10 +1504,12 @@ impl DogLeg {
                     iteration + 1,
                     state,
                     elapsed,
-                    final_gradient_norm,
-                    final_parameter_update_norm,
-                    cost_evaluations,
-                    jacobian_evaluations,
+                    optimizer::ConvergenceInfo {
+                        final_gradient_norm,
+                        final_parameter_update_norm,
+                        cost_evaluations,
+                        jacobian_evaluations,
+                    },
                     covariances,
                 ));
             }
@@ -1974,9 +1925,6 @@ mod tests {
     }
 
     #[test]
-    // Asserts that the deprecated `min_step_quality` setter still stores its
-    // value; the field is no longer read by the algorithm.
-    #[allow(deprecated)]
     fn test_dl_config_builders() {
         use crate::linalg::LinearSolverType;
         let cfg = DogLegConfig::new()
@@ -1987,7 +1935,7 @@ mod tests {
             .with_trust_region_radius(200.0)
             .with_trust_region_bounds(1e-15, 1e15)
             .with_trust_region_factors(4.0, 0.3)
-            .with_step_quality_thresholds(0.01, 0.3, 0.7)
+            .with_step_quality_thresholds(0.3, 0.7)
             .with_jacobi_scaling(false)
             .with_mu_params(1e-3, 1e-10, 2.0, 5.0)
             .with_step_reuse(false)
@@ -2000,7 +1948,6 @@ mod tests {
         assert!(!cfg.enable_step_reuse);
         assert!(cfg.min_cost_threshold.is_some());
         assert!(cfg.compute_covariances);
-        assert!((cfg.min_step_quality - 0.01).abs() < 1e-15);
         assert!((cfg.poor_step_quality - 0.3).abs() < 1e-15);
         assert!((cfg.good_step_quality - 0.7).abs() < 1e-15);
         assert!((cfg.initial_mu - 1e-3).abs() < 1e-15);
@@ -2257,12 +2204,8 @@ mod tests {
     }
 
     #[test]
-    // Asserts that the deprecated `min_step_quality` setter still stores its
-    // value; the field is no longer read by the algorithm.
-    #[allow(deprecated)]
     fn test_dl_step_quality_thresholds() {
-        let cfg = DogLegConfig::new().with_step_quality_thresholds(0.05, 0.25, 0.8);
-        assert!((cfg.min_step_quality - 0.05).abs() < 1e-15);
+        let cfg = DogLegConfig::new().with_step_quality_thresholds(0.25, 0.8);
         assert!((cfg.poor_step_quality - 0.25).abs() < 1e-15);
         assert!((cfg.good_step_quality - 0.8).abs() < 1e-15);
     }

@@ -238,14 +238,16 @@ fn build_se2_problem(
     Ok((problem, var_keys))
 }
 
-#[allow(clippy::type_complexity)]
+/// Initial cost, final cost, iterations, status and wall time [ms].
+type RunOutcome = (f64, f64, usize, OptimizationStatus, u128);
+
 fn run_optimization(
     problem: &mut Problem,
     optimizer_name: &str,
     max_iterations: usize,
     cost_tolerance: f64,
     parameter_tolerance: f64,
-) -> Result<(f64, f64, usize, OptimizationStatus, u128), Box<dyn std::error::Error>> {
+) -> Result<RunOutcome, Box<dyn std::error::Error>> {
     let start = Instant::now();
 
     let result = match optimizer_name {
@@ -273,7 +275,7 @@ fn run_optimization(
             let mut solver = DogLeg::with_config(config);
             solver.optimize(problem)?
         }
-        _ => unreachable!(),
+        other => return Err(format!("unknown optimizer {other}").into()),
     };
 
     let elapsed = start.elapsed().as_millis();

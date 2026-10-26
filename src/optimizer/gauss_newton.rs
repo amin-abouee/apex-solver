@@ -277,20 +277,6 @@ pub struct GaussNewtonConfig {
     ///
     /// Default: 0.1
     pub schur_cg_q_tolerance: f64,
-
-    /// Deprecated: never read. Visualization goes through the observer pattern.
-    ///
-    /// Setting this has no effect. Attach an observer to the solver instead:
-    /// `solver.add_observer(RerunObserver::new(true)?)`, which is how
-    /// Levenberg-Marquardt has always done it and works for every optimizer.
-    ///
-    /// Default: false
-    #[cfg(feature = "visualization")]
-    #[deprecated(
-        since = "1.6.0",
-        note = "never read; attach a `RerunObserver` with `add_observer` instead"
-    )]
-    pub enable_visualization: bool,
 }
 
 impl Default for GaussNewtonConfig {
@@ -318,9 +304,6 @@ impl Default for GaussNewtonConfig {
             schur_cg_max_iterations: 200,
             schur_cg_tolerance: 1e-6,
             schur_cg_q_tolerance: crate::linalg::schur::DEFAULT_ETA,
-            #[cfg(feature = "visualization")]
-            #[allow(deprecated)]
-            enable_visualization: false,
         }
     }
 }
@@ -451,18 +434,6 @@ impl GaussNewtonConfig {
     /// quadratic-model stopping rule; see [`Self::schur_cg_q_tolerance`].
     pub fn with_schur_cg_q_tolerance(mut self, q_tolerance: f64) -> Self {
         self.schur_cg_q_tolerance = q_tolerance;
-        self
-    }
-
-    /// Deprecated: no-op. See [`enable_visualization`](Self::enable_visualization).
-    #[cfg(feature = "visualization")]
-    #[deprecated(
-        since = "1.6.0",
-        note = "no-op; attach a `RerunObserver` with `add_observer` instead"
-    )]
-    #[allow(deprecated)]
-    pub fn with_visualization(mut self, enable: bool) -> Self {
-        self.enable_visualization = enable;
         self
     }
 
@@ -739,10 +710,12 @@ impl GaussNewton {
                         iteration,
                         state,
                         elapsed,
-                        0.0,
-                        0.0,
-                        cost_evaluations,
-                        jacobian_evaluations,
+                        optimizer::ConvergenceInfo {
+                            final_gradient_norm: 0.0,
+                            final_parameter_update_norm: 0.0,
+                            cost_evaluations,
+                            jacobian_evaluations,
+                        },
                         None,
                     ));
                 }
@@ -796,12 +769,15 @@ impl GaussNewton {
             optimizer::notify_observers_generic::<M>(
                 &mut self.observers,
                 &state.variables,
-                iteration,
-                state.current_cost,
-                step_result.gradient_norm,
-                None, // Gauss-Newton doesn't use damping
-                step_norm,
-                None, // Gauss-Newton doesn't use step quality
+                optimizer::IterationReport {
+                    iteration,
+                    cost: state.current_cost,
+                    gradient_norm: step_result.gradient_norm,
+                    damping: None,
+                    step_norm,
+                    step_quality: None,
+                },
+                // Gauss-Newton doesn't use step quality
                 linear_solver,
             );
 
@@ -830,25 +806,25 @@ impl GaussNewton {
             }) {
                 // Print summary only if debug level is enabled
                 if tracing::enabled!(tracing::Level::DEBUG) {
-                    let summary = optimizer::create_optimizer_summary(
-                        "Gauss-Newton",
-                        state.initial_cost,
-                        state.current_cost,
-                        iteration + 1,
-                        None,
-                        None,
+                    let summary = optimizer::create_optimizer_summary(optimizer::SummaryTotals {
+                        optimizer_name: "Gauss-Newton",
+                        initial_cost: state.initial_cost,
+                        final_cost: state.current_cost,
+                        iterations: iteration + 1,
+                        successful_steps: None,
+                        unsuccessful_steps: None,
                         max_gradient_norm,
                         final_gradient_norm,
                         max_parameter_update_norm,
                         final_parameter_update_norm,
                         total_cost_reduction,
-                        elapsed,
-                        iteration_stats.clone(),
-                        status.clone(),
-                        None,
-                        None,
-                        None,
-                    );
+                        total_time: elapsed,
+                        iteration_history: iteration_stats.clone(),
+                        convergence_status: status.clone(),
+                        final_damping: None,
+                        final_trust_region_radius: None,
+                        rho: None,
+                    });
                     debug!("{}", summary);
                 }
 
@@ -867,10 +843,12 @@ impl GaussNewton {
                     iteration + 1,
                     state,
                     elapsed,
-                    final_gradient_norm,
-                    final_parameter_update_norm,
-                    cost_evaluations,
-                    jacobian_evaluations,
+                    optimizer::ConvergenceInfo {
+                        final_gradient_norm,
+                        final_parameter_update_norm,
+                        cost_evaluations,
+                        jacobian_evaluations,
+                    },
                     covariances,
                 ));
             }

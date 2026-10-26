@@ -3,7 +3,6 @@ pub mod dense;
 pub(crate) mod regularization;
 pub mod schur;
 pub mod sparse;
-pub mod utils;
 
 use crate::core::{VarKey, variable::ManifoldVariable};
 use crate::error::ErrorLogging;

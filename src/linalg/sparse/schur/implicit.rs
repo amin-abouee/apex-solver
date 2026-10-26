@@ -310,6 +310,23 @@ pub struct ImplicitSparseSchur {
     structure: StructureCache,
 }
 
+/// The system the matrix-free Schur operator applies: the partition, `J`
+/// and the damping on the retained diagonal.
+#[derive(Clone, Copy)]
+struct OperatorSystem<'a> {
+    partition: &'a SchurPartition,
+    jacobian: &'a SparseColMat<usize, f64>,
+    damp_kept: &'a [f64],
+}
+
+/// Scratch the Schur operator writes into, reused across PCG iterations.
+struct OperatorBuffers<'a> {
+    out_buf: &'a mut [f64],
+    rows: &'a mut [f64],
+    temp_lm: &'a mut [f64],
+    scratch: &'a mut [f64],
+}
+
 impl ImplicitSparseSchur {
     /// Default: Schur-Jacobi preconditioner, 500 max iterations, 1e-9 relative
     /// tolerance — matching Ceres's `ITERATIVE_SCHUR` defaults.
@@ -498,19 +515,24 @@ impl ImplicitSparseSchur {
     /// `damp_kept` carries `λ·D_k` per retained local column, already clamped;
     /// it is empty for an undamped solve. The eliminated side's damping is
     /// baked into the inverted blocks before this is ever called.
-    #[allow(clippy::too_many_arguments)]
     fn apply_schur_operator(
         &self,
-        partition: &SchurPartition,
-        jacobian: &SparseColMat<usize, f64>,
-        damp_kept: &[f64],
+        system: &OperatorSystem<'_>,
         v: &Mat<f64>,
         out: &mut Mat<f64>,
-        out_buf: &mut [f64],
-        rows: &mut [f64],
-        temp_lm: &mut [f64],
-        scratch: &mut [f64],
+        buffers: OperatorBuffers<'_>,
     ) {
+        let OperatorSystem {
+            partition,
+            jacobian,
+            damp_kept,
+        } = *system;
+        let OperatorBuffers {
+            out_buf,
+            rows,
+            temp_lm,
+            scratch,
+        } = buffers;
         let symbolic = jacobian.symbolic();
         let row_idx = symbolic.row_idx();
         let values = jacobian.val();
@@ -988,17 +1010,18 @@ impl ImplicitSparseSchur {
             &PcgParams::new(self.max_cg_iterations, self.cg_tolerance)
                 .with_q_tolerance(self.cg_q_tolerance),
             |p, ap| {
-                self.apply_schur_operator(
+                let system = OperatorSystem {
                     partition,
                     jacobian,
                     damp_kept,
-                    p,
-                    ap,
-                    &mut out_buf,
-                    &mut rows,
-                    &mut temp_lm,
-                    &mut scratch,
-                );
+                };
+                let buffers = OperatorBuffers {
+                    out_buf: &mut out_buf,
+                    rows: &mut rows,
+                    temp_lm: &mut temp_lm,
+                    scratch: &mut scratch,
+                };
+                self.apply_schur_operator(&system, p, ap, buffers);
             },
             |r, z| Self::apply_preconditioner(precond, r, z),
         );
@@ -1715,17 +1738,18 @@ mod tests {
             let mut rows = vec![0.0; jacobian.nrows()];
             let mut temp_lm = vec![0.0; partition.eliminated_dof()];
             let mut scratch = vec![0.0; partition.eliminated_dof()];
-            solver.apply_schur_operator(
-                &partition,
-                &jacobian,
-                &[],
-                &v,
-                &mut out,
-                &mut out_buf,
-                &mut rows,
-                &mut temp_lm,
-                &mut scratch,
-            );
+            let system = OperatorSystem {
+                partition: &partition,
+                jacobian: &jacobian,
+                damp_kept: &[],
+            };
+            let buffers = OperatorBuffers {
+                out_buf: &mut out_buf,
+                rows: &mut rows,
+                temp_lm: &mut temp_lm,
+                scratch: &mut scratch,
+            };
+            solver.apply_schur_operator(&system, &v, &mut out, buffers);
             for (i, w) in want.iter().enumerate() {
                 assert_eq!(
                     out[(i, 0)].to_bits(),

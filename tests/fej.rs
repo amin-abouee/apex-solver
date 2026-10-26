@@ -6,7 +6,8 @@
 //! Jacobians of the states it touches drift afterwards fabricates information
 //! along the directions the measurements never observed.
 
-mod common;
+// `pub` so helpers a given test binary does not call are not reported as dead code.
+pub mod common;
 use common::lm_solver;
 
 use apex_solver::JacobianEvaluation;

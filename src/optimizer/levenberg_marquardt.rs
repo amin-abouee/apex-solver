@@ -1198,10 +1198,12 @@ impl LevenbergMarquardt {
                         iteration,
                         state,
                         elapsed,
-                        0.0,
-                        0.0,
-                        cost_evaluations,
-                        jacobian_evaluations,
+                        crate::optimizer::ConvergenceInfo {
+                            final_gradient_norm: 0.0,
+                            final_parameter_update_norm: 0.0,
+                            cost_evaluations,
+                            jacobian_evaluations,
+                        },
                         None,
                     ));
                 }
@@ -1261,12 +1263,14 @@ impl LevenbergMarquardt {
             crate::optimizer::notify_observers_generic::<M>(
                 &mut self.observers,
                 &state.variables,
-                iteration,
-                state.current_cost,
-                step_result.gradient_norm,
-                Some(self.damping),
-                step_norm,
-                Some(step_eval.rho),
+                crate::optimizer::IterationReport {
+                    iteration,
+                    cost: state.current_cost,
+                    gradient_norm: step_result.gradient_norm,
+                    damping: Some(self.damping),
+                    step_norm,
+                    step_quality: Some(step_eval.rho),
+                },
                 linear_solver,
             );
 
@@ -1316,23 +1320,25 @@ impl LevenbergMarquardt {
             if let Some(status) = convergence_status {
                 if tracing::enabled!(tracing::Level::DEBUG) {
                     let summary = crate::optimizer::create_optimizer_summary(
-                        "Levenberg-Marquardt",
-                        state.initial_cost,
-                        state.current_cost,
-                        iteration + 1,
-                        Some(successful_steps),
-                        Some(unsuccessful_steps),
-                        max_gradient_norm,
-                        final_gradient_norm,
-                        max_parameter_update_norm,
-                        final_parameter_update_norm,
-                        total_cost_reduction,
-                        elapsed,
-                        iteration_stats.clone(),
-                        status.clone(),
-                        Some(self.damping),
-                        None,
-                        Some(step_eval.rho),
+                        crate::optimizer::SummaryTotals {
+                            optimizer_name: "Levenberg-Marquardt",
+                            initial_cost: state.initial_cost,
+                            final_cost: state.current_cost,
+                            iterations: iteration + 1,
+                            successful_steps: Some(successful_steps),
+                            unsuccessful_steps: Some(unsuccessful_steps),
+                            max_gradient_norm,
+                            final_gradient_norm,
+                            max_parameter_update_norm,
+                            final_parameter_update_norm,
+                            total_cost_reduction,
+                            total_time: elapsed,
+                            iteration_history: iteration_stats.clone(),
+                            convergence_status: status.clone(),
+                            final_damping: Some(self.damping),
+                            final_trust_region_radius: None,
+                            rho: Some(step_eval.rho),
+                        },
                     );
                     debug!("{}", summary);
                 }
@@ -1356,10 +1362,12 @@ impl LevenbergMarquardt {
                     iteration + 1,
                     state,
                     elapsed,
-                    final_gradient_norm,
-                    final_parameter_update_norm,
-                    cost_evaluations,
-                    jacobian_evaluations,
+                    crate::optimizer::ConvergenceInfo {
+                        final_gradient_norm,
+                        final_parameter_update_norm,
+                        cost_evaluations,
+                        jacobian_evaluations,
+                    },
                     covariances,
                 ));
             }

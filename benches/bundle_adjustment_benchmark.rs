@@ -130,20 +130,19 @@ struct BABenchmarkResult {
     status: String,
 }
 
+/// Which dataset, solver and language a benchmark row describes.
+#[derive(Clone, Copy)]
+struct Run<'a> {
+    dataset: &'a str,
+    solver: &'a str,
+    language: &'a str,
+}
+
 impl BABenchmarkResult {
     /// Create a successful benchmark result.
-    ///
-    /// # Design Note
-    /// This constructor accepts individual benchmark metrics for clear parameter naming in benchmark code.
-    /// The large parameter count reflects the comprehensive nature of bundle adjustment benchmarking.
-    #[allow(clippy::too_many_arguments)]
     fn success(
-        dataset_name: &str,
-        solver: &str,
-        language: &str,
-        num_cameras: usize,
-        num_points: usize,
-        num_observations: usize,
+        run: Run<'_>,
+        size: ProblemSize,
         initial_rmse: f64,
         final_rmse: f64,
         time_seconds: f64,
@@ -151,12 +150,12 @@ impl BABenchmarkResult {
         status: &str,
     ) -> Self {
         Self {
-            dataset: dataset_name.to_string(),
-            solver: solver.to_string(),
-            language: language.to_string(),
-            num_cameras,
-            num_points,
-            num_observations,
+            dataset: run.dataset.to_string(),
+            solver: run.solver.to_string(),
+            language: run.language.to_string(),
+            num_cameras: size.cameras,
+            num_points: size.points,
+            num_observations: size.observations,
             initial_rmse: format!("{:.6}", initial_rmse),
             final_rmse: format!("{:.6}", final_rmse),
             time_seconds: format!("{:.2}", time_seconds),
@@ -579,12 +578,16 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str, run: ApexRun) -> 
     let converged = is_converged(&result.status);
 
     BABenchmarkResult::success(
-        dataset_name,
-        run.solver,
-        "Rust",
-        size.cameras,
-        size.points,
-        size.observations,
+        Run {
+            dataset: dataset_name,
+            solver: run.solver,
+            language: "Rust",
+        },
+        ProblemSize {
+            cameras: size.cameras,
+            points: size.points,
+            observations: size.observations,
+        },
         initial_rmse,
         final_rmse,
         elapsed_seconds,
@@ -597,18 +600,15 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str, run: ApexRun) -> 
     )
 }
 
-/// C++ BA benchmark result from CSV
+/// C++ BA benchmark result from CSV. Columns not listed here are ignored
+/// when the row is deserialized.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Fields needed for CSV deserialization
 struct CppBAResult {
-    dataset: String,
     solver: String,
     language: String,
     num_cameras: usize,
     num_points: usize,
     num_observations: usize,
-    initial_mse: f64,
-    final_mse: f64,
     initial_rmse: f64,
     final_rmse: f64,
     time_ms: f64,
@@ -788,12 +788,16 @@ fn parse_cpp_ba_results(
 
         // Use the passed dataset_name instead of extracting from CSV
         let result = BABenchmarkResult::success(
-            dataset_name,
-            &cpp_result.solver,
-            &cpp_result.language,
-            cpp_result.num_cameras,
-            cpp_result.num_points,
-            cpp_result.num_observations,
+            Run {
+                dataset: dataset_name,
+                solver: &cpp_result.solver,
+                language: &cpp_result.language,
+            },
+            ProblemSize {
+                cameras: cpp_result.num_cameras,
+                points: cpp_result.num_points,
+                observations: cpp_result.num_observations,
+            },
             cpp_result.initial_rmse,
             cpp_result.final_rmse,
             cpp_result.time_ms / 1000.0, // Convert ms to seconds

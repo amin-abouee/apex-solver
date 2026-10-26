@@ -5,8 +5,6 @@
 //! are separate binaries, so each includes this module and uses the parts it
 //! needs — hence the blanket `dead_code` allowance.
 
-#![allow(dead_code)]
-
 pub mod nclt;
 
 use apex_solver::apex_manifolds::LieGroup;

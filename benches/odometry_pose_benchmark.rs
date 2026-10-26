@@ -512,23 +512,29 @@ struct BenchmarkResult {
     improvement_pct: String,
 }
 
+/// Which dataset, solver and language a benchmark row describes.
+#[derive(Clone, Copy)]
+struct Run<'a> {
+    dataset: &'a str,
+    solver: &'a str,
+    language: &'a str,
+}
+
 impl BenchmarkResult {
     /// Create a successful benchmark result.
-    ///
-    /// # Design Note
-    /// This constructor accepts individual benchmark metrics for clear parameter naming in benchmark code.
-    /// The large parameter count reflects the comprehensive nature of pose graph benchmarking.
-    #[allow(clippy::too_many_arguments)]
     fn success(
-        dataset: &str,
-        solver: &str,
-        language: &str,
+        run: Run<'_>,
         elapsed_ms: f64,
         converged: bool,
         iterations: Option<usize>,
         initial_metrics: CostMetrics,
         final_metrics: CostMetrics,
     ) -> Self {
+        let Run {
+            dataset,
+            solver,
+            language,
+        } = run;
         let improvement_pct = if initial_metrics.unweighted_cost > 0.0 {
             ((initial_metrics.unweighted_cost - final_metrics.unweighted_cost)
                 / initial_metrics.unweighted_cost)
@@ -696,9 +702,11 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
             let final_cost = compute_se2_cost_metrics(&graph);
             let converged = is_converged(&result.status);
             BenchmarkResult::success(
-                dataset.name,
-                "apex-solver",
-                "Rust",
+                Run {
+                    dataset: dataset.name,
+                    solver: "apex-solver",
+                    language: "Rust",
+                },
                 elapsed_ms,
                 converged,
                 Some(result.iterations),
@@ -792,9 +800,11 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
             let final_cost = compute_se3_cost_metrics(&graph);
             let converged = is_converged(&result.status);
             BenchmarkResult::success(
-                dataset.name,
-                "apex-solver",
-                "Rust",
+                Run {
+                    dataset: dataset.name,
+                    solver: "apex-solver",
+                    language: "Rust",
+                },
                 elapsed_ms,
                 converged,
                 Some(result.iterations),
@@ -866,9 +876,11 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
             };
 
             BenchmarkResult::success(
-                dataset.name,
-                "factrs",
-                "Rust",
+                Run {
+                    dataset: dataset.name,
+                    solver: "factrs",
+                    language: "Rust",
+                },
                 elapsed_ms,
                 true, // Successfully converged
                 None, // factrs doesn't expose iteration count
@@ -893,9 +905,11 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
             };
 
             BenchmarkResult::success(
-                dataset.name,
-                "factrs",
-                "Rust",
+                Run {
+                    dataset: dataset.name,
+                    solver: "factrs",
+                    language: "Rust",
+                },
                 elapsed_ms,
                 false, // Did not converge (max iterations)
                 None,
@@ -981,9 +995,11 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
             };
 
             BenchmarkResult::success(
-                dataset.name,
-                "tiny-solver",
-                "Rust",
+                Run {
+                    dataset: dataset.name,
+                    solver: "tiny-solver",
+                    language: "Rust",
+                },
                 elapsed_ms,
                 true, // Successfully converged
                 None, // tiny-solver doesn't expose iteration count
@@ -1001,12 +1017,11 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
 
 // ========================= C++ Benchmark Integration =========================
 
-/// C++ benchmark result from CSV (matches the C++ CSV output format with dual metrics)
+/// C++ benchmark result from CSV (dual metrics). Columns not listed here are
+/// ignored when the row is deserialized.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct CppBenchmarkResult {
     dataset: String,
-    manifold: String,
     solver: String,
     language: String,
     vertices: usize,
@@ -1014,10 +1029,8 @@ struct CppBenchmarkResult {
     // Dual metrics from C++
     initial_chi2: f64,
     final_chi2: f64,
-    chi2_improvement_pct: f64,
     initial_cost: f64,
     final_cost: f64,
-    improvement_pct: f64,
     iterations: usize,
     time_ms: f64,
     status: String,
@@ -1140,9 +1153,11 @@ fn parse_cpp_results(csv_path: &Path) -> Result<Vec<BenchmarkResult>, String> {
         };
 
         let result = BenchmarkResult::success(
-            &cpp_result.dataset,
-            solver_name,
-            &cpp_result.language,
+            Run {
+                dataset: &cpp_result.dataset,
+                solver: solver_name,
+                language: &cpp_result.language,
+            },
             cpp_result.time_ms,
             converged,
             Some(cpp_result.iterations),

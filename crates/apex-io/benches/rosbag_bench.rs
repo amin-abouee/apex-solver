@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Criterion benchmarks for the ROS1/ROS2 bag stack.
 //!
 //! Groups (all over the same synthetic VIO-like recording — 2 x 10 Hz
@@ -17,6 +16,8 @@
 //! cargo bench -p apex-io --features rosbag --bench rosbag_bench
 //! ```
 
+#[path = "helpers/bag.rs"]
+mod bag_fixtures;
 mod helpers;
 
 use apex_io::rosbag::bag::{BagKind, BagReader, OutputCompression, Selection};
@@ -32,7 +33,7 @@ struct Fixtures {
     ros1: PathBuf,
     sqlite: PathBuf,
     mcap: PathBuf,
-    scenario: helpers::Scenario,
+    scenario: bag_fixtures::Scenario,
 }
 
 fn fixtures() -> &'static Fixtures {
@@ -40,13 +41,13 @@ fn fixtures() -> &'static Fixtures {
     F.get_or_init(|| {
         helpers::reset_bench_dir();
         let root = helpers::bench_root();
-        let scenario = helpers::Scenario::build();
+        let scenario = bag_fixtures::Scenario::build();
         let ros1 = root.join("synth.bag");
         let sqlite = root.join("sqlite");
         let mcap = root.join("synth.mcap");
-        helpers::write_bag(&scenario, BagKind::Ros1Bag, &ros1);
-        helpers::write_bag(&scenario, BagKind::Ros2Sqlite, &sqlite);
-        helpers::write_bag(&scenario, BagKind::McapFile, &mcap);
+        bag_fixtures::write_bag(&scenario, BagKind::Ros1Bag, &ros1);
+        bag_fixtures::write_bag(&scenario, BagKind::Ros2Sqlite, &sqlite);
+        bag_fixtures::write_bag(&scenario, BagKind::McapFile, &mcap);
         Fixtures {
             ros1,
             sqlite,
@@ -62,7 +63,7 @@ fn bench_open_info(c: &mut Criterion) {
     for (name, path) in [("ros1", &f.ros1), ("sqlite3", &f.sqlite), ("mcap", &f.mcap)] {
         g.bench_function(name, |b| {
             b.iter(|| {
-                let r = BagReader::open(black_box(path)).unwrap();
+                let r = BagReader::open(black_box(path)).unwrap_or_else(|e| panic!("{e}"));
                 black_box((
                     r.message_count(),
                     r.start_time(),
@@ -89,13 +90,13 @@ fn scan(path: &Path, selection: &Selection) -> apex_io::rosbag::Result<u64> {
 fn bench_read(c: &mut Criterion) {
     let f = fixtures();
     let vio = Selection {
-        include: helpers::Scenario::vio_topics()
+        include: bag_fixtures::Scenario::vio_topics()
             .iter()
             .map(|s| s.to_string())
             .collect(),
         ..Selection::default()
     };
-    let (start, end) = helpers::Scenario::window();
+    let (start, end) = bag_fixtures::Scenario::window();
     let window = Selection {
         start_ns: Some(start),
         end_ns: Some(end),
@@ -105,13 +106,17 @@ fn bench_read(c: &mut Criterion) {
     g.sample_size(20);
     for (name, path) in [("ros1", &f.ros1), ("sqlite3", &f.sqlite), ("mcap", &f.mcap)] {
         g.bench_function(format!("full/{name}"), |b| {
-            b.iter(|| black_box(scan(black_box(path), &Selection::default()).unwrap()))
+            b.iter(|| {
+                black_box(
+                    scan(black_box(path), &Selection::default()).unwrap_or_else(|e| panic!("{e}")),
+                )
+            })
         });
         g.bench_function(format!("two_topics/{name}"), |b| {
-            b.iter(|| black_box(scan(black_box(path), &vio).unwrap()))
+            b.iter(|| black_box(scan(black_box(path), &vio).unwrap_or_else(|e| panic!("{e}"))))
         });
         g.bench_function(format!("two_second_window/{name}"), |b| {
-            b.iter(|| black_box(scan(black_box(path), &window).unwrap()))
+            b.iter(|| black_box(scan(black_box(path), &window).unwrap_or_else(|e| panic!("{e}"))))
         });
     }
     g.finish();
@@ -133,8 +138,12 @@ fn bench_write(c: &mut Criterion) {
                 || helpers::scratch_dir("bench"),
                 |s| {
                     let path = s.0.join(file);
-                    helpers::write_bag(black_box(&f.scenario), kind, &path);
-                    black_box(std::fs::metadata(&path).unwrap().len());
+                    bag_fixtures::write_bag(black_box(&f.scenario), kind, &path);
+                    black_box(
+                        std::fs::metadata(&path)
+                            .unwrap_or_else(|e| panic!("{e}"))
+                            .len(),
+                    );
                 },
                 BatchSize::PerIteration,
             )
@@ -146,7 +155,11 @@ fn bench_write(c: &mut Criterion) {
             |s| {
                 let path = s.0.join("out.mcap");
                 write_bag_zstd(black_box(&f.scenario), &path);
-                black_box(std::fs::metadata(&path).unwrap().len());
+                black_box(
+                    std::fs::metadata(&path)
+                        .unwrap_or_else(|e| panic!("{e}"))
+                        .len(),
+                );
             },
             BatchSize::PerIteration,
         )
@@ -154,15 +167,16 @@ fn bench_write(c: &mut Criterion) {
     g.finish();
 }
 
-fn write_bag_zstd(scenario: &helpers::Scenario, path: &Path) {
-    let mut w = BagWriter::create(path, BagKind::McapFile, OutputCompression::Zstd).unwrap();
+fn write_bag_zstd(scenario: &bag_fixtures::Scenario, path: &Path) {
+    let mut w = BagWriter::create(path, BagKind::McapFile, OutputCompression::Zstd)
+        .unwrap_or_else(|e| panic!("{e}"));
     let handles: Vec<_> = scenario
         .topics
         .iter()
         .map(|t| {
             w.add_connection(&NewConnection {
                 topic: t.topic.to_string(),
-                message_type: helpers::ros2_type(t.ros1_type),
+                message_type: bag_fixtures::ros2_type(t.ros1_type),
                 definition: apex_io::rosbag::transcode::catalog_definition(
                     t.ros1_type,
                     Dialect::Ros2,
@@ -174,14 +188,14 @@ fn write_bag_zstd(scenario: &helpers::Scenario, path: &Path) {
                 serialization_format: "cdr".to_string(),
                 qos: Vec::new(),
             })
-            .unwrap()
+            .unwrap_or_else(|e| panic!("{e}"))
         })
         .collect();
     for m in &scenario.messages {
         w.write(handles[m.topic_idx], m.timestamp_ns, &m.cdr)
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e}"));
     }
-    w.close().unwrap();
+    w.close().unwrap_or_else(|e| panic!("{e}"));
 }
 
 enum Action {
@@ -192,7 +206,7 @@ use apex_io::rosbag::ConnectionHandle as BagWriterHandle;
 
 /// Full conversion of `input` to `kind`, mirroring the bag_convert CLI loop.
 fn convert_once(input: &Path, kind: BagKind, out: &Path) -> u64 {
-    let mut reader = BagReader::open(input).unwrap();
+    let mut reader = BagReader::open(input).unwrap_or_else(|e| panic!("{e}"));
     let selection = Selection::default();
     let selected = reader.selected_connections(&selection);
     let to = if kind == BagKind::Ros1Bag {
@@ -206,18 +220,21 @@ fn convert_once(input: &Path, kind: BagKind, out: &Path) -> u64 {
         .partition(|c| dialect_of(&c.serialization_format) == Some(to));
     let (planned, _unsupported) = plan_connections(&different, to);
 
-    let mut writer = BagWriter::create(out, kind, OutputCompression::None).unwrap();
+    let mut writer =
+        BagWriter::create(out, kind, OutputCompression::None).unwrap_or_else(|e| panic!("{e}"));
     let mut actions: HashMap<u32, Action> = HashMap::new();
     let mut readable = Vec::new();
     for c in &same {
         let h = writer
             .add_connection(&NewConnection::from_connection(c))
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{e}"));
         actions.insert(c.id, Action::Copy(h));
         readable.push(c.clone());
     }
     for (c, plan) in planned {
-        let h = writer.add_connection(&plan.target).unwrap();
+        let h = writer
+            .add_connection(&plan.target)
+            .unwrap_or_else(|e| panic!("{e}"));
         actions.insert(c.id, Action::Convert(h, Box::new(plan.transcoder)));
         readable.push(c);
     }
@@ -226,7 +243,7 @@ fn convert_once(input: &Path, kind: BagKind, out: &Path) -> u64 {
     let mut scratch = Vec::new();
     reader
         .for_each(&readable, &selection, |c, ts, data| {
-            match actions.get(&c.id).expect("action") {
+            match actions.get(&c.id).unwrap_or_else(|| panic!("action")) {
                 Action::Copy(h) => writer.write(*h, ts, data)?,
                 Action::Convert(h, t) => {
                     t.convert(data, &mut scratch)?;
@@ -236,8 +253,8 @@ fn convert_once(input: &Path, kind: BagKind, out: &Path) -> u64 {
             count += 1;
             Ok(())
         })
-        .unwrap();
-    writer.close().unwrap();
+        .unwrap_or_else(|e| panic!("{e}"));
+    writer.close().unwrap_or_else(|e| panic!("{e}"));
     count
 }
 
@@ -269,7 +286,7 @@ fn bench_convert(c: &mut Criterion) {
 
 fn bench_transcode(c: &mut Criterion) {
     let f = fixtures();
-    let reg = apex_io::rosbag::transcode::catalog().unwrap();
+    let reg = apex_io::rosbag::transcode::catalog().unwrap_or_else(|e| panic!("{e}"));
     let mut g = c.benchmark_group("rosbag_transcode");
 
     let cases = [
@@ -299,9 +316,9 @@ fn bench_transcode(c: &mut Criterion) {
             .topics
             .iter()
             .find(|t| t.topic == topic)
-            .expect("topic");
+            .unwrap_or_else(|| panic!("topic"));
         let ty = spec.ros1_type;
-        let t = Transcoder::compile(reg, ty, from, to).unwrap();
+        let t = Transcoder::compile(reg, ty, from, to).unwrap_or_else(|e| panic!("{e}"));
         let payloads: Vec<&Vec<u8>> = f
             .scenario
             .messages
@@ -320,7 +337,8 @@ fn bench_transcode(c: &mut Criterion) {
         g.bench_function(name, |b| {
             b.iter(|| {
                 for p in &payloads {
-                    t.convert(black_box(p), &mut out).unwrap();
+                    t.convert(black_box(p), &mut out)
+                        .unwrap_or_else(|e| panic!("{e}"));
                     black_box(&out);
                 }
             })
@@ -334,7 +352,7 @@ fn bench_real_mcap(c: &mut Criterion) {
         return;
     };
     let topics: Vec<String> = {
-        let r = BagReader::open(&path).unwrap();
+        let r = BagReader::open(&path).unwrap_or_else(|e| panic!("{e}"));
         r.connections()
             .iter()
             .take(2)
@@ -349,15 +367,19 @@ fn bench_real_mcap(c: &mut Criterion) {
     g.sample_size(10);
     g.bench_function("open_info", |b| {
         b.iter(|| {
-            let r = BagReader::open(black_box(&path)).unwrap();
+            let r = BagReader::open(black_box(&path)).unwrap_or_else(|e| panic!("{e}"));
             black_box((r.message_count(), r.connections().len()));
         })
     });
     g.bench_function("read_full", |b| {
-        b.iter(|| black_box(scan(black_box(&path), &Selection::default()).unwrap()))
+        b.iter(|| {
+            black_box(
+                scan(black_box(&path), &Selection::default()).unwrap_or_else(|e| panic!("{e}")),
+            )
+        })
     });
     g.bench_function("read_two_topics", |b| {
-        b.iter(|| black_box(scan(black_box(&path), &two_topics).unwrap()))
+        b.iter(|| black_box(scan(black_box(&path), &two_topics).unwrap_or_else(|e| panic!("{e}"))))
     });
     g.finish();
 }

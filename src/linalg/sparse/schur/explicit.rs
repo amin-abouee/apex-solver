@@ -557,7 +557,7 @@ impl ExplicitSparseSchur {
     /// Test-only reference for [`Self::extract_kept_and_coupling`]'s cache:
     /// production paths go through the cache, and these remain so tests can
     /// compare cached extraction against the direct one.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     fn extract_kept_block(
         &self,
         hessian: &SparseColMat<usize, f64>,
@@ -600,7 +600,7 @@ impl ExplicitSparseSchur {
     ///
     /// Test-only reference for [`Self::extract_kept_and_coupling`]'s cache;
     /// see [`Self::extract_kept_block`].
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     fn extract_coupling_block(
         &self,
         hessian: &SparseColMat<usize, f64>,

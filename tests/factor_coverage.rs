@@ -13,9 +13,8 @@
 //! Each scenario builds measurements from ground truth, starts the optimizer
 //! from a perturbed state, and asserts the truth is recovered.
 
-#![allow(clippy::print_stderr)]
-
-mod common;
+// `pub` so helpers a given test binary does not call are not reported as dead code.
+pub mod common;
 use common::{
     Trajectory, anchor_rn, anchor_se3, anchor_se23, build_imu_dataset, imu_params, lm_solver,
 };

@@ -13,10 +13,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// `target/` keeps the (multi-GB) fixtures off the system volume, next to
 /// everything else `cargo clean` removes.
 pub fn bench_root() -> PathBuf {
-    let exe = std::env::current_exe().expect("current exe");
-    let target = exe.ancestors().nth(3).expect("bench exe below target/");
+    let exe = std::env::current_exe().unwrap_or_else(|e| panic!("current exe: {e}"));
+    let target = exe
+        .ancestors()
+        .nth(3)
+        .unwrap_or_else(|| panic!("bench exe below target/"));
     let dir = target.join("apex-io-bench");
-    std::fs::create_dir_all(&dir).expect("create bench dir");
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create bench dir: {e}"));
     dir
 }
 
@@ -24,7 +27,7 @@ pub fn bench_root() -> PathBuf {
 /// crashed run cannot leak gigabytes of stale artifacts.
 pub fn reset_bench_dir() {
     let _ = std::fs::remove_dir_all(bench_root());
-    std::fs::create_dir_all(bench_root()).expect("recreate bench dir");
+    std::fs::create_dir_all(bench_root()).unwrap_or_else(|e| panic!("recreate bench dir: {e}"));
 }
 
 /// Per-iteration scratch directory, removed untimed when dropped (criterion
@@ -41,7 +44,7 @@ impl Drop for Scratch {
 pub fn scratch_dir(label: &str) -> Scratch {
     static N: AtomicUsize = AtomicUsize::new(0);
     let p = bench_root().join(format!("{label}-{}", N.fetch_add(1, Ordering::Relaxed)));
-    std::fs::create_dir_all(&p).expect("create scratch dir");
+    std::fs::create_dir_all(&p).unwrap_or_else(|e| panic!("create scratch dir: {e}"));
     Scratch(p)
 }
 
@@ -77,17 +80,5 @@ impl Rng {
     }
 }
 
-// Each bench crate uses only one half of the fixtures.
-#[cfg(feature = "rosbag")]
-#[allow(dead_code)]
-mod bag;
-#[cfg(feature = "rosbag")]
-#[allow(unused_imports)]
-pub use bag::{Message, Scenario, TopicSpec, ros2_type, write_bag};
-
-#[cfg(feature = "vrs")]
-#[allow(dead_code)]
-mod vrs;
-#[cfg(feature = "vrs")]
-#[allow(unused_imports)]
-pub use vrs::{VrsFixture, write_vrs};
+// The fixtures of each format live in `bag.rs` and `vrs.rs`, declared by
+// the bench that uses them so neither bench compiles the other half.

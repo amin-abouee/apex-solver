@@ -337,12 +337,13 @@ impl ChunkedSchurEliminator {
         if leading_end > 0 {
             Self::sweep_rows(
                 &mut self.cursors,
-                jacobian,
-                residuals,
-                &kept_global,
+                StripSource {
+                    jacobian,
+                    residuals,
+                    kept_global: &kept_global,
+                },
+                0..leading_end,
                 &all_kept,
-                0,
-                leading_end,
                 &mut s,
                 &mut g_k,
             );
@@ -376,11 +377,12 @@ impl ChunkedSchurEliminator {
             let chunk_cols = &self.layout.chunk_cols[start..start + len];
             let (cols, strip) = Self::gather_strip(
                 &mut self.cursors,
-                jacobian,
-                residuals,
-                &kept_global,
-                row_start,
-                row_end,
+                StripSource {
+                    jacobian,
+                    residuals,
+                    kept_global: &kept_global,
+                },
+                row_start..row_end,
                 chunk_cols,
                 &mut s,
                 &mut g_k,
@@ -444,12 +446,13 @@ impl ChunkedSchurEliminator {
             if last_end < self.layout.nrows() {
                 Self::sweep_rows(
                     &mut self.cursors,
-                    jacobian,
-                    residuals,
-                    &kept_global,
+                    StripSource {
+                        jacobian,
+                        residuals,
+                        kept_global: &kept_global,
+                    },
+                    last_end..self.layout.nrows(),
                     &all_kept,
-                    last_end,
-                    self.layout.nrows(),
                     &mut s,
                     &mut g_k,
                 );
@@ -548,18 +551,20 @@ impl ChunkedSchurEliminator {
     /// Associated function (not a method) so callers can hold `&layout` slices
     /// while advancing `cursors`: taking `&mut self` for the cursors alone
     /// would force a per-solve clone of the chunk-column cache.
-    #[allow(clippy::too_many_arguments)]
     fn gather_strip(
         cursors: &mut [usize],
-        jacobian: &SparseColMat<usize, f64>,
-        residuals: &Mat<f64>,
-        kept_global: &[usize],
-        row_start: usize,
-        row_end: usize,
+        source: StripSource<'_>,
+        rows: std::ops::Range<usize>,
         candidate_cols: &[u32],
         s: &mut Mat<f64>,
         g_k: &mut Mat<f64>,
     ) -> (Vec<usize>, Mat<f64>) {
+        let StripSource {
+            jacobian,
+            residuals,
+            kept_global,
+        } = source;
+        let (row_start, row_end) = (rows.start, rows.end);
         let symbolic = jacobian.symbolic();
         let n_rows = row_end - row_start;
 
@@ -623,30 +628,27 @@ impl ChunkedSchurEliminator {
     }
 
     /// `FᵀF` and `Fᵀr` for a row range that belongs to no chunk.
-    #[allow(clippy::too_many_arguments)]
     fn sweep_rows(
         cursors: &mut [usize],
-        jacobian: &SparseColMat<usize, f64>,
-        residuals: &Mat<f64>,
-        kept_global: &[usize],
+        source: StripSource<'_>,
+        rows: std::ops::Range<usize>,
         candidates: &[u32],
-        row_start: usize,
-        row_end: usize,
         s: &mut Mat<f64>,
         g_k: &mut Mat<f64>,
     ) {
-        let _ = Self::gather_strip(
-            cursors,
-            jacobian,
-            residuals,
-            kept_global,
-            row_start,
-            row_end,
-            candidates,
-            s,
-            g_k,
-        );
+        // Only the accumulation into `s` and `g_k` matters for rows outside
+        // every chunk; the strip itself is not needed.
+        let _ = Self::gather_strip(cursors, source, rows, candidates, s, g_k);
     }
+}
+
+/// What a strip of `F` is gathered from: `J`, `r` and the global column of
+/// each retained local column.
+#[derive(Clone, Copy)]
+struct StripSource<'a> {
+    jacobian: &'a SparseColMat<usize, f64>,
+    residuals: &'a Mat<f64>,
+    kept_global: &'a [usize],
 }
 
 /// Per-chunk quantities carried from the gather phase to the correction phase.
