@@ -29,7 +29,7 @@
 //! - Ethan Eade: "Lie Groups for Computer Vision" - <https://www.ethaneade.com/lie.pdf>
 //! - Sophus library: sophus/sim3.hpp
 
-use crate::util::check_param_block;
+use crate::util::{WarnOnce, check_param_block};
 use crate::{ElementError, ElementResult};
 use crate::{
     LieGroup, Tangent,
@@ -73,35 +73,57 @@ impl Display for Sim3 {
 /// A σ ≈ 0 tangent element makes the V/Jacobian blocks singular mid-solve.
 /// Returning identity (the old fallback) silently corrupts the step to a
 /// generic identity map; the regularized inverse keeps the block's structure
-/// so the step degrades gracefully, and the event is surfaced.
+/// so the step degrades gracefully. This runs per residual per iteration, so
+/// the event is logged through [`WarnOnce`] (first hit, then every power of ten)
+/// rather than on every call.
 fn regularized_inverse_3(m: &Matrix3<f64>, what: &str) -> Matrix3<f64> {
+    static REGULARIZED: WarnOnce = WarnOnce::new();
+    static IDENTITY: WarnOnce = WarnOnce::new();
     if let Some(inv) = m.try_inverse() {
         return inv;
     }
     let eps = 1e-9 * (m.trace().abs() + 1.0) / 3.0;
-    tracing::warn!(
-        "Sim(3) {what} is numerically singular; using Tikhonov-regularized inverse (eps = {eps:.3e})"
-    );
+    if let Some(count) = REGULARIZED.hit() {
+        tracing::warn!(
+            count,
+            "Sim(3) {what} is numerically singular; using Tikhonov-regularized inverse (eps = {eps:.3e})"
+        );
+    }
     (*m + Matrix3::identity() * eps)
         .try_inverse()
         .unwrap_or_else(|| {
-            tracing::error!("Sim(3) {what}: regularized inverse also failed; using identity");
+            if let Some(count) = IDENTITY.hit() {
+                tracing::error!(
+                    count,
+                    "Sim(3) {what}: regularized inverse also failed; using identity"
+                );
+            }
             Matrix3::identity()
         })
 }
 
 fn regularized_inverse_7(m: &Matrix7<f64>, what: &str) -> Matrix7<f64> {
+    static REGULARIZED: WarnOnce = WarnOnce::new();
+    static IDENTITY: WarnOnce = WarnOnce::new();
     if let Some(inv) = m.try_inverse() {
         return inv;
     }
     let eps = 1e-9 * (m.trace().abs() + 1.0) / 7.0;
-    tracing::warn!(
-        "Sim(3) {what} is numerically singular; using Tikhonov-regularized inverse (eps = {eps:.3e})"
-    );
+    if let Some(count) = REGULARIZED.hit() {
+        tracing::warn!(
+            count,
+            "Sim(3) {what} is numerically singular; using Tikhonov-regularized inverse (eps = {eps:.3e})"
+        );
+    }
     (*m + Matrix7::identity() * eps)
         .try_inverse()
         .unwrap_or_else(|| {
-            tracing::error!("Sim(3) {what}: regularized inverse also failed; using identity");
+            if let Some(count) = IDENTITY.hit() {
+                tracing::error!(
+                    count,
+                    "Sim(3) {what}: regularized inverse also failed; using identity"
+                );
+            }
             Matrix7::identity()
         })
 }

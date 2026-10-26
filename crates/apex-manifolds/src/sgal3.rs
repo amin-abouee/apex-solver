@@ -27,7 +27,7 @@
 //! - "All About the Galilean Group SGal(3)" (arXiv:2312.07555)
 
 use crate::ElementResult;
-use crate::util::check_param_block;
+use crate::util::{WarnOnce, check_param_block};
 use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
@@ -705,16 +705,28 @@ impl Tangent<SGal3> for SGal3Tangent {
 
     /// Inverse of right Jacobian.
     fn right_jacobian_inv(&self) -> <SGal3 as LieGroup>::JacobianMatrix {
+        static FAILED: WarnOnce = WarnOnce::new();
         self.right_jacobian().try_inverse().unwrap_or_else(|| {
-            tracing::error!("SGal(3) right-Jacobian inverse failed; returning identity");
+            if let Some(count) = FAILED.hit() {
+                tracing::error!(
+                    count,
+                    "SGal(3) right-Jacobian inverse failed; returning identity"
+                );
+            }
             Matrix10::identity()
         })
     }
 
     /// Inverse of left Jacobian.
     fn left_jacobian_inv(&self) -> <SGal3 as LieGroup>::JacobianMatrix {
+        static FAILED: WarnOnce = WarnOnce::new();
         self.left_jacobian().try_inverse().unwrap_or_else(|| {
-            tracing::error!("SGal(3) left-Jacobian inverse failed; returning identity");
+            if let Some(count) = FAILED.hit() {
+                tracing::error!(
+                    count,
+                    "SGal(3) left-Jacobian inverse failed; returning identity"
+                );
+            }
             Matrix10::identity()
         })
     }
