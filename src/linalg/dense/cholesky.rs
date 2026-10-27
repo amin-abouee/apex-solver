@@ -196,6 +196,7 @@ impl DenseCholeskySolver {
         self.form_normal_equations(residuals, jacobian);
         self.solve_retained(None, "the dense normal equations")
             .cloned()
+            .map_err(ErrorLogging::log)
     }
 
     /// Solve with dense Jacobian and damping (the core dense augmented implementation).
@@ -212,6 +213,7 @@ impl DenseCholeskySolver {
         self.form_normal_equations(residuals, jacobian);
         self.solve_retained(Some(damping), "the damped dense normal equations")
             .cloned()
+            .map_err(ErrorLogging::log)
     }
 
     /// [`LinearSolver::solve_augmented_equation`] that hands the step back
@@ -242,7 +244,7 @@ pub(crate) fn solve_spd(
     let llt = a
         .as_ref()
         .llt(Side::Lower)
-        .map_err(|e| map_llt_error(e, context))?;
+        .map_err(|e| map_llt_error(e, context).log())?;
     Ok(llt.solve(b))
 }
 
@@ -292,13 +294,16 @@ impl LinearSolver<DenseMode> for DenseCholeskySolver {
     }
 }
 
-/// Map faer's LLT error to our LinAlgError
+/// Map faer's LLT error to our LinAlgError.
+///
+/// Not logged here: the borrowed-step solve behind the patch tracker loses a
+/// point to a singular system on purpose, per point and per frame. The owning
+/// solves, which abort an optimizer step, log at their entry instead.
 fn map_llt_error(e: LltError, context: &'static str) -> LinAlgError {
     LinAlgError::Factorization {
         context,
         source: e.into(),
     }
-    .log()
 }
 
 #[cfg(test)]
