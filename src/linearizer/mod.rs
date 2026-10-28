@@ -76,6 +76,11 @@ pub enum LinearizerError {
     #[error("residual block {block:?} evaluated to a NaN or infinite residual")]
     NonFiniteResidual { block: FactorKey },
 
+    /// A residual block whose Jacobian holds a NaN or infinite entry at the
+    /// point it is linearized at.
+    #[error("residual block {block:?} produced a NaN or infinite Jacobian entry")]
+    NonFiniteJacobian { block: FactorKey },
+
     /// The Jacobian's sparsity pattern could not be copied for scaling.
     #[error("cannot copy the Jacobian pattern for column scaling")]
     Pattern {
@@ -330,6 +335,18 @@ pub(crate) fn compute_block_into_with(
     // NaN, which the optimizer reports as `InvalidNumericalValues`.
     if jacobian_buf.is_some() && !squared_norm.is_finite() {
         return Err(LinearizerError::NonFiniteResidual {
+            block: residual_block.residual_block_id,
+        }
+        .log());
+    }
+    // The same for the Jacobian: a non-finite entry makes every solver's
+    // answer meaningless, and some of them (QR, the Schur variants) would
+    // return a finite-looking step from it.
+    if jacobian_buf
+        .as_deref()
+        .is_some_and(|buf| buf.iter().any(|entry| !entry.is_finite()))
+    {
+        return Err(LinearizerError::NonFiniteJacobian {
             block: residual_block.residual_block_id,
         }
         .log());
@@ -661,6 +678,57 @@ mod tests {
         // A cost-only evaluation keeps the NaN for the optimizer to report.
         assert!(compute_block_into(block, &variables, &mut residual, None).is_ok());
         assert!(residual[0].is_nan());
+        Ok(())
+    }
+
+    /// A factor whose Jacobian entry is NaN while its residual stays finite.
+    struct NanJacobian;
+
+    impl crate::factors::Factor for NanJacobian {
+        fn linearize(
+            &self,
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0];
+            if let Some(mut jac) = jacobian {
+                jac[(0, 0)] = f64::NAN;
+            }
+        }
+
+        fn residual_dim(&self) -> usize {
+            1
+        }
+
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
+        }
+    }
+
+    #[test]
+    fn a_non_finite_jacobian_is_an_error_where_a_jacobian_is_formed() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
+        problem.add_residual_block(&[k], Box::new(NanJacobian), None)?;
+        let (variables, _, _) = make_index_map(&problem);
+        let block = problem
+            .residual_blocks()
+            .values()
+            .next()
+            .ok_or("no blocks")?;
+        let mut residual = vec![0.0f64; 1];
+        let mut jacobian = vec![0.0f64; 1];
+        let Err(err) = compute_block_into(block, &variables, &mut residual, Some(&mut jacobian))
+        else {
+            return Err("a NaN Jacobian must be rejected".into());
+        };
+        assert!(
+            matches!(err, LinearizerError::NonFiniteJacobian { .. }),
+            "{err}"
+        );
+        // A cost-only evaluation forms no Jacobian, so there is nothing to reject.
+        assert!(compute_block_into(block, &variables, &mut residual, None).is_ok());
         Ok(())
     }
 

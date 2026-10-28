@@ -588,6 +588,7 @@ impl GaussNewton {
             linear_solver.solve_normal_equation(residuals, scaled_jacobian)
         }
         .map_err(optimizer::linear_solve_failed)?;
+        optimizer::ensure_finite_step(&scaled_step, "Gauss-Newton")?;
 
         // Get gradient from the solver (J^T * r) — scaled when Jacobi scaling
         // is enabled, since `scaled_jacobian` is what the solver last saw.

@@ -227,6 +227,17 @@ fn assert_logged_once_with_chain(
     Ok(())
 }
 
+/// One `ERROR` event, logged where the error was built, naming `what`.
+fn assert_logged_once_at_origin(events: &[String], what: &str) -> TestResult {
+    if events.len() != 1 {
+        return Err(format!("expected one ERROR event, got {}: {events:?}", events.len()).into());
+    }
+    if !events[0].contains(what) {
+        return Err(format!("logged {:?}, which does not name {what:?}", events[0]).into());
+    }
+    Ok(())
+}
+
 fn assert_recovered(events: &[String], status: &OptimizationStatus, final_cost: f64) -> TestResult {
     if !events.is_empty() {
         return Err(format!("a recovered failure logged {events:?}").into());
@@ -262,48 +273,47 @@ fn dog_leg_recovers_a_dense_factorization_failure_silently() -> TestResult {
 }
 
 #[test]
-fn levenberg_marquardt_logs_an_unfactorizable_sparse_system_once() -> TestResult {
+fn levenberg_marquardt_logs_a_non_finite_jacobian_in_a_sparse_system_once() -> TestResult {
     let events = ErrorEvents::start()?;
     let mut problem = nan_problem(JacobianMode::Sparse)?;
-    let Err(error) =
+    let Err(_) =
         LevenbergMarquardt::with_config(LevenbergMarquardtConfig::new()).optimize(&mut problem)
     else {
         return Err("a NaN system must not solve".into());
     };
-    assert_logged_once_with_chain(&events.take(), &error, "factorization of")
+    assert_logged_once_at_origin(&events.take(), "NaN or infinite Jacobian")
 }
 
 #[test]
-fn levenberg_marquardt_logs_an_unfactorizable_dense_system_once() -> TestResult {
+fn levenberg_marquardt_logs_a_non_finite_jacobian_in_a_dense_system_once() -> TestResult {
     let events = ErrorEvents::start()?;
     let mut problem = nan_problem(JacobianMode::Dense)?;
     let config =
         LevenbergMarquardtConfig::new().with_linear_solver_type(LinearSolverType::DenseCholesky);
-    let Err(error) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {
+    let Err(_) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {
         return Err("a NaN system must not solve".into());
     };
-    assert_logged_once_with_chain(&events.take(), &error, "factorization of")
+    assert_logged_once_at_origin(&events.take(), "NaN or infinite Jacobian")
 }
 
 #[test]
-fn dog_leg_logs_exhausted_damping_once() -> TestResult {
+fn dog_leg_logs_a_non_finite_jacobian_once() -> TestResult {
     let events = ErrorEvents::start()?;
     let mut problem = nan_problem(JacobianMode::Sparse)?;
-    let Err(error) = DogLeg::with_config(DogLegConfig::new()).optimize(&mut problem) else {
+    let Err(_) = DogLeg::with_config(DogLegConfig::new()).optimize(&mut problem) else {
         return Err("a NaN system must not solve".into());
     };
-    assert_logged_once_with_chain(&events.take(), &error, "factorization of")
+    assert_logged_once_at_origin(&events.take(), "NaN or infinite Jacobian")
 }
 
 #[test]
-fn gauss_newton_logs_an_unfactorizable_system_once() -> TestResult {
+fn gauss_newton_logs_a_non_finite_jacobian_in_a_system_once() -> TestResult {
     let events = ErrorEvents::start()?;
     let mut problem = nan_problem(JacobianMode::Sparse)?;
-    let Err(error) = GaussNewton::with_config(GaussNewtonConfig::new()).optimize(&mut problem)
-    else {
+    let Err(_) = GaussNewton::with_config(GaussNewtonConfig::new()).optimize(&mut problem) else {
         return Err("a NaN system must not solve".into());
     };
-    assert_logged_once_with_chain(&events.take(), &error, "factorization of")
+    assert_logged_once_at_origin(&events.take(), "NaN or infinite Jacobian")
 }
 
 fn levenberg_marquardt_schur_case(
@@ -314,14 +324,14 @@ fn levenberg_marquardt_schur_case(
     let events = ErrorEvents::start()?;
     let mut problem = nan_schur_problem(mode, side)?;
     let config = LevenbergMarquardtConfig::new().with_linear_solver_type(solver);
-    let Err(error) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {
+    let Err(_) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {
         return Err(format!("a NaN system must not solve with {solver}").into());
     };
-    assert_logged_once_with_chain(&events.take(), &error, "singular")
+    assert_logged_once_at_origin(&events.take(), "NaN or infinite Jacobian")
 }
 
 #[test]
-fn levenberg_marquardt_logs_a_singular_eliminated_block_once() -> TestResult {
+fn levenberg_marquardt_logs_a_non_finite_eliminated_block_once() -> TestResult {
     use LinearSolverType::{ExplicitDenseSchur, ExplicitSparseSchur, ImplicitSparseSchur};
     levenberg_marquardt_schur_case(
         JacobianMode::Sparse,
@@ -337,7 +347,7 @@ fn levenberg_marquardt_logs_a_singular_eliminated_block_once() -> TestResult {
 }
 
 #[test]
-fn levenberg_marquardt_logs_an_unfactorizable_dense_reduced_system_once() -> TestResult {
+fn levenberg_marquardt_logs_a_non_finite_retained_block_once() -> TestResult {
     levenberg_marquardt_schur_case(
         JacobianMode::Dense,
         LinearSolverType::ExplicitDenseSchur,
@@ -401,4 +411,43 @@ fn levenberg_marquardt_counts_a_failed_solve_against_its_iteration_budget() -> T
         .into());
     }
     Ok(())
+}
+
+/// A rank-one system that no damping the optimizer is allowed to apply makes
+/// factorizable: the optimizer gives up, and logs the failure once with its
+/// whole chain.
+#[test]
+fn levenberg_marquardt_logs_a_damping_ceiling_failure_once_with_its_chain() -> TestResult {
+    for (mode, solver) in [
+        (JacobianMode::Sparse, LinearSolverType::SparseCholesky),
+        (JacobianMode::Dense, LinearSolverType::DenseCholesky),
+    ] {
+        let events = ErrorEvents::start()?;
+        let mut problem = rank_one_problem(mode)?;
+        let config = LevenbergMarquardtConfig::new()
+            .with_linear_solver_type(solver)
+            .with_jacobi_scaling(false)
+            .with_damping(1e-18)
+            .with_damping_bounds(1e-20, 1e-18)
+            .with_damping_update(DampingUpdate::Marquardt);
+        let Err(error) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {
+            return Err("a system that cannot be factorized must not solve".into());
+        };
+        assert_logged_once_with_chain(&events.take(), &error, "factorization of")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn gauss_newton_logs_a_singular_system_once_with_its_chain() -> TestResult {
+    let events = ErrorEvents::start()?;
+    let mut problem = rank_one_problem(JacobianMode::Dense)?;
+    let config = GaussNewtonConfig::new()
+        .with_linear_solver_type(LinearSolverType::DenseCholesky)
+        .with_jacobi_scaling(false)
+        .with_min_diagonal(0.0);
+    let Err(error) = GaussNewton::with_config(config).optimize(&mut problem) else {
+        return Err("a singular system must not solve".into());
+    };
+    assert_logged_once_with_chain(&events.take(), &error, "factorization of")
 }

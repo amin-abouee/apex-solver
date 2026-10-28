@@ -78,6 +78,13 @@ pub enum OptimizerError {
     #[error("linearization failed")]
     Linearizer(#[from] crate::linearizer::LinearizerError),
 
+    /// A linear solve returned a step with a NaN or infinite entry.
+    #[error("{optimizer} computed a step with a NaN or infinite entry at index {index}")]
+    NonFiniteStep {
+        optimizer: &'static str,
+        index: usize,
+    },
+
     /// A linear solver that does not match the problem's Jacobian mode.
     #[error("{optimizer} in {mode} Jacobian mode supports {supported}; requested {requested}")]
     UnsupportedSolver {
@@ -129,6 +136,26 @@ pub enum OptimizerError {
 
 /// Result type for optimizer operations
 pub type OptimizerResult<T> = Result<T, OptimizerError>;
+
+/// Rejects a step with a NaN or infinite entry. The solvers that factorize
+/// report their own failures, but a solve can still return a non-finite step
+/// without one (an overflowing normal matrix, a degenerate QR), and applying it
+/// would poison every variable.
+pub(crate) fn ensure_finite_step(
+    step: &Mat<f64>,
+    optimizer: &'static str,
+) -> Result<(), OptimizerError> {
+    let mut index = 0;
+    for column in 0..step.ncols() {
+        for row in 0..step.nrows() {
+            if !step[(row, column)].is_finite() {
+                return Err(OptimizerError::NonFiniteStep { optimizer, index }.log());
+            }
+            index += 1;
+        }
+    }
+    Ok(())
+}
 
 /// The error for a linear solve the optimizer gives up on.
 ///
@@ -1876,5 +1903,30 @@ mod tests {
         let state = initialize_optimization_state(&mut problem)?;
         assert_eq!(state.total_dof, 1);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod finite_step_tests {
+    use super::*;
+
+    #[test]
+    fn a_finite_step_is_accepted() {
+        let step = Mat::from_fn(3, 1, |row, _| row as f64);
+        assert!(ensure_finite_step(&step, "test").is_ok());
+    }
+
+    #[test]
+    fn a_nan_or_infinite_step_is_rejected_with_its_index() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let step = Mat::from_fn(3, 1, |row, _| if row == 2 { bad } else { 1.0 });
+            assert!(matches!(
+                ensure_finite_step(&step, "test").err(),
+                Some(OptimizerError::NonFiniteStep {
+                    optimizer: "test",
+                    index: 2
+                })
+            ));
+        }
     }
 }

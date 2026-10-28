@@ -1021,6 +1021,7 @@ impl LevenbergMarquardt {
         let scaled_step = linear_solver
             .solve_augmented_equation(residuals, scaled_jacobian, &damping)
             .map_err(OptimizerError::LinAlg)?;
+        crate::optimizer::ensure_finite_step(&scaled_step, "Levenberg-Marquardt")?;
 
         // Get the cached gradient (Jᵀr) and un-damped Hessian (JᵀJ) from the solver
         let gradient = linear_solver

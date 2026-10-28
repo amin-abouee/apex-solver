@@ -1160,6 +1160,8 @@ impl DogLeg {
             .log_chain());
         };
 
+        optimizer::ensure_finite_step(&scaled_gn_step, "Dog Leg")?;
+
         // 2. Get gradient and Hessian (cached by solve_augmented_equation)
         let gradient = linear_solver
             .get_gradient()
