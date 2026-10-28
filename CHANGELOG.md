@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover log nothing, and the optimizer that gives up logs it once with
   its chain (`ErrorLogging::log_chain`). Dog Leg stops at once on a
   non-numerical linear-solve error instead of retrying it ten times.
+- The g2o writer emits `EDGE_SE2` information in g2o's order
+  (`I11 I12 I13 I22 I23 I33`, what the reader and g2o itself expect) instead
+  of TORO's (`I11 I12 I22 I33 I13 I23`); a written SE2 graph read back had a
+  permuted, usually indefinite, information matrix. Reading was not affected.
 - A NaN or infinite residual at a linearization point is reported as
   `LinearizerError::NonFiniteResidual` instead of poisoning the system.
 - Jacobi scaling no longer falls back to the unscaled Jacobian (paired with

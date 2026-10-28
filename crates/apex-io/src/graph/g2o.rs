@@ -82,7 +82,9 @@ impl G2oLoader {
             let meas = &edge.measurement;
             let info = &edge.information;
 
-            // G2O SE2 information matrix order: i11, i12, i22, i33, i13, i23
+            // g2o's EdgeSE2 information order is the upper triangle row by
+            // row, I11 I12 I13 I22 I23 I33, which is what the reader expects
+            // (TORO's EDGE2 is the one ordered I11 I12 I22 I33 I13 I23).
             writeln!(
                 file,
                 "EDGE_SE2 {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
@@ -93,10 +95,10 @@ impl G2oLoader {
                 meas.angle(),
                 info[(0, 0)],
                 info[(0, 1)],
-                info[(1, 1)],
-                info[(2, 2)],
                 info[(0, 2)],
-                info[(1, 2)]
+                info[(1, 1)],
+                info[(1, 2)],
+                info[(2, 2)]
             )?;
         }
 
