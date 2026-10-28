@@ -196,7 +196,6 @@ impl DenseCholeskySolver {
         self.form_normal_equations(residuals, jacobian);
         self.solve_retained(None, "the dense normal equations")
             .cloned()
-            .map_err(ErrorLogging::log)
     }
 
     /// Solve with dense Jacobian and damping (the core dense augmented implementation).
@@ -213,7 +212,6 @@ impl DenseCholeskySolver {
         self.form_normal_equations(residuals, jacobian);
         self.solve_retained(Some(damping), "the damped dense normal equations")
             .cloned()
-            .map_err(ErrorLogging::log)
     }
 
     /// [`LinearSolver::solve_augmented_equation`] that hands the step back
@@ -244,7 +242,7 @@ pub(crate) fn solve_spd(
     let llt = a
         .as_ref()
         .llt(Side::Lower)
-        .map_err(|e| map_llt_error(e, context).log())?;
+        .map_err(|e| map_llt_error(e, context))?;
     Ok(llt.solve(b))
 }
 
@@ -296,14 +294,13 @@ impl LinearSolver<DenseMode> for DenseCholeskySolver {
 
 /// Map faer's LLT error to our LinAlgError.
 ///
-/// Not logged here: the borrowed-step solve behind the patch tracker loses a
-/// point to a singular system on purpose, per point and per frame. The owning
-/// solves, which abort an optimizer step, log at their entry instead.
+/// A non-positive pivot is [numerical](LinAlgError::is_numerical), so it is
+/// not logged here: the patch tracker loses a point to a singular system on
+/// purpose, per point and per frame, and a damped optimizer retries it with a
+/// larger damping. The optimizer that gives up logs it.
+#[track_caller]
 fn map_llt_error(e: LltError, context: &'static str) -> LinAlgError {
-    LinAlgError::Factorization {
-        context,
-        source: e.into(),
-    }
+    LinAlgError::factorization(context, e.into())
 }
 
 #[cfg(test)]

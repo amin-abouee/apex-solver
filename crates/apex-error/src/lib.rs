@@ -6,6 +6,9 @@
 //!
 //! - [`ErrorLogging`]: log an error exactly once, where it is first built, with
 //!   the caller's file and line; everything above propagates it with a bare `?`.
+//!   An expected outcome a caller may retry (a factorization a larger damping
+//!   cures) is not logged where it is built; the caller that gives up on it
+//!   logs it once with [`ErrorLogging::log_chain`].
 //! - [`ErrorChainExt`]: render an error and its `source()` chain at the
 //!   boundary that reports it.
 //!
@@ -64,6 +67,23 @@ pub trait ErrorLogging: Error + Sized {
     fn log_with_source<S: Debug>(self, source: S) -> Self {
         let at = Location::caller();
         tracing::error!(file = at.file(), line = at.line(), source = ?source, "{self}");
+        self
+    }
+
+    /// Like [`ErrorLogging::log`], with the whole `source()` chain as the
+    /// message (`outer → cause → root cause`). For an error logged by the
+    /// caller that gives up on it rather than where it was built: an expected
+    /// outcome the caller may retry is not logged at its origin, so its
+    /// causes are logged here, once.
+    #[track_caller]
+    fn log_chain(self) -> Self {
+        let at = Location::caller();
+        tracing::error!(
+            file = at.file(),
+            line = at.line(),
+            "{}",
+            self.chain_compact()
+        );
         self
     }
 }
@@ -159,6 +179,15 @@ mod tests {
     fn logging_returns_the_same_error() {
         let error = Leaf { at: 2 }.log_with_source("context");
         assert_eq!(error.at, 2);
+    }
+
+    #[test]
+    fn logging_the_chain_returns_the_same_error() {
+        let error = Middle::from(Leaf { at: 4 }).log_chain();
+        assert_eq!(
+            error.chain_compact(),
+            "middle step failed → leaf failed at 4"
+        );
     }
 
     #[test]

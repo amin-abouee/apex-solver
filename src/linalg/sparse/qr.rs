@@ -91,13 +91,8 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         };
 
         // Perform numeric factorization using the symbolic structure
-        let qr = Qr::try_new_with_symbolic(sym, hessian.as_ref()).map_err(|e| {
-            LinAlgError::Factorization {
-                context: "the normal equations",
-                source: e.into(),
-            }
-            .log()
-        })?;
+        let qr = Qr::try_new_with_symbolic(sym, hessian.as_ref())
+            .map_err(|e| LinAlgError::factorization("the normal equations", e.into()))?;
 
         // Solve H * dx = -g (negate gradient to get descent direction)
         let dx = qr.solve(-&gradient);
@@ -140,13 +135,8 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         };
 
         // Perform numeric factorization
-        let qr = Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref()).map_err(|e| {
-            LinAlgError::Factorization {
-                context: "the damped normal equations",
-                source: e.into(),
-            }
-            .log()
-        })?;
+        let qr = Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref())
+            .map_err(|e| LinAlgError::factorization("the damped normal equations", e.into()))?;
 
         let dx = qr.solve(-&gradient);
         self.hessian = Some(hessian);

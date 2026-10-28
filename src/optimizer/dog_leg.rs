@@ -1138,9 +1138,12 @@ impl DogLeg {
                     scaled_gn_step = Some(step);
                     break;
                 }
-                // A failed solve is retried with a larger μ; only the last
-                // failure is kept as the cause if every attempt fails.
-                Err(error) => last_failure = Some(error),
+                // A numerical failure is retried with a larger μ, unlogged;
+                // only the last one is kept as the cause if every attempt
+                // fails. Any other failure (already logged where it was
+                // built) does not depend on μ and ends the run.
+                Err(error) if error.is_numerical() => last_failure = Some(error),
+                Err(error) => return Err(error.into()),
             }
 
             // Increase mu (Ceres-style)
@@ -1154,7 +1157,7 @@ impl DogLeg {
                 mu: self.mu,
                 source: last_failure,
             }
-            .log());
+            .log_chain());
         };
 
         // 2. Get gradient and Hessian (cached by solve_augmented_equation)

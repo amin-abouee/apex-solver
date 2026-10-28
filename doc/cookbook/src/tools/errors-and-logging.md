@@ -76,6 +76,15 @@ not log again. Expected per-residual outcomes — a point that does not project,
 a scan point outside a distance field — are returned unlogged, because the
 caller decides whether they matter.
 
+A linear system that will not factorize is such an outcome too
+(`LinAlgError::is_numerical`: a non-positive pivot, a singular `H_ee` block, a
+Schur complement singular through every regularization). Dog Leg retries it
+with a larger μ, so a recovered failure logs nothing. The optimizer that gives
+up — Levenberg-Marquardt and Gauss-Newton on the first failed solve, Dog Leg
+with `DampingExhausted` — logs it once with `.log_chain()`, whose message is
+the whole chain. Structural failures (dimension mismatch, uninitialized
+solver, out-of-memory) are still logged where they are built.
+
 ## 4. Registration never panics
 
 `Problem::add_residual_block`, `add_residual_block_with_noise`,

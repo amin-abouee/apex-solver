@@ -130,6 +130,20 @@ pub enum OptimizerError {
 /// Result type for optimizer operations
 pub type OptimizerResult<T> = Result<T, OptimizerError>;
 
+/// The error for a linear solve the optimizer gives up on.
+///
+/// A [numerical](linalg::LinAlgError::is_numerical) failure is not logged
+/// where it is built, since a larger damping may cure it, so it is logged
+/// here, once, with its chain. Every other linear-algebra error was logged
+/// at its origin and passes through unlogged.
+pub(crate) fn linear_solve_failed(error: linalg::LinAlgError) -> OptimizerError {
+    if error.is_numerical() {
+        OptimizerError::LinAlg(error).log_chain()
+    } else {
+        OptimizerError::LinAlg(error)
+    }
+}
+
 /// Detailed convergence information.
 #[derive(Debug, Clone)]
 pub struct ConvergenceInfo {

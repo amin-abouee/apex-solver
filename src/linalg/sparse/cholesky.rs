@@ -86,14 +86,8 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
         };
 
         // Perform numeric factorization using the symbolic structure
-        let cholesky =
-            Llt::try_new_with_symbolic(sym, hessian.as_ref(), Side::Lower).map_err(|e| {
-                LinAlgError::Factorization {
-                    context: "the normal equations",
-                    source: e.into(),
-                }
-                .log()
-            })?;
+        let cholesky = Llt::try_new_with_symbolic(sym, hessian.as_ref(), Side::Lower)
+            .map_err(|e| LinAlgError::factorization("the normal equations", e.into()))?;
 
         let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);
@@ -137,13 +131,7 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
 
         // Perform numeric factorization
         let cholesky = Llt::try_new_with_symbolic(sym, augmented_hessian.as_ref(), Side::Lower)
-            .map_err(|e| {
-                LinAlgError::Factorization {
-                    context: "the damped normal equations",
-                    source: e.into(),
-                }
-                .log()
-            })?;
+            .map_err(|e| LinAlgError::factorization("the damped normal equations", e.into()))?;
 
         let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);

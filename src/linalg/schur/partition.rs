@@ -537,8 +537,11 @@ impl EliminatedBlocks {
     }
 }
 
+/// Not logged: a singular block is [numerical](LinAlgError::is_numerical),
+/// and a larger damping on `H_ee` may cure it. The optimizer that gives up
+/// logs it.
 fn singular(key: VarKey, dof: usize) -> LinAlgError {
-    LinAlgError::SingularBlock { key, dof }.log()
+    LinAlgError::SingularBlock { key, dof }
 }
 
 #[cfg(test)]

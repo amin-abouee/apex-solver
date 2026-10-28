@@ -784,12 +784,12 @@ impl ExplicitSparseSchur {
             }
         }
 
+        // Not logged: numerical, so the optimizer that gives up logs it.
         Err(LinAlgError::SingularAfterRegularization {
             context: "the Schur complement",
             attempts: 5,
             max_shift: base_reg,
-        }
-        .log())
+        })
     }
 
     /// Solve using Preconditioned Conjugate Gradients (PCG).

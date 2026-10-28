@@ -268,10 +268,25 @@ pub enum FaerFailure {
     Creation(#[from] faer::sparse::CreationError),
 }
 
+impl FaerFailure {
+    /// A non-positive pivot: the values are not positive definite. Every
+    /// other failure (allocation, index type) is about resources, not values.
+    fn is_numerical(&self) -> bool {
+        matches!(
+            self,
+            Self::DenseLlt(_) | Self::SparseLlt(faer::sparse::linalg::LltError::Numeric(_))
+        )
+    }
+}
+
 /// Errors of the linear solvers and factorizations.
 ///
-/// Logged once where they are built; the optimizer and covariance code that
-/// call the solvers propagate them with a bare `?`.
+/// Logged once where they are built, and the optimizer and covariance code
+/// that call the solvers propagate them with a bare `?` — except the
+/// [numerical](LinAlgError::is_numerical) ones. A system that will not
+/// factorize at one damping is an expected outcome that a damped optimizer
+/// retries with a larger one, so it is not logged where it is built; the
+/// caller that gives up on it logs it once, with its chain.
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum LinAlgError {
@@ -395,6 +410,32 @@ pub enum LinAlgError {
     /// Damping bounds in the wrong order.
     #[error("min_diagonal ({min}) must not exceed max_diagonal ({max})")]
     DampingRange { min: f64, max: f64 },
+}
+
+impl LinAlgError {
+    /// Whether the system's values, not its structure or inputs, failed: a
+    /// non-positive pivot or a singular block. A larger damping can cure it,
+    /// so it is not logged where it is built; the caller that gives up on it
+    /// logs it (see [`ErrorLogging::log_chain`]).
+    pub fn is_numerical(&self) -> bool {
+        match self {
+            Self::Factorization { source, .. } => source.is_numerical(),
+            Self::SingularAfterRegularization { .. } | Self::SingularBlock { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// A failed numeric factorization of `context`, logged here unless it is
+    /// [numerical](Self::is_numerical).
+    #[track_caller]
+    pub(crate) fn factorization(context: &'static str, source: FaerFailure) -> Self {
+        let error = Self::Factorization { context, source };
+        if error.is_numerical() {
+            error
+        } else {
+            error.log()
+        }
+    }
 }
 
 /// Result type for linear algebra operations

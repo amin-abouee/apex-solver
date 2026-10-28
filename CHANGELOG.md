@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Linear-solve and Schur-setup errors are logged once where they occur, not
   again by the optimizers; the observers no longer re-log their errors.
+- A numerical factorization failure (non-positive pivot, singular `H_ee`
+  block) is no longer logged where it is built: Dog Leg's μ retries that
+  recover log nothing, and the optimizer that gives up logs it once with
+  its chain (`ErrorLogging::log_chain`). Dog Leg stops at once on a
+  non-numerical linear-solve error instead of retrying it ten times.
 - A NaN or infinite residual at a linearization point is reported as
   `LinearizerError::NonFiniteResidual` instead of poisoning the system.
 - Jacobi scaling no longer falls back to the unscaled Jacobian (paired with

@@ -1016,8 +1016,10 @@ impl LevenbergMarquardt {
             self.config.min_diagonal,
             self.config.max_diagonal,
         )?;
-        let scaled_step =
-            linear_solver.solve_augmented_equation(residuals, scaled_jacobian, &damping)?;
+        // A failed solve ends the run, so a numerical failure is logged here.
+        let scaled_step = linear_solver
+            .solve_augmented_equation(residuals, scaled_jacobian, &damping)
+            .map_err(crate::optimizer::linear_solve_failed)?;
 
         // Get the cached gradient (Jᵀr) and un-damped Hessian (JᵀJ) from the solver
         let gradient = linear_solver
