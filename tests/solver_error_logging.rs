@@ -18,8 +18,8 @@ use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::{
-    DogLeg, ErrorChainExt, GaussNewton, JacobianMode, LevenbergMarquardt, LevenbergMarquardtConfig,
-    LinearSolverType, ManifoldType,
+    DampingUpdate, DogLeg, ErrorChainExt, GaussNewton, JacobianMode, LevenbergMarquardt,
+    LevenbergMarquardtConfig, LinearSolverType, ManifoldType,
 };
 use faer::prelude::ReborrowMut;
 use nalgebra::dvector;
@@ -343,4 +343,62 @@ fn levenberg_marquardt_logs_an_unfactorizable_dense_reduced_system_once() -> Tes
         LinearSolverType::ExplicitDenseSchur,
         NanSide::Retained,
     )
+}
+
+/// Levenberg-Marquardt starting at λ = 1e-18, where `1 + λ == 1` and the
+/// rank-one system is exactly singular; one ×1e4 increase reaches λ = 1e-14,
+/// which factorizes.
+fn levenberg_marquardt_one_retry(solver: LinearSolverType) -> LevenbergMarquardt {
+    LevenbergMarquardt::with_config(
+        LevenbergMarquardtConfig::new()
+            .with_linear_solver_type(solver)
+            .with_jacobi_scaling(false)
+            .with_damping(1e-18)
+            .with_damping_bounds(1e-20, 1e12)
+            .with_damping_update(DampingUpdate::Marquardt)
+            .with_damping_factors(1e4, 0.3),
+    )
+}
+
+#[test]
+fn levenberg_marquardt_raises_its_damping_after_a_failed_sparse_solve() -> TestResult {
+    let events = ErrorEvents::start()?;
+    let mut problem = rank_one_problem(JacobianMode::Sparse)?;
+    let result =
+        levenberg_marquardt_one_retry(LinearSolverType::SparseCholesky).optimize(&mut problem)?;
+    assert_recovered(&events.take(), &result.status, result.final_cost)
+}
+
+#[test]
+fn levenberg_marquardt_raises_its_damping_after_a_failed_dense_solve() -> TestResult {
+    let events = ErrorEvents::start()?;
+    let mut problem = rank_one_problem(JacobianMode::Dense)?;
+    let result =
+        levenberg_marquardt_one_retry(LinearSolverType::DenseCholesky).optimize(&mut problem)?;
+    assert_recovered(&events.take(), &result.status, result.final_cost)
+}
+
+#[test]
+fn levenberg_marquardt_counts_a_failed_solve_against_its_iteration_budget() -> TestResult {
+    let events = ErrorEvents::start()?;
+    let mut problem = rank_one_problem(JacobianMode::Sparse)?;
+    let config = LevenbergMarquardtConfig::new()
+        .with_jacobi_scaling(false)
+        .with_damping(1e-18)
+        .with_damping_bounds(1e-20, 1e12)
+        .with_damping_update(DampingUpdate::Marquardt)
+        .with_damping_factors(1e4, 0.3)
+        .with_max_iterations(1);
+    let result = LevenbergMarquardt::with_config(config).optimize(&mut problem)?;
+    if !events.take().is_empty() {
+        return Err("a failed solve that is retried must not log".into());
+    }
+    if result.status != OptimizationStatus::MaxIterationsReached {
+        return Err(format!(
+            "expected the iteration budget to end it, got {:?}",
+            result.status
+        )
+        .into());
+    }
+    Ok(())
 }

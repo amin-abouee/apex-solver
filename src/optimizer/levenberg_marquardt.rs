@@ -1016,10 +1016,11 @@ impl LevenbergMarquardt {
             self.config.min_diagonal,
             self.config.max_diagonal,
         )?;
-        // A failed solve ends the run, so a numerical failure is logged here.
+        // Not logged here: a numerical failure is cured by a larger λ, which
+        // the main loop applies. It is logged once, where the loop gives up.
         let scaled_step = linear_solver
             .solve_augmented_equation(residuals, scaled_jacobian, &damping)
-            .map_err(crate::optimizer::linear_solve_failed)?;
+            .map_err(OptimizerError::LinAlg)?;
 
         // Get the cached gradient (Jᵀr) and un-damped Hessian (JᵀJ) from the solver
         let gradient = linear_solver
@@ -1161,8 +1162,8 @@ impl LevenbergMarquardt {
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
         let mut total_cost_reduction = 0.0;
-        let mut final_gradient_norm;
-        let mut final_parameter_update_norm;
+        let mut final_gradient_norm = 0.0;
+        let mut final_parameter_update_norm = 0.0;
 
         // Initialize iteration statistics tracking
         let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
@@ -1213,7 +1214,50 @@ impl LevenbergMarquardt {
 
             // Compute optimization step
             let step_result =
-                self.compute_step_generic::<M>(&residuals, &scaled_jacobian, linear_solver)?;
+                match self.compute_step_generic::<M>(&residuals, &scaled_jacobian, linear_solver) {
+                    Ok(step_result) => step_result,
+                    // A system that will not factorize at this λ is a rejected
+                    // trial, not the end of the run: raise λ and try again, as
+                    // for a step that did not reduce the cost. Only once λ is
+                    // at its ceiling is there nothing left to try.
+                    Err(OptimizerError::LinAlg(error))
+                        if error.is_numerical() && self.damping < self.config.damping_max =>
+                    {
+                        self.update_damping(f64::NEG_INFINITY, false);
+                        unsuccessful_steps += 1;
+                        consecutive_rejected += 1;
+                        iteration += 1;
+                        let elapsed = start_time.elapsed();
+                        let exhausted = if iteration >= self.config.max_iterations {
+                            Some(crate::optimizer::OptimizationStatus::MaxIterationsReached)
+                        } else if self.config.timeout.is_some_and(|limit| elapsed >= limit) {
+                            Some(crate::optimizer::OptimizationStatus::Timeout)
+                        } else {
+                            None
+                        };
+                        if let Some(status) = exhausted {
+                            self.observers.notify_complete(&state.variables, iteration);
+                            return Ok(crate::optimizer::build_solver_result(
+                                status,
+                                iteration,
+                                state,
+                                elapsed,
+                                crate::optimizer::ConvergenceInfo {
+                                    final_gradient_norm,
+                                    final_parameter_update_norm,
+                                    cost_evaluations,
+                                    jacobian_evaluations,
+                                },
+                                None,
+                            ));
+                        }
+                        continue;
+                    }
+                    Err(OptimizerError::LinAlg(error)) => {
+                        return Err(crate::optimizer::linear_solve_failed(error));
+                    }
+                    Err(error) => return Err(error),
+                };
 
             // Update tracking variables
             max_gradient_norm = max_gradient_norm.max(step_result.gradient_norm);
