@@ -928,7 +928,9 @@ impl Problem {
             match crate::linalg::covariance::Covariance::compute(options, self, variables) {
                 Ok(covariance) => covariance,
                 Err(e) => {
-                    tracing::error!("Covariance estimation failed: {e}");
+                    // The error was logged where it was built; this only says
+                    // that the caller carries on without covariances.
+                    tracing::warn!("covariances unavailable: {}", crate::error::ErrorChainExt::chain_compact(&e));
                     return None;
                 }
             };
