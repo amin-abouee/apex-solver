@@ -1185,4 +1185,113 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Every entry of `actual` equals `expected` (the writer prints 17
+    /// significant digits, so a round trip is exact).
+    fn assert_same_matrix<const N: usize>(
+        actual: &nalgebra::SMatrix<f64, N, N>,
+        expected: &nalgebra::SMatrix<f64, N, N>,
+    ) -> TestResult {
+        for i in 0..N {
+            for j in 0..N {
+                if actual[(i, j)] != expected[(i, j)] {
+                    return Err(format!(
+                        "information ({i}, {j}) is {}, expected {}\n{actual}",
+                        actual[(i, j)],
+                        expected[(i, j)]
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn edge_se2_information_survives_a_round_trip() -> TestResult {
+        let mut graph = Graph::new();
+        graph
+            .vertices_se2
+            .insert(0, VertexSE2::new(0, 0.0, 0.0, 0.0));
+        graph
+            .vertices_se2
+            .insert(1, VertexSE2::new(1, 1.0, 0.0, 0.0));
+        // Every upper-triangle entry distinct, so any reordering shows.
+        let info = Matrix3::new(11.0, 1.5, 0.25, 1.5, 22.0, -0.75, 0.25, -0.75, 33.0);
+        graph
+            .edges_se2
+            .push(EdgeSE2::new(0, 1, 1.0, 0.5, 0.1, info));
+
+        let f = NamedTempFile::new()?;
+        G2oLoader::write(&graph, f.path())?;
+        let loaded = G2oLoader::load(f.path())?;
+
+        let edge = loaded
+            .edges_se2
+            .first()
+            .ok_or("the edge was not read back")?;
+        assert_same_matrix(&edge.information, &info)
+    }
+
+    #[test]
+    fn edge_se3_information_survives_a_round_trip() -> TestResult {
+        let rot = UnitQuaternion::from_euler_angles(0.1, -0.2, 0.3);
+        let mut graph = Graph::new();
+        graph
+            .vertices_se3
+            .insert(0, VertexSE3::new(0, Vector3::zeros(), rot));
+        graph
+            .vertices_se3
+            .insert(1, VertexSE3::new(1, Vector3::new(1.0, 2.0, 3.0), rot));
+        // Symmetric, every upper-triangle entry distinct.
+        let info = Matrix6::from_fn(|i, j| {
+            let (low, high) = (i.min(j), i.max(j));
+            if low == high {
+                100.0 * (low + 1) as f64
+            } else {
+                0.5 * (low * 6 + high) as f64 - 4.0
+            }
+        });
+        graph
+            .edges_se3
+            .push(EdgeSE3::new(0, 1, Vector3::new(1.0, 2.0, 3.0), rot, info));
+
+        let f = NamedTempFile::new()?;
+        G2oLoader::write(&graph, f.path())?;
+        let loaded = G2oLoader::load(f.path())?;
+
+        let edge = loaded
+            .edges_se3
+            .first()
+            .ok_or("the edge was not read back")?;
+        assert_same_matrix(&edge.information, &info)
+    }
+
+    /// The reader follows g2o's `EdgeSE2::read`: the upper triangle row by
+    /// row, `I11 I12 I13 I22 I23 I33`. The line is the first edge of the
+    /// Intel dataset, whose only off-diagonal entry is `I12`.
+    #[test]
+    fn edge_se2_information_is_read_in_g2o_order() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(
+            f,
+            "EDGE_SE2 0 1 0.000000 0.000000 -0.000642 \
+             11.111271 -0.249667 0.000000 399.999840 0.000000 2496.793089"
+        )?;
+        f.flush()?;
+        let graph = G2oLoader::load(f.path())?;
+        let edge = graph.edges_se2.first().ok_or("the edge was not read")?;
+        let expected = Matrix3::new(
+            11.111271,
+            -0.249667,
+            0.0,
+            -0.249667,
+            399.999840,
+            0.0,
+            0.0,
+            0.0,
+            2496.793089,
+        );
+        assert_same_matrix(&edge.information, &expected)
+    }
 }

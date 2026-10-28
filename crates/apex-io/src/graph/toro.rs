@@ -554,6 +554,20 @@ mod tests {
         Ok(())
     }
 
+    /// TORO orders the information `I11 I12 I22 I33 I13 I23`, unlike
+    /// g2o's upper triangle; distinct entries pin each one to its place.
+    #[test]
+    fn edge2_information_is_read_in_toro_order() -> TestResult {
+        let f = write_toro_content("EDGE2 0 1 1.0 0.0 0.0 11.0 1.5 22.0 33.0 0.25 -0.75\n")?;
+        let graph = ToroLoader::load(f.path())?;
+        let edge = graph.edges_se2.first().ok_or("the edge was not read")?;
+        let expected = Matrix3::new(11.0, 1.5, 0.25, 1.5, 22.0, -0.75, 0.25, -0.75, 33.0);
+        if edge.information != expected {
+            return Err(format!("read {}, expected {expected}", edge.information).into());
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_off_diagonal_info_matrix_round_trip() -> TestResult {
         let mut graph = Graph::new();
