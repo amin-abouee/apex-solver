@@ -930,7 +930,10 @@ impl Problem {
                 Err(e) => {
                     // The error was logged where it was built; this only says
                     // that the caller carries on without covariances.
-                    tracing::warn!("covariances unavailable: {}", crate::error::ErrorChainExt::chain_compact(&e));
+                    tracing::warn!(
+                        "covariances unavailable: {}",
+                        crate::error::ErrorChainExt::chain_compact(&e)
+                    );
                     return None;
                 }
             };
