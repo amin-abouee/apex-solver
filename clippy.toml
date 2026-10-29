@@ -1,0 +1,6 @@
+# Tests are not exempt from the no-unwrap/no-expect rule. These are clippy's current
+# defaults; pinning them explicitly means a future change to those defaults
+# cannot silently exempt test code.
+allow-unwrap-in-tests = false
+allow-expect-in-tests = false
+allow-panic-in-tests  = false
