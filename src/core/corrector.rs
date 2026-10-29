@@ -52,7 +52,7 @@
 //! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! use nalgebra::{DVector, DMatrix};
 //! # use apex_solver::core::CoreResult;
-//! # fn example() -> CoreResult<()> {
+//! # fn main() -> CoreResult<()> {
 //!
 //! // Create a robust loss function
 //! let loss = HuberLoss::new(1.0)?;
@@ -84,7 +84,6 @@
 //! // Outliers have been downweighted appropriately
 //! # Ok(())
 //! # }
-//! # example().unwrap();
 //! ```
 
 use crate::core::loss_functions::LossFunction;
@@ -130,7 +129,7 @@ impl Corrector {
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use nalgebra::DVector;
     /// # use apex_solver::core::CoreResult;
-    /// # fn example() -> CoreResult<()> {
+    /// # fn main() -> CoreResult<()> {
     ///
     /// let loss = HuberLoss::new(1.0)?;
     /// let residual = DVector::from_vec(vec![1.0, 2.0, 3.0]);
@@ -140,7 +139,6 @@ impl Corrector {
     /// // corrector is now ready to apply corrections
     /// # Ok(())
     /// # }
-    /// # example().unwrap();
     /// ```
     pub fn new(loss_function: &dyn LossFunction, sq_norm: f64) -> Self {
         // Evaluate loss function: [ρ(s), ρ'(s), ρ''(s)]

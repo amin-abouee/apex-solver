@@ -62,7 +62,7 @@
 //! ```
 //! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! # use apex_solver::core::CoreResult;
-//! # fn example() -> CoreResult<()> {
+//! # fn main() -> CoreResult<()> {
 //!
 //! let huber = HuberLoss::new(1.345)?;
 //!
@@ -79,7 +79,6 @@
 //! // rho_prime < 1.0, downweighting the outlier
 //! # Ok(())
 //! # }
-//! # example().unwrap();
 //! ```
 
 use crate::core::{CoreError, CoreResult};
@@ -340,7 +339,7 @@ impl LossFunction for L1Loss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// // Create Huber loss with scale = 1.345 (standard choice)
 /// let huber = HuberLoss::new(1.345)?;
@@ -357,7 +356,6 @@ impl LossFunction for L1Loss {
 /// // ρ'(10) ≈ 0.425, downweighted to ~42.5% of original
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct HuberLoss {
@@ -383,12 +381,11 @@ impl HuberLoss {
     /// ```
     /// use apex_solver::core::loss_functions::HuberLoss;
     /// # use apex_solver::core::CoreResult;
-    /// # fn example() -> CoreResult<()> {
+    /// # fn main() -> CoreResult<()> {
     ///
     /// let huber = HuberLoss::new(1.345)?;
     /// # Ok(())
     /// # }
-    /// # example().unwrap();
     /// ```
     pub fn new(scale: f64) -> CoreResult<Self> {
         let scale = finite_positive("HuberLoss", "scale", scale)?;
@@ -470,7 +467,7 @@ impl LossFunction for HuberLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, CauchyLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// // Create Cauchy loss with scale = 2.3849 (standard choice)
 /// let cauchy = CauchyLoss::new(2.3849)?;
@@ -486,7 +483,6 @@ impl LossFunction for HuberLoss {
 /// // ρ' ≈ 0.05, heavily downweighted (5% of original)
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 pub struct CauchyLoss {
     /// Cached value δ² (scale squared)
@@ -511,12 +507,11 @@ impl CauchyLoss {
     /// ```
     /// use apex_solver::core::loss_functions::CauchyLoss;
     /// # use apex_solver::core::CoreResult;
-    /// # fn example() -> CoreResult<()> {
+    /// # fn main() -> CoreResult<()> {
     ///
     /// let cauchy = CauchyLoss::new(2.3849)?;
     /// # Ok(())
     /// # }
-    /// # example().unwrap();
     /// ```
     pub fn new(scale: f64) -> CoreResult<Self> {
         let scale = finite_positive("CauchyLoss", "scale", scale)?;
@@ -601,7 +596,7 @@ impl LossFunction for CauchyLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, FairLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// let fair = FairLoss::new(1.3998)?;
 ///
@@ -609,7 +604,6 @@ impl LossFunction for CauchyLoss {
 /// // Smooth transition, no sharp corners
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct FairLoss {
@@ -689,7 +683,7 @@ impl LossFunction for FairLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, GemanMcClureLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// let geman = GemanMcClureLoss::new(1.0)?;
 ///
@@ -697,7 +691,6 @@ impl LossFunction for FairLoss {
 /// // Very small weight for large outliers
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct GemanMcClureLoss {
@@ -775,7 +768,7 @@ impl LossFunction for GemanMcClureLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, DcsLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// let dcs = DcsLoss::new(1.0)?;
 ///
@@ -785,7 +778,6 @@ impl LossFunction for GemanMcClureLoss {
 /// assert_eq!(rho_prime, 1.0);
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct DcsLoss {
@@ -852,7 +844,7 @@ impl LossFunction for DcsLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, WelschLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// let welsch = WelschLoss::new(2.9846)?;
 ///
@@ -860,7 +852,6 @@ impl LossFunction for DcsLoss {
 /// // Weight approaches zero for large residuals
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct WelschLoss {
@@ -938,7 +929,7 @@ impl LossFunction for WelschLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, TukeyBiweightLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// let tukey = TukeyBiweightLoss::new(4.6851)?;
 ///
@@ -946,7 +937,6 @@ impl LossFunction for WelschLoss {
 /// assert_eq!(rho_prime, 0.0); // Complete suppression
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct TukeyBiweightLoss {
@@ -1034,7 +1024,7 @@ impl LossFunction for TukeyBiweightLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, AndrewsWaveLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// let andrews = AndrewsWaveLoss::new(1.339)?;
 ///
@@ -1042,7 +1032,6 @@ impl LossFunction for TukeyBiweightLoss {
 /// // Weight is zero for large outliers
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct AndrewsWaveLoss {
@@ -1132,7 +1121,7 @@ impl LossFunction for AndrewsWaveLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, RamsayEaLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// let ramsay = RamsayEaLoss::new(0.3)?;
 ///
@@ -1140,7 +1129,6 @@ impl LossFunction for AndrewsWaveLoss {
 /// // Exponential downweighting
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct RamsayEaLoss {
@@ -1225,7 +1213,7 @@ impl LossFunction for RamsayEaLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, TrimmedMeanLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// let trimmed = TrimmedMeanLoss::new(2.0)?;
 ///
@@ -1233,7 +1221,6 @@ impl LossFunction for RamsayEaLoss {
 /// assert_eq!(rho_prime, 0.0); // Beyond threshold
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct TrimmedMeanLoss {
@@ -1304,7 +1291,7 @@ impl LossFunction for TrimmedMeanLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, LpNormLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// let lp = LpNormLoss::new(1.5)?;
 ///
@@ -1312,7 +1299,6 @@ impl LossFunction for TrimmedMeanLoss {
 /// // Between L1 and L2 behavior
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct LpNormLoss {
@@ -1401,7 +1387,7 @@ impl LossFunction for LpNormLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, BarronGeneralLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// // Cauchy-like behavior
 /// let barron = BarronGeneralLoss::new(0.0, 1.0)?;
@@ -1410,7 +1396,6 @@ impl LossFunction for LpNormLoss {
 /// // Behaves like Cauchy loss
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct BarronGeneralLoss {
@@ -1528,7 +1513,7 @@ impl LossFunction for BarronGeneralLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, TDistributionLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// let t_loss = TDistributionLoss::new(5.0)?;
 ///
@@ -1536,7 +1521,6 @@ impl LossFunction for BarronGeneralLoss {
 /// // Robust to outliers with heavy tails
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct TDistributionLoss {
@@ -1642,7 +1626,7 @@ impl LossFunction for TDistributionLoss {
 /// ```
 /// use apex_solver::core::loss_functions::{LossFunction, AdaptiveBarronLoss};
 /// # use apex_solver::core::CoreResult;
-/// # fn example() -> CoreResult<()> {
+/// # fn main() -> CoreResult<()> {
 ///
 /// // Default Cauchy-like behavior
 /// let adaptive = AdaptiveBarronLoss::new(0.0, 1.0)?;
@@ -1651,7 +1635,6 @@ impl LossFunction for TDistributionLoss {
 /// // Adaptive robust behavior
 /// # Ok(())
 /// # }
-/// # example().unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct AdaptiveBarronLoss {

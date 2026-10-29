@@ -24,7 +24,8 @@ target
 #.idea/
 
 profiles/
-scripts/
+scripts/*
+!scripts/check-conventions.sh
 output/
 *.csv
 # ...but the figure sidecar data behind doc/plots/ (2026-09-27 session means

@@ -6,21 +6,27 @@
 //! # Usage in tests
 //!
 //! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use apex_io::ensure_odometry_dataset;
 //!
-//! let path = ensure_odometry_dataset("sphere2500").expect("failed to fetch dataset");
+//! let path = ensure_odometry_dataset("sphere2500")?;
 //! // path == "data/odometry/3d/sphere2500.g2o"
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Usage in the download binary
 //!
 //! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use apex_io::utils::DatasetRegistry;
 //!
-//! let registry = DatasetRegistry::load().unwrap();
+//! let registry = DatasetRegistry::load()?;
 //! for (name, entry) in registry.odometry_by_category("3d") {
 //!     println!("{name}: {}", entry.url);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::collections::HashMap;

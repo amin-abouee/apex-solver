@@ -43,3 +43,15 @@ jobs:
 
       - name: Run Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # clippy denies unwrap/expect/allow but has no lint for `#[expect]` and does
+  # not read doc examples, so a grep over the tracked sources closes both.
+  conventions:
+    name: No unwrap, expect or lint suppression
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check conventions
+        run: ./scripts/check-conventions.sh
