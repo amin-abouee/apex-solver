@@ -1,8 +1,8 @@
 //! Metadata parsing for ROS2 bag files
 
 use super::error::{Ros2BagError, Ros2BagResult as Result};
+use crate::error::ErrorLogging;
 use crate::rosbag::types::{Duration, QosProfile, StartingTime};
-use apex_error::ErrorLogging;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;

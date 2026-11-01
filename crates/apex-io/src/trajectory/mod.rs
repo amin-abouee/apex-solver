@@ -32,7 +32,7 @@ pub mod types;
 
 use std::path::Path;
 
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use apex_manifolds::se3::SE3;
 use nalgebra::Vector3;
 

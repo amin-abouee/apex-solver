@@ -1,10 +1,10 @@
 use super::error::{DdsError, Result};
 use super::qos_mapping::{to_dds_durability, to_dds_history, to_dds_reliability};
 use super::raw_bytes::{RawBytes, RawBytesAdapter};
+use crate::error::{ErrorChainExt, ErrorLogging};
 use crate::rosbag::types::{
     Connection, MessageDefinition, QosDurability, QosReliability, RawMessage,
 };
-use apex_error::{ErrorChainExt, ErrorLogging};
 use futures::StreamExt;
 use rustdds::{DomainParticipant, QosPolicyBuilder, TopicKind};
 use tokio::sync::mpsc;

@@ -33,7 +33,7 @@ use super::error::{LayoutError, Result, VrsError};
 use super::format::{RecordType, StreamId};
 use super::reader::{Cursor, RecordFilter, RecordMeta, VrsReader};
 use super::recordformat::Block;
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use std::path::Path;
 
 /// The sensors of an Aria device, mapped to their VRS stream ids.

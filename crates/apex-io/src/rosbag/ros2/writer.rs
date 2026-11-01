@@ -3,10 +3,10 @@
 use super::error::{Ros2BagError, Ros2BagResult as Result};
 use super::metadata::{BagFileInformation, BagMetadata};
 use super::storage::{StorageWriter, create_storage_writer};
+use crate::error::ErrorLogging;
 use crate::rosbag::types::{
     CompressionFormat, CompressionMode, Connection, MessageDefinition, QosProfile, StoragePlugin,
 };
-use apex_error::ErrorLogging;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

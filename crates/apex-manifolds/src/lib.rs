@@ -55,10 +55,10 @@
 //! per residual per iteration. Input is validated where it enters, by the checked
 //! constructors: [`LieGroup::try_from_param_slice`], [`Tangent::try_from_slice`],
 //! `SO3::try_from_quaternion_wxyz`, `SO3::try_from_axis_angle`, `Sim3::try_new`.
-//! These log the error once with `apex_error::ErrorLogging` and return it.
+//! These log the error once with `crate::error::ErrorLogging` and return it.
 //!
 
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use nalgebra::{Matrix3, Vector3};
 use std::ops::{Mul, Neg};
 
@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn a_checked_constructor_error_reaches_the_root_with_a_one_line_chain() -> TestResult {
-        use apex_error::ErrorChainExt;
+        use crate::error::ErrorChainExt;
         let error = SE3::try_from_param_slice(&[0.0; 3])
             .err()
             .ok_or("expected an error")?;

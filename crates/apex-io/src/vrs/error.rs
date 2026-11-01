@@ -325,7 +325,7 @@ pub type LayoutResult<T> = std::result::Result<T, LayoutError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_error::ErrorChainExt;
+    use crate::error::ErrorChainExt;
 
     #[test]
     fn a_layout_error_is_transparent_in_the_container_error() {

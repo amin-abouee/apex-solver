@@ -39,7 +39,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use serde::Deserialize;
 #[cfg(feature = "download")]
 use tracing::{info, warn};

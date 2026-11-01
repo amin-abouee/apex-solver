@@ -25,7 +25,7 @@ use super::types::{
     CompressionFormat, CompressionMode, Connection, MessageDefinition, MessageDefinitionFormat,
     QosProfile, StoragePlugin,
 };
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};

@@ -7,11 +7,11 @@
 //! [BAL pinhole cookbook chapter](../doc/cookbook/src/bal-pinhole.html) for the projection,
 //! unprojection, and Jacobian derivations.
 
+use crate::error::ErrorLogging;
 use crate::{
     CameraModel, DistortionModel, ParamError, ParamResult, PinholeParams, ProjectionError,
     ProjectionResult, UnprojectionResult, check_param_count, skew_symmetric,
 };
-use apex_error::ErrorLogging;
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};

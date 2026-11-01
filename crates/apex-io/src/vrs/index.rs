@@ -11,7 +11,7 @@ use super::format::{
     Compression, DESCRIPTION_TYPE_ID, FileHeader, INDEX_ENTRY_SIZE, INDEX_TYPE_ID, IndexEntry,
     RECORD_HEADER_SIZE, RecordHeader, RecordType, StreamId,
 };
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 

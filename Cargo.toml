@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/apex-error",
     "crates/apex-manifolds",
     "crates/apex-io",
     "crates/apex-camera-models",
@@ -16,7 +15,6 @@ homepage = "https://github.com/amin-abouee/apex-solver"
 rust-version = "1.93"
 
 [workspace.dependencies]
-apex-error = { path = "crates/apex-error", version = "0.1.0" }
 apex-manifolds = { path = "crates/apex-manifolds", version = "0.4.0" }
 apex-io = { path = "crates/apex-io", version = "0.5.0" }
 apex-camera-models = { path = "crates/apex-camera-models", version = "0.4.0" }
@@ -159,7 +157,6 @@ vrs = ["apex-io/vrs"]
 download = ["apex-io/download"]
 
 [dependencies]
-apex-error.workspace = true
 apex-manifolds.workspace = true
 apex-camera-models.workspace = true
 

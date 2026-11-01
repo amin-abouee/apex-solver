@@ -20,7 +20,7 @@ use super::format::{
     RECORD_HEADER_SIZE, RecordHeader, RecordType, StreamId,
 };
 use super::reader::RecordMeta;
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Seek, SeekFrom, Write};

@@ -16,7 +16,6 @@ categories = ["algorithms", "mathematics", "science"]
 exclude = ["benches/"]
 
 [dependencies]
-apex-error.workspace = true
 nalgebra.workspace = true
 rand.workspace = true
 thiserror.workspace = true

@@ -5,12 +5,12 @@
 //! [kannala-brandt cookbook chapter](../doc/cookbook/src/kannala-brandt.html) for the full
 //! projection, unprojection, and Jacobian derivations.
 
+use crate::error::ErrorLogging;
 use crate::{
     CameraModel, DistortionModel, EstimationError, EstimationResult, ParamError, ParamResult,
     PinholeParams, ProjectionError, ProjectionResult, UnprojectionError, UnprojectionResult,
     check_param_count,
 };
-use apex_error::ErrorLogging;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Kannala-Brandt fisheye camera model with 8 parameters.

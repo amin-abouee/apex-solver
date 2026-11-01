@@ -29,13 +29,13 @@
 //! - Ethan Eade: "Lie Groups for Computer Vision" - <https://www.ethaneade.com/lie.pdf>
 //! - Sophus library: sophus/sim3.hpp
 
+use crate::error::ErrorLogging;
 use crate::util::{WarnOnce, check_param_block};
 use crate::{ElementError, ElementResult};
 use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
 };
-use apex_error::ErrorLogging;
 use nalgebra::{Matrix3, Matrix4, SMatrix, SVector, UnitQuaternion, Vector3};
 
 // Type aliases for Sim(3) - 7 DOF

@@ -52,7 +52,7 @@ pub type DdsResult<T> = Result<T>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_error::ErrorChainExt;
+    use crate::error::ErrorChainExt;
 
     fn assert_send_sync<T: Send + Sync>() {}
 

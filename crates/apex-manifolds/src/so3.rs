@@ -32,10 +32,10 @@
 //! - Nurlanov et al. (2021): "Exploring SO(3) logarithmic map: degeneracies and derivatives"
 //! - Sophus library: <https://github.com/strasdat/Sophus/issues/179>
 
+use crate::error::ErrorLogging;
 use crate::util::{check_param_block, check_unit_quaternion};
 use crate::{ElementError, ElementResult, ManifoldResult};
 use crate::{LieGroup, Tangent};
-use apex_error::ErrorLogging;
 use nalgebra::{Matrix3, Matrix4, Quaternion, SVector, Unit, UnitQuaternion, Vector3};
 use std::{
     fmt,

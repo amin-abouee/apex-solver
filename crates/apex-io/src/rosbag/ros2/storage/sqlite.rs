@@ -1,11 +1,11 @@
 //! SQLite3 storage backend implementation
 
 use super::StorageReader;
+use crate::error::ErrorLogging;
 use crate::rosbag::ros2::error::{Ros2BagError, Ros2BagResult as Result};
 use crate::rosbag::types::{
     Connection, Message, MessageDefinition, MessageDefinitionFormat, RawMessage,
 };
-use apex_error::ErrorLogging;
 use rusqlite::Connection as SqliteConnection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

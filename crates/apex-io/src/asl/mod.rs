@@ -120,7 +120,7 @@ impl AslStream {
     }
 }
 
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use nalgebra::Vector3;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};

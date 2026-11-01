@@ -1,6 +1,6 @@
 use super::error::{parse_field, require_fields};
 use super::{EdgeSE2, Graph, GraphError, GraphLoader, GraphResult, VertexSE2};
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use std::collections::BTreeMap;
 use std::{fs, io::Write, path::Path};
 use tracing::warn;

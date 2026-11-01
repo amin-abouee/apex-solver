@@ -153,7 +153,7 @@ Gauss-Newton and Dog Leg configs, and `DogLegConfig::min_step_quality`
 | `Optimizer::optimize` returns `OptimizerError` | `?` into `ApexSolverError` still works; a field typed `ApexSolverError` that is filled from `optimize()` needs `.into()` or an `OptimizerError` field |
 | string variants (`CoreError::Variable(String)`, `InvalidInput(String)`, `LinAlgError::SingularMatrix(String)`, ...) are structured | match the named fields |
 | `OptimizerError::{MaxIterationsReached, LinearSolveFailed, ...}` and `OptimizationStatus::Failed` were never produced and are gone | match `OptimizationStatus::MaxIterationsReached` on the result instead |
-| `ErrorLogging` is `apex_error::ErrorLogging` (bounded on `std::error::Error`); `chain()` / `chain_compact()` come from `ErrorChainExt` | `use apex_solver::{ErrorChainExt, ErrorLogging};` |
+| `ErrorLogging` is `apex_solver::ErrorLogging`, defined in the crate's `error.rs` (bounded on `std::error::Error`); `chain()` / `chain_compact()` come from `ErrorChainExt` | `use apex_solver::{ErrorChainExt, ErrorLogging};` |
 
 </div>
 

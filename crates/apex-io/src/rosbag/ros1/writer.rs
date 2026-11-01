@@ -13,8 +13,8 @@
 //! ```
 
 use super::error::{Ros1Error, Ros1Result as Result};
+use crate::error::ErrorLogging;
 use crate::rosbag::types::{Connection, MessageDefinition, MessageDefinitionFormat};
-use apex_error::ErrorLogging;
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};

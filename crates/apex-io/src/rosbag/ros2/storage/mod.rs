@@ -1,10 +1,10 @@
 //! Storage backend implementations for ROS2 bag files
 
+use crate::error::ErrorLogging;
 use crate::rosbag::ros2::error::{Ros2BagError, Ros2BagResult as Result};
 use crate::rosbag::types::{
     CompressionMode, Connection, Message, MessageDefinition, RawMessage, StoragePlugin,
 };
-use apex_error::ErrorLogging;
 use std::collections::HashMap;
 use std::path::Path;
 

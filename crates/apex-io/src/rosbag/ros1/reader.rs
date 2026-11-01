@@ -6,10 +6,10 @@
 //! on demand and only the few most recently used payloads are retained.
 
 use super::error::{Ros1Error, Ros1Result as Result};
+use crate::error::ErrorLogging;
 use crate::rosbag::types::{
     Connection, Message, MessageDefinition, MessageDefinitionFormat, RawMessage, TopicInfo,
 };
-use apex_error::ErrorLogging;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};

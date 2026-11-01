@@ -16,10 +16,10 @@ categories = ["computer-vision", "algorithms", "mathematics"]
 exclude = ["tests/", "benches/"]
 
 [dependencies]
-apex-error.workspace = true
 apex-manifolds.workspace = true
 nalgebra.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

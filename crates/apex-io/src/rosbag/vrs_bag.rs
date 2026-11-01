@@ -25,13 +25,13 @@ use super::bag::{ContainerParams, OutputCompression, SensorConfig, SensorParams}
 use super::error::{BagError, Result};
 use super::transcode::{Dialect, catalog_definition, catalog_md5};
 use super::types::{Connection, MessageDefinition, MessageDefinitionFormat};
+use crate::error::ErrorLogging;
 use crate::vrs::aria::{AriaRecording, AriaSensor, Sample};
 use crate::vrs::datalayout::{DataLayout, LayoutWriter, Piece, PieceKind, Scalar};
 use crate::vrs::{
     Block, Compression, Cursor, RecordFilter, RecordType, StreamId, StreamTags, VrsError,
     VrsWriteOptions, VrsWriter,
 };
-use apex_error::ErrorLogging;
 use std::collections::BTreeMap;
 use std::path::Path;
 

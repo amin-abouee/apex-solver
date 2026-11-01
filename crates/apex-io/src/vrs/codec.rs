@@ -8,7 +8,7 @@
 
 use super::error::{Result, VrsError};
 use super::format::Compression;
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use std::io::Read;
 
 fn decompress_error(codec: &'static str) -> impl FnOnce(std::io::Error) -> VrsError {

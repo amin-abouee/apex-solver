@@ -18,7 +18,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use nalgebra::Vector3;
 
 use super::super::trajectory::{

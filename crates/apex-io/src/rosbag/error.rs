@@ -133,7 +133,7 @@ pub enum BagError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_error::ErrorChainExt;
+    use crate::error::ErrorChainExt;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 

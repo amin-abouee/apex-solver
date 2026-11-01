@@ -5,12 +5,12 @@
 //! [rad-tan cookbook chapter](../doc/cookbook/src/rad-tan.html) for the full projection,
 //! unprojection, and Jacobian derivations.
 
+use crate::error::ErrorLogging;
 use crate::{
     CameraModel, DistortionModel, EstimationError, EstimationResult, ParamError, ParamResult,
     PinholeParams, ProjectionError, ProjectionResult, UnprojectionError, UnprojectionResult,
     check_param_count,
 };
-use apex_error::ErrorLogging;
 use nalgebra::{DVector, Matrix2, SMatrix, Vector2, Vector3};
 
 /// A Radial-Tangential camera model with 9 intrinsic parameters.

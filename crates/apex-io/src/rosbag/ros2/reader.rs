@@ -16,8 +16,8 @@ use super::error::{Ros2BagError, Ros2BagResult as Result};
 use super::metadata::BagMetadata;
 use super::storage::mcap::{McapStorageReader, McapSummaryStats};
 use super::storage::{StorageReader, create_storage_reader};
+use crate::error::ErrorLogging;
 use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage, TopicInfo};
-use apex_error::ErrorLogging;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

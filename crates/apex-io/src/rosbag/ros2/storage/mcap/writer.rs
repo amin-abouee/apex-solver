@@ -11,10 +11,10 @@
 //! (`cdr` for ROS2 payloads, `ros1` for ROS1 payloads).
 
 use super::chunked::{ChunkCompression, ChunkedWriter};
+use crate::error::ErrorLogging;
 use crate::rosbag::ros2::error::{Ros2BagError, Ros2BagResult as Result};
 use crate::rosbag::storage::StorageWriter;
 use crate::rosbag::types::{CompressionMode, Connection};
-use apex_error::ErrorLogging;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 

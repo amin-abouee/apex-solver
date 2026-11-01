@@ -13,7 +13,7 @@ other's branch. Nothing is pushed.
 
 ## Decisions
 
-**D1. One shared crate, `apex-error`** (`apex-solver/crates/apex-error`).
+**D1. One shared crate, `apex-error`** (superseded: the crate was removed and each crate keeps the two traits in its own `error.rs`).
 Two unrelated bottom crates need the logging trait (apex-manifolds and
 apex-model), so a copy per crate would drift. It holds:
 - `ErrorLogging` with `.log()` / `.log_with_source(e)`, `#[track_caller]`, and

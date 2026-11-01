@@ -21,7 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
 use nalgebra::Vector3;

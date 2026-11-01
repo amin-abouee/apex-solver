@@ -12,7 +12,7 @@ use super::codec::Decompressor;
 use super::error::{Result, VrsError};
 use super::format::{RECORD_HEADER_SIZE, RecordHeader, RecordType, StreamId};
 use super::reader::{Cursor, RecordFilter, RecordMeta, VrsReader};
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};

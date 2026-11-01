@@ -125,7 +125,7 @@ impl Ros2BagError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_error::ErrorChainExt;
+    use crate::error::ErrorChainExt;
 
     #[test]
     fn a_cdr_error_is_transparent() {

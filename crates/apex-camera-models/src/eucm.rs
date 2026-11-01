@@ -5,12 +5,12 @@
 //! [eucm cookbook chapter](../doc/cookbook/src/eucm.html) for the full projection,
 //! unprojection, and Jacobian derivations.
 
+use crate::error::ErrorLogging;
 use crate::{
     CameraModel, DistortionModel, EstimationError, EstimationResult, ParamError, ParamResult,
     PinholeParams, ProjectionError, ProjectionResult, UnprojectionError, UnprojectionResult,
     check_param_count,
 };
-use apex_error::ErrorLogging;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Extended Unified Camera Model with 6 parameters.

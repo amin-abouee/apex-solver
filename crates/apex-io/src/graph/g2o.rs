@@ -1,6 +1,6 @@
 use super::error::{parse_field, require_fields};
 use super::{EdgeSE2, EdgeSE3, Graph, GraphError, GraphLoader, GraphResult, VertexSE2, VertexSE3};
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::{fs::File, io::Write, path::Path};

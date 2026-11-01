@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ProjectionOutOfBounds` are gone (replaced by specific variants).
 - `project_batch` returns one `ProjectionResult` per point instead of a matrix with `(1e6, 1e6)` sentinels.
 - `FThetaCamera::distortion_params` returns a `ParamResult` instead of panicking on a mismatched variant.
-- Constructors, `linear_estimation` and `convert_camera` log their error once (`apex-error`); projection and
+- Constructors, `linear_estimation` and `convert_camera` log their error once (`ErrorLogging` in the crate's `error.rs`); projection and
   unprojection errors are not logged.
 
 ### Fixed

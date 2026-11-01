@@ -6,12 +6,12 @@
 //! See the [f-theta cookbook chapter](../doc/cookbook/src/f-theta.html) for the full
 //! projection, unprojection, and Jacobian derivations.
 
+use crate::error::ErrorLogging;
 use crate::{
     CONVERGENCE_THRESHOLD, CameraModel, DistortionModel, EstimationError, EstimationResult,
     GEOMETRIC_PRECISION, MIN_DEPTH, ParamError, ParamResult, PinholeParams, ProjectionError,
     ProjectionResult, UnprojectionError, UnprojectionResult, check_param_count,
 };
-use apex_error::ErrorLogging;
 use nalgebra::{DVector, Matrix3xX, SMatrix, Vector2, Vector3};
 
 /// NVIDIA f-theta fisheye camera with 6 intrinsic parameters.

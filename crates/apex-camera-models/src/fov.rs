@@ -5,11 +5,11 @@
 //! [fov cookbook chapter](../doc/cookbook/src/fov.html) for the full projection,
 //! unprojection, and Jacobian derivations.
 
+use crate::error::ErrorLogging;
 use crate::{
     CameraModel, DistortionModel, EstimationError, EstimationResult, ParamError, ParamResult,
     PinholeParams, ProjectionError, ProjectionResult, UnprojectionResult, check_param_count,
 };
-use apex_error::ErrorLogging;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// FOV camera model with 5 parameters.

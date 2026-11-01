@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `VrsError`/`LayoutError` and `BagError`, which in turn wraps `Ros1Error`, `Ros2BagError`, `McapError`,
   `CdrError`, `PointCloudError`, `TranscodeError` and `DdsError`. `BagError::Generic` and the stringly
   `VrsError::{Corrupt, Unsupported, Decompress, Layout, Usage}` are gone; zstd, lz4, rusqlite, serde,
-  rustdds and tokio errors are kept as `source()`. Errors are logged once through `apex-error`.
+  rustdds and tokio errors are kept as `source()`. Errors are logged once through `ErrorLogging` in `error.rs`.
 - **Breaking:** `GraphLoader`, `FromCdr`, `FromRos1` (`from_ros1`), `CdrDeserializer`, the storage traits,
   `utils::ensure_*`/`download_file` and `transcode::plan_topic` return their module error;
   `deserialize_message` returns a `DecodedMessage` enum; `catalog_definition`/`catalog_md5` return

@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validates parameters through the manifold's checked constructor.
 - `Factor::validate_variables` returns `FactorResult<()>`, and factor
   constructors return `FactorResult`.
-- `ErrorLogging` and `ErrorChainExt` come from `apex-error` and are
+- `ErrorLogging` and `ErrorChainExt` live in each crate's own `error.rs` and are
   re-exported from `apex_solver::error`; `ApexSolverError::chain` is the
   `ErrorChainExt` method.
 - Removed the never-produced `OptimizerError` variants and

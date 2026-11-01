@@ -18,7 +18,7 @@ use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
 
 use apex_manifolds::{se2::SE2, se3::SE3};
 
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 pub use error::{GraphError, GraphResult};
 
 #[derive(Clone, PartialEq)]

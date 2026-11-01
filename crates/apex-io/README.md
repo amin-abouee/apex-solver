@@ -771,7 +771,7 @@ pub struct QosProfile {
 
 `IoError` (`apex_io::IoError`) is the crate root. Each module returns its own error, and the root
 wraps each one transparently, so `?` lifts a module error to `IoError` and `source()` walks to
-the cause. Every error is logged once, through `apex_error::ErrorLogging`, where it is built;
+the cause. Every error is logged once, through `apex_io::error::ErrorLogging`, where it is built;
 the per-message decoders (CDR, ROS1 payloads, point-cloud fields, the transcoder) are the
 exception: a failed decode is an expected outcome there, carries only `Copy` fields, and is
 logged by the caller that gives up on a read.

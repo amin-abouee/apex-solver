@@ -18,12 +18,12 @@
 //! (`Fisheye62 = FisheyeRadTanThinPrism<6, true, false, true>`) in
 //! <https://github.com/facebookresearch/projectaria_tools>.
 
+use crate::error::ErrorLogging;
 use crate::fisheye_core::{Core, NUM_K};
 use crate::{
     CameraModel, DistortionModel, Fisheye624Camera, KannalaBrandtCamera, ParamError, ParamResult,
     PinholeParams, ProjectionResult, UnprojectionResult, check_param_count,
 };
-use apex_error::ErrorLogging;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Number of intrinsic parameters: `fx fy cx cy k0..k5 p0 p1`.

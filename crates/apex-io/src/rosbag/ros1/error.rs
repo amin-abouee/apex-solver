@@ -191,7 +191,7 @@ impl Ros1Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_error::ErrorChainExt;
+    use crate::error::ErrorChainExt;
 
     #[test]
     fn display_strings_name_their_values() {

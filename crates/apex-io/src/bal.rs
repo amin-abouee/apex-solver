@@ -34,7 +34,7 @@
 //! # Ok::<(), apex_io::BalError>(())
 //! ```
 
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use nalgebra::Vector3;
 use std::path::{Path, PathBuf};
 

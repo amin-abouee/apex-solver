@@ -55,12 +55,12 @@
 //! This is an independent implementation in Rust with analytic Jacobians; the
 //! tests check it against values computed from the reference's formulas.
 
+use crate::error::ErrorLogging;
 use crate::fisheye_core::{Core, NUM_K};
 use crate::{
     CameraModel, DistortionModel, Fisheye62Camera, KannalaBrandtCamera, ParamError, ParamResult,
     PinholeParams, ProjectionResult, UnprojectionResult, check_param_count,
 };
-use apex_error::ErrorLogging;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Number of intrinsic parameters: `fx fy cx cy k0..k5 p0 p1 s0..s3`.

@@ -11,7 +11,7 @@
 //! and [`projectaria_tools`](https://github.com/facebookresearch/projectaria_tools).
 //! [`convert_camera`] fits a camera of any model to another.
 
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
@@ -1183,7 +1183,7 @@ mod tests {
             CameraModelError::Projection(ProjectionError::PointBehindCamera { .. })
         ));
         assert_eq!(
-            apex_error::ErrorChainExt::chain(&error),
+            crate::error::ErrorChainExt::chain(&error),
             "point behind camera: z=-2 (must be > 0.000001)"
         );
         Ok(())

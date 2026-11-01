@@ -21,8 +21,8 @@
 //! has the `From<&Self> for DVector<f64>` and `TryFrom<&[f64]>` parameter
 //! conversions: all of them.
 
+use crate::error::ErrorLogging;
 use crate::{CameraModel, ConversionError, ConversionResult, ParamError};
-use apex_error::ErrorLogging;
 use nalgebra::{DMatrix, DVector, Vector2, Vector3};
 
 /// Controls for [`convert_camera`].
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(source_error.to_string(), expected.to_string());
         let root = crate::CameraModelError::from(error);
         assert_eq!(
-            apex_error::ErrorChainExt::chain_compact(&root),
+            crate::error::ErrorChainExt::chain_compact(&root),
             "the initial camera is not valid → \
              parameter alpha must be in range [0, 1], got 1.5"
         );

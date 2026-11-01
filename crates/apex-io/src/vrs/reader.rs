@@ -37,7 +37,7 @@ use super::format::{
 };
 use super::index::{IndexSource, RecordInfo, read_index, read_special_record, rebuild_index};
 use super::recordformat::RecordLayout;
-use apex_error::ErrorLogging;
+use crate::error::ErrorLogging;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};

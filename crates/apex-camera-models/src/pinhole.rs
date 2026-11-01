@@ -5,11 +5,11 @@
 //! Suitable for narrow FOV lenses and as a baseline for calibration.
 //! See the [cookbook](../doc/cookbook/src/pinhole.html) for the formulation.
 
+use crate::error::ErrorLogging;
 use crate::{
     CameraModel, DistortionModel, ParamError, ParamResult, PinholeParams, ProjectionError,
     ProjectionResult, UnprojectionResult, check_param_count,
 };
-use apex_error::ErrorLogging;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Pinhole camera model with 4 intrinsic parameters.

@@ -25,8 +25,8 @@
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
+use crate::error::ErrorLogging;
 use crate::{ElementError, ElementResult, Interpolatable, LieGroup, RnError, RnResult, Tangent};
-use apex_error::ErrorLogging;
 use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use std::{
     fmt,
