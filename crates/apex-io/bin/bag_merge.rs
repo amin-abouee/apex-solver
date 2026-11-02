@@ -128,7 +128,9 @@ fn main() -> CliResult<()> {
         reader.for_each(&connections, &selection, |c, ts, data| {
             let handle = handles
                 .get(&c.id)
-                .ok_or_else(|| BagError::connection_not_found(&c.topic))?;
+                .ok_or_else(|| BagError::ConnectionNotFound {
+                    topic: c.topic.clone(),
+                })?;
             writer.write(*handle, ts, data)?;
             first_ts = first_ts.min(ts);
             last_ts = last_ts.max(ts);
