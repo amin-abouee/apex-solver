@@ -3,7 +3,6 @@ pub mod dense;
 pub(crate) mod regularization;
 pub mod schur;
 pub mod sparse;
-pub mod utils;
 
 use crate::core::{VarKey, variable::ManifoldVariable};
 use crate::error::ErrorLogging;
@@ -131,33 +130,33 @@ impl Damping {
     ///
     /// # Errors
     ///
-    /// Returns [`LinAlgError::InvalidInput`] if `lambda` is negative or not
+    /// Returns [`LinAlgError::InvalidDamping`] if `lambda` is negative or not
     /// finite, if either bound is not finite or non-positive, or if
-    /// `min_diagonal > max_diagonal` — `f64::clamp` panics on an inverted range,
+    /// [`LinAlgError::DampingRange`] if `min_diagonal > max_diagonal` — `f64::clamp` panics on an inverted range,
     /// so the check has to happen at construction.
     pub fn new(lambda: f64, min_diagonal: f64, max_diagonal: f64) -> LinAlgResult<Self> {
+        let invalid = |param, requirement, value| {
+            LinAlgError::InvalidDamping {
+                param,
+                requirement,
+                value,
+            }
+            .log()
+        };
         if !lambda.is_finite() || lambda < 0.0 {
-            return Err(LinAlgError::InvalidInput(format!(
-                "damping lambda must be finite and non-negative, got {lambda}"
-            ))
-            .log());
+            return Err(invalid("lambda", "finite and non-negative", lambda));
         }
         if !min_diagonal.is_finite() || min_diagonal <= 0.0 {
-            return Err(LinAlgError::InvalidInput(format!(
-                "min_diagonal must be finite and positive, got {min_diagonal}"
-            ))
-            .log());
+            return Err(invalid("min_diagonal", "finite and positive", min_diagonal));
         }
         if max_diagonal.is_nan() || max_diagonal <= 0.0 {
-            return Err(LinAlgError::InvalidInput(format!(
-                "max_diagonal must be positive, got {max_diagonal}"
-            ))
-            .log());
+            return Err(invalid("max_diagonal", "positive", max_diagonal));
         }
         if min_diagonal > max_diagonal {
-            return Err(LinAlgError::InvalidInput(format!(
-                "min_diagonal ({min_diagonal}) must not exceed max_diagonal ({max_diagonal})"
-            ))
+            return Err(LinAlgError::DampingRange {
+                min: min_diagonal,
+                max: max_diagonal,
+            }
             .log());
         }
         Ok(Self {
@@ -191,35 +190,252 @@ impl Damping {
 }
 
 // ============================================================================
+// Rate-limited diagnostics
+// ============================================================================
+
+/// Rate limiter for warnings raised per block inside a solve.
+///
+/// Every call is counted, but [`WarnOnce::hit`] returns the running count
+/// only for the first call and then for each power of ten, so a fallback hit
+/// on every iteration logs a handful of lines instead of one per block.
+pub(crate) struct WarnOnce {
+    hits: std::sync::atomic::AtomicUsize,
+}
+
+impl WarnOnce {
+    pub(crate) const fn new() -> Self {
+        Self {
+            hits: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Counts one occurrence; `Some(count)` when it is time to log.
+    pub(crate) fn hit(&self) -> Option<usize> {
+        let count = self
+            .hits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        is_power_of_ten(count).then_some(count)
+    }
+}
+
+fn is_power_of_ten(mut n: usize) -> bool {
+    if n == 0 {
+        return false;
+    }
+    while n.is_multiple_of(10) {
+        n /= 10;
+    }
+    n == 1
+}
+
+/// Counts preconditioner blocks that would not invert and were replaced by
+/// the identity (both Schur PCG solvers).
+pub(crate) static SINGULAR_PRECONDITIONER_BLOCKS: WarnOnce = WarnOnce::new();
+
+/// The identity standing in for a preconditioner block that would not
+/// invert. A preconditioner only speeds PCG up, so the solve stays correct;
+/// the warning says why it may converge more slowly.
+pub(crate) fn identity_preconditioner_block(dof: usize) -> nalgebra::DMatrix<f64> {
+    if let Some(count) = SINGULAR_PRECONDITIONER_BLOCKS.hit() {
+        tracing::warn!(
+            count,
+            "a {dof}×{dof} preconditioner block is singular and was replaced by the identity \
+             ({count} so far); PCG may converge more slowly"
+        );
+    }
+    nalgebra::DMatrix::identity(dof, dof)
+}
+
+// ============================================================================
 // Error types
 // ============================================================================
 
-/// Linear algebra specific error types for apex-solver
+/// A failure reported by faer, kept as the source of a [`LinAlgError`].
+#[derive(Debug, Clone, Copy, Error)]
+#[non_exhaustive]
+pub enum FaerFailure {
+    #[error(transparent)]
+    Sparse(#[from] faer::sparse::FaerError),
+
+    #[error(transparent)]
+    SparseLlt(#[from] faer::sparse::linalg::LltError),
+
+    #[error(transparent)]
+    DenseLlt(#[from] faer::linalg::cholesky::llt::factor::LltError),
+
+    #[error(transparent)]
+    Creation(#[from] faer::sparse::CreationError),
+}
+
+impl FaerFailure {
+    /// A non-positive pivot: the values are not positive definite. Every
+    /// other failure (allocation, index type) is about resources, not values.
+    fn is_numerical(&self) -> bool {
+        matches!(
+            self,
+            Self::DenseLlt(_) | Self::SparseLlt(faer::sparse::linalg::LltError::Numeric(_))
+        )
+    }
+}
+
+/// Errors of the linear solvers and factorizations.
+///
+/// Logged once where they are built, and the optimizer and covariance code
+/// that call the solvers propagate them with a bare `?` — except the
+/// [numerical](LinAlgError::is_numerical) ones. A system that will not
+/// factorize at one damping is an expected outcome that a damped optimizer
+/// retries with a larger one, so it is not logged where it is built; the
+/// caller that gives up on it logs it once, with its chain.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum LinAlgError {
-    /// Matrix factorization failed (Cholesky, QR, etc.)
-    #[error("Matrix factorization failed: {0}")]
-    FactorizationFailed(String),
+    /// A symbolic analysis (factorization pattern or sparse product) failed.
+    #[error("symbolic analysis of {context} failed")]
+    Symbolic {
+        context: &'static str,
+        #[source]
+        source: FaerFailure,
+    },
 
-    /// Singular or near-singular matrix detected
-    #[error("Singular matrix detected: {0}")]
-    SingularMatrix(String),
+    /// A numeric factorization failed: the matrix is singular or not
+    /// positive definite.
+    #[error("factorization of {context} failed, the matrix is singular or not positive definite")]
+    Factorization {
+        context: &'static str,
+        #[source]
+        source: FaerFailure,
+    },
 
-    /// Failed to create sparse matrix from triplets
-    #[error("Failed to create sparse matrix: {0}")]
-    SparseMatrixCreation(String),
+    /// A system that stayed singular through every diagonal regularization.
+    #[error(
+        "{context} is singular after {attempts} regularization attempts (largest shift {max_shift:.2e})"
+    )]
+    SingularAfterRegularization {
+        context: &'static str,
+        attempts: usize,
+        max_shift: f64,
+    },
 
-    /// Matrix format conversion failed
-    #[error("Matrix conversion failed: {0}")]
-    MatrixConversion(String),
+    /// An eliminated variable whose diagonal block cannot be inverted.
+    #[error(
+        "H_ee block for variable {key:?} ({dof}×{dof}) is singular even after regularization; \
+         the variable is unobserved or its observations are degenerate"
+    )]
+    SingularBlock { key: VarKey, dof: usize },
 
-    /// Invalid input provided to linear solver
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
+    /// Triplets that do not form a sparse matrix of the given shape.
+    #[error("cannot build the {rows}×{cols} sparse {context}")]
+    SparseMatrix {
+        context: &'static str,
+        rows: usize,
+        cols: usize,
+        #[source]
+        source: FaerFailure,
+    },
 
-    /// Solver in invalid state (e.g., initialized incorrectly)
-    #[error("Invalid solver state: {0}")]
-    InvalidState(String),
+    /// A solver used before its structure or system was set up.
+    #[error("{component} used before it was initialized")]
+    NotInitialized { component: &'static str },
+
+    /// A variable key that is not in the index map.
+    #[error("variable {key:?} is not in the variable index map")]
+    UnknownVariable { key: VarKey },
+
+    /// Operands whose sizes disagree.
+    #[error("{what} has {actual} entries, expected {expected}")]
+    DimensionMismatch {
+        what: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+
+    /// An index past the end of what it indexes.
+    #[error("{what} {index} is out of range for {len}")]
+    IndexOutOfRange {
+        what: &'static str,
+        index: usize,
+        len: usize,
+    },
+
+    /// A count that does not fit the solver's `u32` indices.
+    #[error("{what} {value} exceeds the u32 index range")]
+    IndexOverflow { what: &'static str, value: usize },
+
+    /// Two variables marked for elimination that share a factor, so `H_ee`
+    /// is not block-diagonal.
+    #[error(
+        "variables {first:?} and {second:?} are both marked for elimination but are connected \
+         by a factor, so H_ee is not block-diagonal and Schur elimination would give a wrong \
+         step; eliminate only mutually unconnected variables"
+    )]
+    ConnectedEliminated { first: VarKey, second: VarKey },
+
+    /// A variable marked for elimination that no residual observes.
+    #[error("variable {key:?} is marked for elimination but appears in no residual")]
+    UnobservedEliminated { key: VarKey },
+
+    /// A Schur partition with no variable on one side.
+    #[error("Schur elimination needs at least one {side} variable")]
+    EmptyPartition { side: &'static str },
+
+    /// A column of the system that no variable owns.
+    #[error("column {column} of the {total}-column system belongs to no variable")]
+    UncoveredColumn { column: usize, total: usize },
+
+    /// A column claimed by two variables.
+    #[error("column {column} is claimed by more than one variable (at {key:?})")]
+    OverlappingColumns { column: usize, key: VarKey },
+
+    /// Chunks whose row ranges are not contiguous and increasing.
+    #[error(
+        "chunk {chunk} starts at row {start}, but the previous chunk ended at {previous_end}; \
+         chunk-wise elimination needs each eliminated variable's rows to form one contiguous, \
+         increasing range"
+    )]
+    ChunkRows {
+        chunk: usize,
+        start: usize,
+        previous_end: usize,
+    },
+
+    /// A damping parameter outside its admissible range.
+    #[error("damping {param} must be {requirement}, got {value}")]
+    InvalidDamping {
+        param: &'static str,
+        requirement: &'static str,
+        value: f64,
+    },
+
+    /// Damping bounds in the wrong order.
+    #[error("min_diagonal ({min}) must not exceed max_diagonal ({max})")]
+    DampingRange { min: f64, max: f64 },
+}
+
+impl LinAlgError {
+    /// Whether the system's values, not its structure or inputs, failed: a
+    /// non-positive pivot or a singular block. A larger damping can cure it,
+    /// so it is not logged where it is built; the caller that gives up on it
+    /// logs it (see [`ErrorLogging::log_chain`]).
+    pub fn is_numerical(&self) -> bool {
+        match self {
+            Self::Factorization { source, .. } => source.is_numerical(),
+            Self::SingularAfterRegularization { .. } | Self::SingularBlock { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// A failed numeric factorization of `context`, logged here unless it is
+    /// [numerical](Self::is_numerical).
+    #[track_caller]
+    pub(crate) fn factorization(context: &'static str, source: FaerFailure) -> Self {
+        let error = Self::Factorization { context, source };
+        if error.is_numerical() {
+            error
+        } else {
+            error.log()
+        }
+    }
 }
 
 /// Result type for linear algebra operations
@@ -320,7 +536,6 @@ pub trait LinearSolver<M: LinearizationMode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ErrorLogging;
 
     // -------------------------------------------------------------------------
     // JacobianMode
@@ -377,77 +592,43 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // LinAlgError Display — one per variant
+    // LinAlgError
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_lin_alg_error_factorization_failed_display() {
-        let e = LinAlgError::FactorizationFailed("non-positive definite".into());
-        assert!(e.to_string().contains("non-positive definite"));
+    fn a_faer_failure_is_the_source_of_a_factorization_error() {
+        use crate::error::ErrorChainExt;
+        let error = LinAlgError::Factorization {
+            context: "H",
+            source: FaerFailure::from(faer::sparse::FaerError::OutOfMemory),
+        };
+        assert_eq!(
+            error.chain_compact(),
+            "factorization of H failed, the matrix is singular or not positive definite → \
+             OutOfMemory"
+        );
     }
 
     #[test]
-    fn test_lin_alg_error_singular_matrix_display() {
-        let e = LinAlgError::SingularMatrix("rank deficient".into());
-        assert!(e.to_string().contains("rank deficient"));
+    fn warn_once_fires_on_powers_of_ten() {
+        let limiter = WarnOnce::new();
+        let fired: Vec<usize> = (0..120).filter_map(|_| limiter.hit()).collect();
+        assert_eq!(fired, [1, 10, 100]);
     }
 
     #[test]
-    fn test_lin_alg_error_sparse_matrix_creation_display() {
-        let e = LinAlgError::SparseMatrixCreation("bad triplets".into());
-        assert!(e.to_string().contains("bad triplets"));
-    }
-
-    #[test]
-    fn test_lin_alg_error_matrix_conversion_display() {
-        let e = LinAlgError::MatrixConversion("size mismatch".into());
-        assert!(e.to_string().contains("size mismatch"));
-    }
-
-    #[test]
-    fn test_lin_alg_error_invalid_input_display() {
-        let e = LinAlgError::InvalidInput("null jacobian".into());
-        assert!(e.to_string().contains("null jacobian"));
-    }
-
-    #[test]
-    fn test_lin_alg_error_invalid_state_display() {
-        let e = LinAlgError::InvalidState("not initialized".into());
-        assert!(e.to_string().contains("not initialized"));
-    }
-
-    // -------------------------------------------------------------------------
-    // log() / log_with_source() return self
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_lin_alg_error_log_returns_self() {
-        let e = LinAlgError::InvalidInput("log_test".into());
-        let returned = e.log();
-        assert!(returned.to_string().contains("log_test"));
-    }
-
-    #[test]
-    fn test_lin_alg_error_log_with_source_returns_self() {
-        let e = LinAlgError::SingularMatrix("source_test".into());
-        let source = std::io::Error::other("src");
-        let returned = e.log_with_source(source);
-        assert!(returned.to_string().contains("source_test"));
-    }
-
-    // -------------------------------------------------------------------------
-    // LinAlgResult type alias
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_lin_alg_result_ok() {
-        let r: LinAlgResult<i32> = Ok(7);
-        assert!(matches!(r, Ok(7)));
-    }
-
-    #[test]
-    fn test_lin_alg_result_err() {
-        let r: LinAlgResult<i32> = Err(LinAlgError::InvalidInput("oops".into()));
-        assert!(r.is_err());
+    fn display_strings_name_their_values() {
+        let range = LinAlgError::DampingRange { min: 2.0, max: 1.0 };
+        assert_eq!(
+            range.to_string(),
+            "min_diagonal (2) must not exceed max_diagonal (1)"
+        );
+        let missing = LinAlgError::NotInitialized {
+            component: "explicit Schur solver",
+        };
+        assert_eq!(
+            missing.to_string(),
+            "explicit Schur solver used before it was initialized"
+        );
     }
 }

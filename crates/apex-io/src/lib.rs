@@ -2,6 +2,7 @@
 pub mod asl;
 pub mod bal;
 mod csv;
+pub mod error;
 pub mod graph;
 pub mod lamaria;
 pub mod logger;
@@ -42,11 +43,16 @@ pub use asl::error::AslError;
 pub use asl::{
     AslDataset, AslLayout, AslReader, AslStream, AslTrajectoryLoader, load_mav0_trajectory,
 };
-pub use bal::{BalCamera, BalDataset, BalLoader, BalObservation, BalPoint};
+pub use bal::{BalCamera, BalDataset, BalError, BalLoader, BalObservation, BalPoint};
+pub use error::{IoError, IoResult};
 pub use graph::g2o::G2oLoader;
 pub use graph::toro::ToroLoader;
-pub use graph::{EdgeSE2, EdgeSE3, Graph, GraphLoader, IoError, VertexSE2, VertexSE3, load_graph};
+pub use graph::{
+    EdgeSE2, EdgeSE3, Graph, GraphError, GraphLoader, VertexSE2, VertexSE3, load_graph,
+};
+pub use lamaria::LamariaError;
 pub use trajectory::{
     InertialState, Trajectory, TrajectoryError, TrajectoryFormat, TrajectoryLoader, TrajectoryPose,
     TumLoader, TumNanosLoader, load_trajectory, load_trajectory_as,
 };
+pub use utils::DatasetError;

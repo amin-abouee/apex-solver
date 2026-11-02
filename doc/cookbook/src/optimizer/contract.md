@@ -84,7 +84,7 @@ let config = LevenbergMarquardtConfig::default()
 </div>
 
 The Dog Leg config has its own `with_step_reuse` (whether a rejected step's
-direction may be reused) and `with_visualization`; the Gauss–Newton config
+direction may be reused); the Gauss–Newton config
 has `with_min_diagonal` and no damping or trust-region family at all, because
 it has neither.
 

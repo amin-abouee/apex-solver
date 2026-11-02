@@ -11,7 +11,7 @@ use apex_solver::{
 use nalgebra::dvector;
 use tracing::{info, warn};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logger();
 
     info!("Covariance Estimation Example\n");
@@ -29,22 +29,22 @@ fn main() {
         &[x0, x1],
         Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0))),
         None,
-    );
+    )?;
     problem.add_residual_block(
         &[x1, x2],
         Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1))),
         None,
-    );
+    )?;
     problem.add_residual_block(
         &[x2, x3],
         Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, -0.1))),
         None,
-    );
+    )?;
     problem.add_residual_block(
         &[x0, x3],
         Box::new(BetweenFactor::new(SE2::from_xy_angle(3.0, 0.0, 0.0))),
         None,
-    );
+    )?;
 
     // Anchor the gauge. `BetweenFactor` constraints are all relative, so without a
     // prior the whole graph can be rigidly translated and rotated at zero cost:
@@ -57,7 +57,7 @@ fn main() {
         &[x0],
         Box::new(PriorFactor::<SE2>::new(SE2::identity())),
         None,
-    );
+    )?;
 
     info!("Added 3 odometry constraints, 1 loop closure, and 1 prior on x0\n");
 
@@ -203,4 +203,5 @@ fn main() {
     info!("  4. For SE2: 3x3 matrix [x, y, theta]");
     info!("  5. For SE3: 6x6 matrix [trans_xyz, rot_xyz]");
     info!("  Note: Covariance computation adds ~10-20% overhead.");
+    Ok(())
 }

@@ -1,4 +1,3 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Criterion benchmarks for the VRS container stack.
 //!
 //! Synthetic groups run over a generated recording (200 Hz IMU-like stream,
@@ -14,6 +13,8 @@
 //! ```
 
 mod helpers;
+#[path = "helpers/vrs.rs"]
+mod vrs_fixtures;
 
 use apex_io::vrs::aria::{AriaRecording, AriaSensor, Sample};
 use apex_io::vrs::{CopyOptions, RecordFilter, VrsReader, copy_filtered};
@@ -21,14 +22,14 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 struct Fixtures {
-    vrs: helpers::VrsFixture,
+    vrs: vrs_fixtures::VrsFixture,
 }
 
 fn fixtures() -> &'static Fixtures {
     static F: std::sync::OnceLock<Fixtures> = std::sync::OnceLock::new();
     F.get_or_init(|| {
         helpers::reset_bench_dir();
-        let vrs = helpers::write_vrs(&helpers::bench_root());
+        let vrs = vrs_fixtures::write_vrs(&helpers::bench_root());
         Fixtures { vrs }
     })
 }
@@ -38,7 +39,7 @@ fn bench_open(c: &mut Criterion) {
     let mut g = c.benchmark_group("vrs_open");
     g.bench_function("synthetic", |b| {
         b.iter(|| {
-            let r = VrsReader::open(black_box(&f.vrs.path)).unwrap();
+            let r = VrsReader::open(black_box(&f.vrs.path)).unwrap_or_else(|e| panic!("{e}"));
             black_box((r.records().len(), r.streams().len()));
         })
     });
@@ -59,11 +60,15 @@ fn bench_read(c: &mut Criterion) {
     ] {
         g.bench_function(name, |b| {
             b.iter(|| {
-                let mut r = VrsReader::open(&f.vrs.path).unwrap();
+                let mut r = VrsReader::open(&f.vrs.path).unwrap_or_else(|e| panic!("{e}"));
                 let mut cur = r.cursor(black_box(filter));
                 let mut buf = Vec::new();
                 let mut bytes = 0u64;
-                while r.next_record_into(&mut cur, &mut buf).unwrap().is_some() {
+                while r
+                    .next_record_into(&mut cur, &mut buf)
+                    .unwrap_or_else(|e| panic!("{e}"))
+                    .is_some()
+                {
                     bytes += buf.len() as u64;
                 }
                 black_box(bytes);
@@ -72,11 +77,17 @@ fn bench_read(c: &mut Criterion) {
     }
     g.bench_function("full_read_ahead", |b| {
         b.iter(|| {
-            let mut r = VrsReader::open(&f.vrs.path).unwrap();
-            let mut seq = r.sequential(black_box(&both)).unwrap();
+            let mut r = VrsReader::open(&f.vrs.path).unwrap_or_else(|e| panic!("{e}"));
+            let mut seq = r
+                .sequential(black_box(&both))
+                .unwrap_or_else(|e| panic!("{e}"));
             let mut buf = Vec::new();
             let mut bytes = 0u64;
-            while seq.next_into(&mut buf).unwrap().is_some() {
+            while seq
+                .next_into(&mut buf)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .is_some()
+            {
                 bytes += buf.len() as u64;
             }
             black_box(bytes);
@@ -93,8 +104,12 @@ fn bench_write(c: &mut Criterion) {
         b.iter_batched(
             || helpers::scratch_dir("bench"),
             |s| {
-                let vrs = helpers::write_vrs(&s.0);
-                black_box(std::fs::metadata(&vrs.path).unwrap().len());
+                let vrs = vrs_fixtures::write_vrs(&s.0);
+                black_box(
+                    std::fs::metadata(&vrs.path)
+                        .unwrap_or_else(|e| panic!("{e}"))
+                        .len(),
+                );
             },
             BatchSize::PerIteration,
         )
@@ -110,13 +125,13 @@ fn bench_copy(c: &mut Criterion) {
         b.iter_batched(
             || helpers::scratch_dir("bench"),
             |s| {
-                let mut src = VrsReader::open(&f.vrs.path).unwrap();
+                let mut src = VrsReader::open(&f.vrs.path).unwrap_or_else(|e| panic!("{e}"));
                 let summary = copy_filtered(
                     black_box(&mut src),
                     s.0.join("copy.vrs"),
                     &CopyOptions::default(),
                 )
-                .unwrap();
+                .unwrap_or_else(|e| panic!("{e}"));
                 black_box(summary.bytes);
             },
             BatchSize::PerIteration,
@@ -126,14 +141,14 @@ fn bench_copy(c: &mut Criterion) {
         b.iter_batched(
             || helpers::scratch_dir("bench"),
             |s| {
-                let mut src = VrsReader::open(&f.vrs.path).unwrap();
+                let mut src = VrsReader::open(&f.vrs.path).unwrap_or_else(|e| panic!("{e}"));
                 let opts = CopyOptions {
                     start: Some(5.0),
                     end: Some(7.0),
                     ..CopyOptions::default()
                 };
-                let summary =
-                    copy_filtered(black_box(&mut src), s.0.join("trim.vrs"), &opts).unwrap();
+                let summary = copy_filtered(black_box(&mut src), s.0.join("trim.vrs"), &opts)
+                    .unwrap_or_else(|e| panic!("{e}"));
                 black_box(summary.bytes);
             },
             BatchSize::PerIteration,
@@ -148,7 +163,7 @@ fn bench_real_vrs(c: &mut Criterion) {
     };
     // A 10-second window from the start of the IMU clock, so the heavy real
     // file is only partially walked.
-    let probe = AriaRecording::open(&path).expect("open real vrs");
+    let probe = AriaRecording::open(&path).unwrap_or_else(|e| panic!("open real vrs: {e}"));
     let imus: Vec<AriaSensor> = probe
         .sensors()
         .into_iter()
@@ -158,24 +173,28 @@ fn bench_real_vrs(c: &mut Criterion) {
         .first()
         .and_then(|s| probe.time_range(*s))
         .map(|(t0, _)| (t0, t0 + 10.0))
-        .expect("real file has an IMU stream");
+        .unwrap_or_else(|| panic!("real file has an IMU stream"));
     drop(probe);
 
     let mut g = c.benchmark_group("real_vrs");
     g.sample_size(10);
     g.bench_function("open", |b| {
         b.iter(|| {
-            let r = AriaRecording::open(black_box(&path)).unwrap();
+            let r = AriaRecording::open(black_box(&path)).unwrap_or_else(|e| panic!("{e}"));
             black_box(r.sensors().len());
         })
     });
     g.bench_function("read_full_raw", |b| {
         b.iter(|| {
-            let mut r = VrsReader::open(&path).unwrap();
+            let mut r = VrsReader::open(&path).unwrap_or_else(|e| panic!("{e}"));
             let mut cur = r.cursor(&RecordFilter::all());
             let mut buf = Vec::new();
             let mut n = 0u64;
-            while r.next_record_into(&mut cur, &mut buf).unwrap().is_some() {
+            while r
+                .next_record_into(&mut cur, &mut buf)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .is_some()
+            {
                 n += 1;
             }
             black_box(n);
@@ -183,11 +202,17 @@ fn bench_real_vrs(c: &mut Criterion) {
     });
     g.bench_function("read_full_raw_read_ahead", |b| {
         b.iter(|| {
-            let mut r = VrsReader::open(&path).unwrap();
-            let mut seq = r.sequential(&RecordFilter::all()).unwrap();
+            let mut r = VrsReader::open(&path).unwrap_or_else(|e| panic!("{e}"));
+            let mut seq = r
+                .sequential(&RecordFilter::all())
+                .unwrap_or_else(|e| panic!("{e}"));
             let mut buf = Vec::new();
             let mut n = 0u64;
-            while seq.next_into(&mut buf).unwrap().is_some() {
+            while seq
+                .next_into(&mut buf)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .is_some()
+            {
                 n += 1;
             }
             black_box(n);
@@ -195,10 +220,10 @@ fn bench_real_vrs(c: &mut Criterion) {
     });
     g.bench_function("decode_window", |b| {
         b.iter(|| {
-            let mut rec = AriaRecording::open(&path).unwrap();
+            let mut rec = AriaRecording::open(&path).unwrap_or_else(|e| panic!("{e}"));
             let mut cur = rec.cursor_between(&[], black_box(window.0), black_box(window.1));
             let mut n = 0u64;
-            while let Some(s) = rec.next_sample(&mut cur).unwrap() {
+            while let Some(s) = rec.next_sample(&mut cur).unwrap_or_else(|e| panic!("{e}")) {
                 black_box(&s);
                 n += 1;
             }
@@ -207,10 +232,12 @@ fn bench_real_vrs(c: &mut Criterion) {
     });
     g.bench_function("decode_imu_window", |b| {
         b.iter(|| {
-            let mut rec = AriaRecording::open(&path).unwrap();
+            let mut rec = AriaRecording::open(&path).unwrap_or_else(|e| panic!("{e}"));
             let mut cur = rec.cursor_between(&imus, black_box(window.0), black_box(window.1));
             let mut n = 0u64;
-            while let Some(Sample::Imu(s)) = rec.next_sample(&mut cur).unwrap() {
+            while let Some(Sample::Imu(s)) =
+                rec.next_sample(&mut cur).unwrap_or_else(|e| panic!("{e}"))
+            {
                 black_box(s.capture_ns);
                 n += 1;
             }
@@ -219,11 +246,15 @@ fn bench_real_vrs(c: &mut Criterion) {
     });
     g.bench_function("imu_between_one_second", |b| {
         b.iter(|| {
-            let mut rec = AriaRecording::open(&path).unwrap();
-            let (s, _) = imus.first().copied().map(|s| (s, ())).expect("imu");
+            let mut rec = AriaRecording::open(&path).unwrap_or_else(|e| panic!("{e}"));
+            let (s, _) = imus
+                .first()
+                .copied()
+                .map(|s| (s, ()))
+                .unwrap_or_else(|| panic!("imu"));
             let v = rec
                 .imu_between(s, black_box(window.0) + 5.0, black_box(window.0) + 6.0)
-                .unwrap();
+                .unwrap_or_else(|e| panic!("{e}"));
             black_box(v.len());
         })
     });

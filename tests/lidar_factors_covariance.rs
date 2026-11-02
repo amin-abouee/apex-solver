@@ -251,7 +251,7 @@ fn run_trial(
         se3_param_vec(Vector3::zeros(), UnitQuaternion::identity()),
     );
     for dof in 0..6 {
-        problem.fix_variable(t_wa_key, dof);
+        problem.fix_variable(t_wa_key, dof)?;
     }
 
     let t_wb_key = problem.add_variable(ManifoldType::SE3, initial_guess.clone());
@@ -263,7 +263,7 @@ fn run_trial(
         };
         let point_b_noisy = point_b_exact + noisy_vector3(rng, SIGMA);
         let factor = make_factor(corr, point_b_noisy);
-        problem.add_residual_block(&[t_wa_key, t_wb_key], factor, None);
+        problem.add_residual_block(&[t_wa_key, t_wb_key], factor, None)?;
     }
 
     let config = LevenbergMarquardtConfig::new()

@@ -35,11 +35,10 @@ use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::Factor;
 use crate::factors::common::group_point::MAX_ACT_DOF;
 use crate::factors::common::math::skew;
-use crate::factors::common::validate::expect_manifolds;
+use crate::factors::common::validate::{expect_manifolds, expect_point_and_sigma};
+use crate::factors::{Factor, FactorError, FactorResult};
 
 use super::plane::Plane;
 
@@ -175,17 +174,8 @@ impl<G: ActsOnPoints3> LidarMapPlaneFactor<G> {
     ///
     /// A group that does not act on 3-D points, a non-finite point, or a
     /// `sigma` that is not finite and positive.
-    pub fn new(point_l: Vector3<f64>, plane: Plane, sigma: f64) -> CoreResult<Self> {
-        if !point_l.iter().all(|value| value.is_finite()) {
-            return Err(CoreError::InvalidInput(format!(
-                "LidarMapPlaneFactor: point {point_l:?} is not finite"
-            )));
-        }
-        if !(sigma.is_finite() && sigma > 0.0) {
-            return Err(CoreError::InvalidInput(format!(
-                "LidarMapPlaneFactor: sigma must be finite and positive, got {sigma}"
-            )));
-        }
+    pub fn new(point_l: Vector3<f64>, plane: Plane, sigma: f64) -> FactorResult<Self> {
+        expect_point_and_sigma("LidarMapPlaneFactor", &point_l, sigma)?;
         Ok(Self {
             point_l,
             plane,
@@ -208,7 +198,7 @@ impl<G: ActsOnPoints3> LidarMapPlaneFactor<G> {
         point_covariance: &Matrix3<f64>,
         predicted_state: &G,
         extrinsic: &SE3,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
         let chain = lidar_point_chain(predicted_state, extrinsic, &point_l);
         // ∂w/∂l = ∂w/∂s·R_SL = the extrinsic Jacobian's translation block.
         let d_world_d_point: Matrix3<f64> = chain.d_extrinsic.fixed_view::<3, 3>(0, 0).into();
@@ -220,10 +210,10 @@ impl<G: ActsOnPoints3> LidarMapPlaneFactor<G> {
             &chain.world,
             &d_world_d_point,
         )
-        .ok_or_else(|| {
-            CoreError::InvalidInput(
-                "LidarMapPlaneFactor: covariances give no positive variance".to_string(),
-            )
+        // An expected per-point outcome, returned unlogged (see `Degenerate`).
+        .ok_or(FactorError::Degenerate {
+            factor: "LidarMapPlaneFactor",
+            what: "point-to-plane variance",
         })?;
         Self::new(point_l, plane, sigma)
     }
@@ -275,7 +265,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for LidarMapPlaneFactor<G>
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_manifolds(
             variables,
             &[G::NAME, "SE3"],
@@ -294,6 +284,8 @@ mod tests {
     use apex_manifolds::so3::SO3;
     use faer::Mat;
     use nalgebra::UnitQuaternion;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn rotation() -> UnitQuaternion<f64> {
         UnitQuaternion::from_euler_angles(0.1, -0.3, 0.7)
@@ -315,9 +307,12 @@ mod tests {
     }
 
     /// A plane `offset` metres from the true world point of `point()`.
-    fn plane_near<G: ActsOnPoints3>(state: &G, offset: f64) -> Result<Plane, CoreError> {
+    fn plane_near<G: ActsOnPoints3>(
+        state: &G,
+        offset: f64,
+    ) -> Result<Plane, Box<dyn std::error::Error>> {
         let world = lidar_point_chain(state, &extrinsic(), &point()).world;
-        Plane::new(normal(), offset - normal().dot(&world))
+        Ok(Plane::new(normal(), offset - normal().dot(&world))?)
     }
 
     fn evaluate<G: ActsOnPoints3 + Send + Sync + 'static>(
@@ -337,7 +332,7 @@ mod tests {
     /// Zero on the plane, the signed distance over σ off it, and analytic
     /// Jacobians equal to central differences in the group's own chart — for
     /// any group `G`.
-    fn check_group<G: ActsOnPoints3 + Send + Sync + 'static>(state: G) -> Result<(), CoreError> {
+    fn check_group<G: ActsOnPoints3 + Send + Sync + 'static>(state: G) -> TestResult {
         const EPS: f64 = 1e-6;
         let dof = G::DOF;
 
@@ -393,12 +388,12 @@ mod tests {
     }
 
     #[test]
-    fn se3_poses() -> Result<(), CoreError> {
+    fn se3_poses() -> TestResult {
         check_group(SE3::new(Vector3::new(1.0, -2.0, 0.5), rotation()))
     }
 
     #[test]
-    fn se23_navigation_states() -> Result<(), CoreError> {
+    fn se23_navigation_states() -> TestResult {
         check_group(SE23::new(
             Vector3::new(1.0, -2.0, 0.5),
             Vector3::new(0.3, 0.1, -0.2),
@@ -407,18 +402,18 @@ mod tests {
     }
 
     #[test]
-    fn sim3_similarities() -> Result<(), CoreError> {
+    fn sim3_similarities() -> TestResult {
         check_group(Sim3::new(Vector3::new(1.0, -2.0, 0.5), rotation(), 1.3))
     }
 
     #[test]
-    fn so3_rotations() -> Result<(), CoreError> {
+    fn so3_rotations() -> TestResult {
         check_group(SO3::new(rotation()))
     }
 
     /// A navigation state's velocity never moves a LiDAR point.
     #[test]
-    fn se23_velocity_columns_are_zero() -> Result<(), CoreError> {
+    fn se23_velocity_columns_are_zero() -> TestResult {
         let state = SE23::new(
             Vector3::new(1.0, -2.0, 0.5),
             Vector3::new(0.3, 0.1, -0.2),
@@ -434,7 +429,7 @@ mod tests {
 
     /// Moving the world, the pose and the map together changes nothing.
     #[test]
-    fn a_common_change_of_world_leaves_the_residual() -> Result<(), CoreError> {
+    fn a_common_change_of_world_leaves_the_residual() -> TestResult {
         let state = SE23::new(
             Vector3::new(1.0, -2.0, 0.5),
             Vector3::new(0.3, 0.1, -0.2),
@@ -461,8 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertainty_weighting_grows_with_the_point_noise_and_the_distance() -> Result<(), CoreError>
-    {
+    fn uncertainty_weighting_grows_with_the_point_noise_and_the_distance() -> TestResult {
         let state = SE23::new(Vector3::new(1.0, -2.0, 0.5), Vector3::zeros(), rotation());
         let chain = lidar_point_chain(&state, &extrinsic(), &point());
         let a: Matrix3<f64> = chain.d_extrinsic.fixed_view::<3, 3>(0, 0).into();
@@ -479,7 +473,7 @@ mod tests {
                 &chain.world,
                 &a,
             )
-            .ok_or_else(|| CoreError::InvalidInput("no sigma".to_string()))
+            .ok_or("no sigma")
         };
         let quiet = sigma(&near, 1e-6)?;
         assert!(sigma(&near, 1e-3)? > quiet);
@@ -500,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_inputs_are_rejected() -> Result<(), CoreError> {
+    fn bad_inputs_are_rejected() -> TestResult {
         let plane = Plane::new(Vector3::z(), 0.0)?;
         assert!(LidarMapPlaneFactor::<SE3>::new(point(), plane.clone(), 0.0).is_err());
         assert!(LidarMapPlaneFactor::<SE3>::new(point(), plane.clone(), f64::NAN).is_err());
@@ -521,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn the_factor_whitens_internally() -> Result<(), CoreError> {
+    fn the_factor_whitens_internally() -> TestResult {
         let factor =
             LidarMapPlaneFactor::<SE23>::new(point(), Plane::new(Vector3::z(), 0.0)?, 0.02)?;
         assert!(factor.whitens_internally());

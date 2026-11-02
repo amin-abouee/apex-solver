@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use apex_solver::ErrorLogging;
 use apex_solver::JacobianMode;
 use apex_solver::NoiseModel;
 use apex_solver::apex_io::{
@@ -22,6 +21,7 @@ use apex_solver::optimizer::levenberg_marquardt::{DampingUpdate, LevenbergMarqua
 use apex_solver::optimizer::{
     DogLeg, GaussNewton, LevenbergMarquardt, OptimizationStatus, initialize_optimization_state,
 };
+use apex_solver::{ErrorChainExt, ErrorLogging};
 use clap::Parser;
 use nalgebra::dvector;
 use tracing::{error, info, warn};
@@ -165,20 +165,12 @@ fn edge_noise_model(
     info: nalgebra::DMatrix<f64>,
     strategy: RepairStrategy,
 ) -> Result<(NoiseModel, InformationRepair), apex_solver::error::ApexSolverError> {
-    strategy.build(info).map_err(|e| {
-        apex_solver::error::ApexSolverError::from(
-            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-        )
-    })
+    Ok(strategy.build(info)?)
 }
 
 /// Parse `--indefinite-repair` once, before the edge loop.
 fn repair_strategy(args: &Args) -> Result<RepairStrategy, apex_solver::error::ApexSolverError> {
-    RepairStrategy::from_name(&args.indefinite_repair).map_err(|e| {
-        apex_solver::error::ApexSolverError::from(
-            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-        )
-    })
+    Ok(RepairStrategy::from_name(&args.indefinite_repair)?)
 }
 
 // ============================================================================
@@ -379,17 +371,12 @@ fn format_summary_table(results: &[DatasetResult]) {
 fn create_loss_function(
     loss_name: &str,
     scale: Option<f64>,
-) -> Result<Option<Box<dyn LossFunction + Send + Sync>>, Box<dyn std::error::Error>> {
-    // Single table lives in the library (`loss_from_name`); this wrapper only
-    // adapts the error type so help text and accepted names cannot drift.
-    Ok(Some(
-        apex_solver::core::loss_functions::loss_from_name(loss_name, scale).map_err(|e| {
-            Box::<dyn std::error::Error>::from(format!(
-                "{e}. Valid options: {}",
-                apex_solver::core::loss_functions::loss_canonical_names().join(", ")
-            ))
-        })?,
-    ))
+) -> apex_solver::core::CoreResult<Option<Box<dyn LossFunction + Send + Sync>>> {
+    // Single table lives in the library (`loss_from_name`), so help text and
+    // accepted names cannot drift; its error lists the valid names.
+    Ok(Some(apex_solver::core::loss_functions::loss_from_name(
+        loss_name, scale,
+    )?))
 }
 
 fn test_se2_dataset(
@@ -425,7 +412,7 @@ fn test_se2_dataset(
 
     let load_start = Instant::now();
     let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset_name);
-    let mut graph = G2oLoader::load(&dataset_path)?;
+    let mut graph = G2oLoader::load(&dataset_path).map_err(apex_io::IoError::from)?;
     let load_time = load_start.elapsed();
 
     if args.profile {
@@ -447,12 +434,9 @@ fn test_se2_dataset(
     let initial_metrics = compute_se2_cost_metrics(&graph);
 
     if num_vertices == 0 {
-        return Err(apex_io::IoError::UnsupportedFormat(format!(
-            "No SE2 vertices found in dataset {}",
-            dataset_name
-        ))
-        .log()
-        .into());
+        return Err(
+            apex_io::IoError::from(apex_io::GraphError::NoVertices { kind: "SE2" }.log()).into(),
+        );
     }
 
     let setup_start = Instant::now();
@@ -489,19 +473,15 @@ fn test_se2_dataset(
             &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
-        );
+        )?;
     } else if optimizer_type == "lm" || optimizer_type == "levenberg-marquardt" {
         let first_key = var_key_map[&vertex_ids[0]];
-        problem.fix_variable(first_key, 0);
-        problem.fix_variable(first_key, 1);
-        problem.fix_variable(first_key, 2);
+        problem.fix_variable(first_key, 0)?;
+        problem.fix_variable(first_key, 1)?;
+        problem.fix_variable(first_key, 2)?;
     }
 
-    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
-        apex_solver::error::ApexSolverError::from(
-            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-        )
-    })?;
+    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale)?;
 
     let strategy = repair_strategy(args)?;
     let mut repair_summary = RepairSummary::default();
@@ -511,11 +491,7 @@ fn test_se2_dataset(
         let between_factor = BetweenFactor::new(relative_pose);
 
         let edge_loss = if loss_fn.is_some() {
-            create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
-                apex_solver::error::ApexSolverError::from(
-                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-                )
-            })?
+            create_loss_function(&args.loss_function, args.loss_scale)?
         } else {
             None
         };
@@ -536,7 +512,7 @@ fn test_se2_dataset(
                 Box::new(between_factor),
                 edge_loss,
                 edge_noise,
-            );
+            )?;
         }
     }
 
@@ -565,13 +541,7 @@ fn test_se2_dataset(
     }
 
     let init_cost_start = Instant::now();
-    let init_state = initialize_optimization_state(&mut problem).map_err(|e| {
-        apex_solver::core::CoreError::SymbolicStructure(format!(
-            "Failed to initialize optimization state for dataset {}",
-            dataset_name
-        ))
-        .log_with_source(e)
-    })?;
+    let init_state = initialize_optimization_state(&mut problem)?;
     let initial_cost = init_state.initial_cost;
     let init_cost_time = init_cost_start.elapsed();
 
@@ -734,20 +704,13 @@ fn test_se2_dataset(
 
         // Create output directory if it doesn't exist
         if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                apex_io::IoError::log_with_source(
-                    apex_io::IoError::FileCreationFailed {
-                        path: parent.display().to_string(),
-                        reason: "Failed to create directory".to_string(),
-                    },
-                    e,
-                )
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| apex_io::IoError::from(apex_io::GraphError::write(parent, e).log()))?;
         }
 
         // Write updated graph to file (graph already updated in-place above)
         use apex_solver::apex_io::GraphLoader;
-        G2oLoader::write(&graph, &output_path)?;
+        G2oLoader::write(&graph, &output_path).map_err(apex_io::IoError::from)?;
 
         info!("Saved optimized graph to: {}", output_path.display());
     }
@@ -820,7 +783,7 @@ fn test_se3_dataset(
     );
 
     let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset_name);
-    let mut graph = G2oLoader::load(&dataset_path)?;
+    let mut graph = G2oLoader::load(&dataset_path).map_err(apex_io::IoError::from)?;
 
     let num_vertices = graph.vertices_se3.len();
     let num_edges = graph.edges_se3.len();
@@ -834,12 +797,9 @@ fn test_se3_dataset(
     let initial_metrics = compute_se3_cost_metrics(&graph);
 
     if num_vertices == 0 {
-        return Err(apex_io::IoError::UnsupportedFormat(format!(
-            "No SE3 vertices found in dataset {}",
-            dataset_name
-        ))
-        .log()
-        .into());
+        return Err(
+            apex_io::IoError::from(apex_io::GraphError::NoVertices { kind: "SE3" }.log()).into(),
+        );
     }
 
     let mut problem = Problem::new(JacobianMode::Sparse);
@@ -876,19 +836,15 @@ fn test_se3_dataset(
             &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
-        );
+        )?;
     } else if optimizer_type == "lm" || optimizer_type == "levenberg-marquardt" {
         let first_key = var_key_map[&vertex_ids[0]];
         for dof in 0..6 {
-            problem.fix_variable(first_key, dof);
+            problem.fix_variable(first_key, dof)?;
         }
     }
 
-    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
-        apex_solver::error::ApexSolverError::from(
-            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-        )
-    })?;
+    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale)?;
 
     let strategy = repair_strategy(args)?;
     let mut repair_summary = RepairSummary::default();
@@ -898,11 +854,7 @@ fn test_se3_dataset(
         let between_factor = BetweenFactor::new(relative_pose);
 
         let edge_loss = if loss_fn.is_some() {
-            create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
-                apex_solver::error::ApexSolverError::from(
-                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-                )
-            })?
+            create_loss_function(&args.loss_function, args.loss_scale)?
         } else {
             None
         };
@@ -923,7 +875,7 @@ fn test_se3_dataset(
                 Box::new(between_factor),
                 edge_loss,
                 edge_noise,
-            );
+            )?;
         }
     }
 
@@ -943,13 +895,7 @@ fn test_se3_dataset(
     }
 
     let init_cost_start = Instant::now();
-    let init_state = initialize_optimization_state(&mut problem).map_err(|e| {
-        apex_solver::core::CoreError::SymbolicStructure(format!(
-            "Failed to initialize optimization state for dataset {}",
-            dataset_name
-        ))
-        .log_with_source(e)
-    })?;
+    let init_state = initialize_optimization_state(&mut problem)?;
     let initial_cost = init_state.initial_cost;
     let init_cost_time = init_cost_start.elapsed();
     info!(
@@ -1089,20 +1035,13 @@ fn test_se3_dataset(
 
         // Create output directory if it doesn't exist
         if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                apex_io::IoError::log_with_source(
-                    apex_io::IoError::FileCreationFailed {
-                        path: parent.display().to_string(),
-                        reason: "Failed to create directory".to_string(),
-                    },
-                    e,
-                )
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| apex_io::IoError::from(apex_io::GraphError::write(parent, e).log()))?;
         }
 
         // Write updated graph to file (graph already updated in-place above)
         use apex_solver::apex_io::GraphLoader;
-        G2oLoader::write(&graph, &output_path)?;
+        G2oLoader::write(&graph, &output_path).map_err(apex_io::IoError::from)?;
 
         info!("Saved optimized graph to: {}", output_path.display());
     }
@@ -1137,8 +1076,7 @@ fn test_se3_dataset(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg_attr(not(feature = "visualization"), allow(unused_mut))]
-    let mut args = Args::parse();
+    let args = Args::parse();
 
     if args.verbose_iters {
         apex_solver::init_logger_with_directives(
@@ -1155,29 +1093,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let se2_datasets = vec!["M3500", "intel", "mit", "ring"];
     let se3_datasets = vec!["sphere2500", "parking-garage", "torus3D", "cubicle"];
 
-    let (se2_datasets_to_run, se3_datasets_to_run) = if args.dataset == "all" {
+    // An owned copy, so `args` itself stays free to be adjusted below.
+    let dataset = args.dataset.clone();
+    let (se2_datasets_to_run, se3_datasets_to_run) = if dataset == "all" {
         (se2_datasets, se3_datasets)
     } else {
         let mut se2_run = Vec::new();
         let mut se3_run = Vec::new();
-        if se2_datasets.contains(&args.dataset.as_str()) {
-            se2_run.push(args.dataset.as_str());
+        if se2_datasets.contains(&dataset.as_str()) {
+            se2_run.push(dataset.as_str());
         }
-        if se3_datasets.contains(&args.dataset.as_str()) {
-            se3_run.push(args.dataset.as_str());
+        if se3_datasets.contains(&dataset.as_str()) {
+            se3_run.push(dataset.as_str());
         }
         if se2_run.is_empty() && se3_run.is_empty() {
             // Any dataset file on disk is runnable standalone (grid3D, rim, …).
-            let se2_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, args.dataset);
-            let se3_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, args.dataset);
+            let se2_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset);
+            let se3_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset);
             if std::path::Path::new(&se2_path).exists() {
-                se2_run.push(args.dataset.as_str());
+                se2_run.push(dataset.as_str());
                 (se2_run, se3_run)
             } else if std::path::Path::new(&se3_path).exists() {
-                se3_run.push(args.dataset.as_str());
+                se3_run.push(dataset.as_str());
                 (se2_run, se3_run)
             } else {
-                warn!("Unknown dataset: {}", args.dataset);
+                warn!("Unknown dataset: {}", dataset);
                 warn!("Using default: running all datasets");
                 (se2_datasets, se3_datasets)
             }
@@ -1187,12 +1127,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     #[cfg(feature = "visualization")]
-    if args.with_visualizer && (se2_datasets_to_run.len() > 1 || se3_datasets_to_run.len() > 1) {
-        warn!("Visualization is not supported when running multiple datasets (--dataset all).");
-        warn!("Disabling visualization. To use visualization, specify a single dataset.");
-        warn!("Example: --dataset M3500 --with-visualizer");
-        args.with_visualizer = false;
-    }
+    let args = {
+        let mut args = args;
+        if args.with_visualizer && (se2_datasets_to_run.len() > 1 || se3_datasets_to_run.len() > 1)
+        {
+            warn!("Visualization is not supported when running multiple datasets (--dataset all).");
+            warn!("Disabling visualization. To use visualization, specify a single dataset.");
+            warn!("Example: --dataset M3500 --with-visualizer");
+            args.with_visualizer = false;
+        }
+        args
+    };
 
     let mut all_results = Vec::new();
 

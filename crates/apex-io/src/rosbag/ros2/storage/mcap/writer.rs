@@ -11,7 +11,8 @@
 //! (`cdr` for ROS2 payloads, `ros1` for ROS1 payloads).
 
 use super::chunked::{ChunkCompression, ChunkedWriter};
-use crate::rosbag::error::{BagError, Result};
+use crate::error::ErrorLogging;
+use crate::rosbag::ros2::error::{Ros2BagError, Ros2BagResult as Result};
 use crate::rosbag::storage::StorageWriter;
 use crate::rosbag::types::{CompressionMode, Connection};
 use std::collections::{BTreeMap, HashMap};
@@ -55,7 +56,7 @@ impl McapWriter {
     pub fn new(path: &Path, compression_mode: CompressionMode) -> Result<Self> {
         let file_name = path
             .file_name()
-            .ok_or_else(|| BagError::writer("bag path has no file name component"))?
+            .ok_or_else(|| Ros2BagError::no_file_name(path).log())?
             .to_string_lossy();
         let mcap_path = path.join(format!("{file_name}.mcap"));
         Ok(Self::with_file(mcap_path, "ros2", compression_mode))
@@ -90,20 +91,18 @@ impl McapWriter {
 impl StorageWriter for McapWriter {
     fn open(&mut self) -> Result<()> {
         if self.writer.is_some() {
-            return Err(BagError::BagAlreadyOpen);
+            return Err(Ros2BagError::AlreadyOpen.log());
         }
-        self.writer = Some(ChunkedWriter::create(
-            &self.mcap_path,
-            self.profile,
-            self.compression,
-            CHUNK_SIZE,
-        )?);
+        self.writer = Some(
+            ChunkedWriter::create(&self.mcap_path, self.profile, self.compression, CHUNK_SIZE)
+                .map_err(|e| Ros2BagError::from(e).log())?,
+        );
         Ok(())
     }
 
     fn close(&mut self, _version: u32, _metadata: &str) -> Result<()> {
         if let Some(mut writer) = self.writer.take() {
-            writer.finish()?;
+            writer.finish().map_err(|e| Ros2BagError::from(e).log())?;
         }
         self.pending_schemas.clear();
         self.schema_ids.clear();
@@ -113,7 +112,7 @@ impl StorageWriter for McapWriter {
 
     fn add_msgtype(&mut self, connection: &Connection) -> Result<()> {
         if self.writer.is_none() {
-            return Err(BagError::BagNotOpen);
+            return Err(Ros2BagError::NotOpen.log());
         }
         let encoding = if connection.serialization_format == "ros1" {
             "ros1msg"
@@ -135,14 +134,19 @@ impl StorageWriter for McapWriter {
         connection: &Connection,
         offered_qos_profiles: &str,
     ) -> Result<()> {
-        let writer = self.writer.as_mut().ok_or(BagError::BagNotOpen)?;
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| Ros2BagError::NotOpen.log())?;
 
         // Register the schema the first time a channel needs it.
         let schema_id = match self.schema_ids.get(&connection.message_type) {
             Some(&id) => id,
             None => match self.pending_schemas.get(&connection.message_type) {
                 Some(s) => {
-                    let id = writer.add_schema(&connection.message_type, s.encoding, &s.data)?;
+                    let id = writer
+                        .add_schema(&connection.message_type, s.encoding, &s.data)
+                        .map_err(|e| Ros2BagError::from(e).log())?;
                     self.schema_ids.insert(connection.message_type.clone(), id);
                     id
                 }
@@ -168,21 +172,28 @@ impl StorageWriter for McapWriter {
         } else {
             connection.serialization_format.as_str()
         };
-        let id = writer.add_channel(schema_id, &connection.topic, encoding, metadata)?;
+        let id = writer
+            .add_channel(schema_id, &connection.topic, encoding, metadata)
+            .map_err(|e| Ros2BagError::from(e).log())?;
         self.channels
             .insert(connection.id, ChannelState { id, sequence: 0 });
         Ok(())
     }
 
     fn write(&mut self, connection: &Connection, timestamp: u64, data: &[u8]) -> Result<()> {
-        let writer = self.writer.as_mut().ok_or(BagError::BagNotOpen)?;
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| Ros2BagError::NotOpen.log())?;
         let channel = self
             .channels
             .get_mut(&connection.id)
-            .ok_or_else(|| BagError::connection_not_found(&connection.topic))?;
+            .ok_or_else(|| Ros2BagError::connection_not_found(&connection.topic).log())?;
         let sequence = channel.sequence;
         channel.sequence = channel.sequence.wrapping_add(1);
-        writer.write_message(channel.id, sequence, timestamp, timestamp, data)
+        writer
+            .write_message(channel.id, sequence, timestamp, timestamp, data)
+            .map_err(|e| Ros2BagError::from(e).log())
     }
 
     fn is_open(&self) -> bool {
@@ -197,7 +208,7 @@ impl StorageWriter for McapWriter {
 impl Drop for McapWriter {
     fn drop(&mut self) {
         // Best effort: an unclosed writer would otherwise leave a file
-        // without a summary section.
+        // without a summary section. `close` logs its own failure.
         let _ = self.close(0, "");
     }
 }
@@ -242,7 +253,7 @@ mod tests {
         assert!(!w.is_open());
         w.open()?;
         assert!(w.is_open());
-        assert!(matches!(w.open(), Err(BagError::BagAlreadyOpen)));
+        assert!(matches!(w.open(), Err(Ros2BagError::AlreadyOpen)));
         w.close(9, "")?;
         assert!(!w.is_open());
         w.close(9, "")?; // idempotent
@@ -267,7 +278,7 @@ mod tests {
         let c = conn(7, "/nope", "std_msgs/msg/String", "cdr");
         assert!(matches!(
             w.write(&c, 0, b"x"),
-            Err(BagError::ConnectionNotFound { .. })
+            Err(Ros2BagError::ConnectionNotFound { .. })
         ));
         Ok(())
     }

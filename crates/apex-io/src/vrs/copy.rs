@@ -126,23 +126,23 @@ pub fn copy_filtered(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
     use crate::vrs::description::StreamTags;
 
-    fn make(path: &Path) {
-        let mut w = VrsWriter::create(path, VrsWriteOptions::default()).unwrap();
-        w.set_file_tag("session_id", "s1").unwrap();
+    fn make(path: &Path) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut w = VrsWriter::create(path, VrsWriteOptions::default())?;
+        w.set_file_tag("session_id", "s1")?;
         for t in [600, 601] {
             let mut tags = StreamTags::default();
             tags.user.insert("n".into(), t.to_string());
-            w.add_stream(StreamId::new(t, 1), tags).unwrap();
+            w.add_stream(StreamId::new(t, 1), tags)?;
         }
         for t in [600, 601] {
             let id = StreamId::new(t, 1);
-            w.write_record(id, RecordType::Configuration, 1, 0.0, b"config")
-                .unwrap();
+            w.write_record(id, RecordType::Configuration, 1, 0.0, b"config")?;
             for i in 0..100 {
                 w.write_record(
                     id,
@@ -150,21 +150,21 @@ mod tests {
                     1,
                     f64::from(i) * 0.01,
                     &[i as u8; 200],
-                )
-                .unwrap();
+                )?;
             }
         }
-        w.finish().unwrap();
+        w.finish()?;
+        Ok(())
     }
 
     #[test]
-    fn passthrough_and_transcodes_preserve_payloads() {
-        let dir = tempfile::tempdir().unwrap();
+    fn passthrough_and_transcodes_preserve_payloads() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let src_path = dir.path().join("src.vrs");
         {
             let id = StreamId::new(700, 1);
-            let mut w = VrsWriter::create(&src_path, VrsWriteOptions::default()).unwrap();
-            w.add_stream(id, StreamTags::default()).unwrap();
+            let mut w = VrsWriter::create(&src_path, VrsWriteOptions::default())?;
+            w.add_stream(id, StreamTags::default())?;
             // Small (stored) and large (compressed) records, both kinds.
             for i in 0..40u32 {
                 let payload: Vec<u8> = if i % 2 == 0 {
@@ -172,22 +172,22 @@ mod tests {
                 } else {
                     (0..4000u32).map(|k| (k % 251) as u8).collect()
                 };
-                w.write_record(id, RecordType::Data, 1, f64::from(i) * 0.1, &payload)
-                    .unwrap();
+                w.write_record(id, RecordType::Data, 1, f64::from(i) * 0.1, &payload)?;
             }
-            w.finish().unwrap();
+            w.finish()?;
         }
-        let payloads = |path: &Path| -> Vec<(f64, Vec<u8>)> {
-            let mut r = VrsReader::open(path).unwrap();
-            let mut cur = r.cursor(&RecordFilter::all());
-            let mut buf = Vec::new();
-            let mut out = Vec::new();
-            while let Some(meta) = r.next_record_into(&mut cur, &mut buf).unwrap() {
-                out.push((meta.timestamp, buf.clone()));
-            }
-            out
-        };
-        let reference = payloads(&src_path);
+        let payloads =
+            |path: &Path| -> std::result::Result<Vec<(f64, Vec<u8>)>, crate::vrs::VrsError> {
+                let mut r = VrsReader::open(path)?;
+                let mut cur = r.cursor(&RecordFilter::all());
+                let mut buf = Vec::new();
+                let mut out = Vec::new();
+                while let Some(meta) = r.next_record_into(&mut cur, &mut buf)? {
+                    out.push((meta.timestamp, buf.clone()));
+                }
+                Ok(out)
+            };
+        let reference = payloads(&src_path)?;
 
         for target in [
             Compression::Zstd, // same as source: exercises verbatim passthrough
@@ -195,44 +195,50 @@ mod tests {
             Compression::Lz4,  // decompress and recompress
         ] {
             let dst = dir.path().join(format!("{target:?}.vrs"));
-            let mut src = VrsReader::open(&src_path).unwrap();
+            let mut src = VrsReader::open(&src_path)?;
             let opts = CopyOptions {
                 compression: Some(target),
                 ..CopyOptions::default()
             };
-            copy_filtered(&mut src, &dst, &opts).unwrap();
-            assert_eq!(payloads(&dst), reference, "{target:?}");
+            copy_filtered(&mut src, &dst, &opts)?;
+            assert_eq!(payloads(&dst)?, reference, "{target:?}");
         }
+        Ok(())
     }
 
     #[test]
-    fn trims_streams_and_time_and_keeps_tags() {
-        let dir = tempfile::tempdir().unwrap();
+    fn trims_streams_and_time_and_keeps_tags() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let (a, b) = (dir.path().join("a.vrs"), dir.path().join("b.vrs"));
-        make(&a);
-        let mut src = VrsReader::open(&a).unwrap();
+        make(&a)?;
+        let mut src = VrsReader::open(&a)?;
         let opts = CopyOptions {
             streams: vec![StreamId::new(601, 1)],
             start: Some(0.20),
             end: Some(0.50),
             compression: Some(Compression::Lz4),
         };
-        let summary = copy_filtered(&mut src, &b, &opts).unwrap();
+        let summary = copy_filtered(&mut src, &b, &opts)?;
         assert_eq!(summary.records, 31, "config + 30 data");
 
-        let mut dst = VrsReader::open(&b).unwrap();
+        let mut dst = VrsReader::open(&b)?;
         assert_eq!(dst.streams(), [StreamId::new(601, 1)]);
         assert_eq!(dst.file_tags()["session_id"], "s1");
         assert_eq!(
-            dst.stream_tags(StreamId::new(601, 1)).unwrap().user["n"],
+            dst.stream_tags(StreamId::new(601, 1))
+                .ok_or("missing value")?
+                .user["n"],
             "601"
         );
         let d = dst.data_records(StreamId::new(601, 1));
         assert_eq!(d.len(), 30);
-        let first = dst.read_record(d[0] as usize).unwrap();
+        let first = dst.read_record(d[0] as usize)?;
         assert!((first.meta.timestamp - 0.20).abs() < 1e-9);
         assert_eq!(first.payload, vec![20u8; 200]);
-        let cfg = dst.configuration_record(StreamId::new(601, 1)).unwrap();
-        assert_eq!(dst.read_record(cfg).unwrap().payload, b"config");
+        let cfg = dst
+            .configuration_record(StreamId::new(601, 1))
+            .ok_or("missing value")?;
+        assert_eq!(dst.read_record(cfg)?.payload, b"config");
+        Ok(())
     }
 }

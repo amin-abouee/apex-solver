@@ -7,8 +7,51 @@
 //! driver's `timestamp` (often `FLOAT64`) and `x`/`y`/`z` (`FLOAT32`) read
 //! through one call.
 
-use super::error::{BagError, Result};
+//!
+//! A failed lookup is an expected outcome for a caller that probes for an
+//! optional field, so [`PointCloudError`] is never logged here.
+
 use super::messages::PointField;
+
+/// Result of a point-cloud field read.
+pub type PointCloudResult<T> = Result<T, PointCloudError>;
+
+/// A point-cloud field that cannot be read from its data blob.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PointCloudError {
+    #[error("point cloud has no field {name}")]
+    MissingField { name: String },
+
+    #[error("point cloud field {name} has unknown datatype {datatype}")]
+    UnknownDatatype { name: String, datatype: u8 },
+
+    #[error(
+        "point cloud field {name} at offset {offset} with {size} bytes does not fit a {point_step}-byte point"
+    )]
+    FieldOutsidePoint {
+        name: String,
+        offset: usize,
+        size: usize,
+        point_step: usize,
+    },
+
+    #[error("point cloud size overflows: {point_count} points of {point_step} bytes")]
+    SizeOverflow {
+        point_count: usize,
+        point_step: usize,
+    },
+
+    #[error(
+        "point cloud data has {len} bytes, {point_count} points of {point_step} bytes need {need}"
+    )]
+    DataTooShort {
+        len: usize,
+        point_count: usize,
+        point_step: usize,
+        need: usize,
+    },
+}
 
 /// `sensor_msgs/PointField` datatype codes.
 pub mod datatype {
@@ -33,16 +76,12 @@ pub fn datatype_size(code: u8) -> Option<usize> {
     }
 }
 
-fn invalid(reason: String) -> BagError {
-    BagError::InvalidMessageData { reason }
-}
-
 /// The values of field `name` for every point, widened to `f64`.
 ///
 /// # Errors
 ///
-/// [`BagError::InvalidMessageData`] when the field is missing, has an unknown
-/// datatype, does not fit in `point_step`, or `data` is shorter than
+/// [`PointCloudError`] when the field is missing, has an unknown datatype,
+/// does not fit in `point_step`, or `data` is shorter than
 /// `point_count · point_step`.
 pub fn field_values(
     fields: &[PointField],
@@ -51,31 +90,40 @@ pub fn field_values(
     point_step: usize,
     point_count: usize,
     big_endian: bool,
-) -> Result<Vec<f64>> {
-    let field = fields
-        .iter()
-        .find(|f| f.name == name)
-        .ok_or_else(|| invalid(format!("point cloud has no field `{name}`")))?;
-    let size = datatype_size(field.datatype).ok_or_else(|| {
-        invalid(format!(
-            "field `{name}` has unknown datatype {}",
-            field.datatype
-        ))
+) -> PointCloudResult<Vec<f64>> {
+    let field =
+        fields
+            .iter()
+            .find(|f| f.name == name)
+            .ok_or_else(|| PointCloudError::MissingField {
+                name: name.to_string(),
+            })?;
+    let size = datatype_size(field.datatype).ok_or_else(|| PointCloudError::UnknownDatatype {
+        name: name.to_string(),
+        datatype: field.datatype,
     })?;
     let offset = field.offset as usize;
     if offset + size > point_step {
-        return Err(invalid(format!(
-            "field `{name}` at offset {offset} does not fit a {point_step}-byte point"
-        )));
+        return Err(PointCloudError::FieldOutsidePoint {
+            name: name.to_string(),
+            offset,
+            size,
+            point_step,
+        });
     }
     let needed = point_count
         .checked_mul(point_step)
-        .ok_or_else(|| invalid("point cloud size overflows".to_string()))?;
+        .ok_or(PointCloudError::SizeOverflow {
+            point_count,
+            point_step,
+        })?;
     if data.len() < needed {
-        return Err(invalid(format!(
-            "point cloud data has {} bytes, {point_count} points of {point_step} need {needed}",
-            data.len()
-        )));
+        return Err(PointCloudError::DataTooShort {
+            len: data.len(),
+            point_count,
+            point_step,
+            need: needed,
+        });
     }
     let decode = |bytes: &[u8]| -> f64 {
         let mut buffer = [0u8; 8];
@@ -156,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn every_numeric_type_reads_in_both_byte_orders() -> Result<()> {
+    fn every_numeric_type_reads_in_both_byte_orders() -> PointCloudResult<()> {
         for big in [false, true] {
             let (fields, data) = cloud(big);
             assert_eq!(

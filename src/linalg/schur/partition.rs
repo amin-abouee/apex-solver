@@ -48,10 +48,10 @@ const NOT_KEPT: u32 = u32::MAX;
 const NOT_ELIMINATED: u32 = u32::MAX;
 
 fn too_many_columns(total: usize) -> LinAlgError {
-    LinAlgError::InvalidInput(format!(
-        "system has {total} columns, more than the {} this partition can index",
-        u32::MAX
-    ))
+    LinAlgError::IndexOverflow {
+        what: "system column count",
+        value: total,
+    }
     .log()
 }
 
@@ -107,16 +107,10 @@ impl SchurPartition {
     /// eliminates a variable sitting in the middle of the ordering.
     pub fn new(mut kept: Vec<BlockSpan>, mut eliminated: Vec<BlockSpan>) -> LinAlgResult<Self> {
         if kept.is_empty() {
-            return Err(LinAlgError::InvalidInput(
-                "Schur elimination needs at least one retained variable".into(),
-            )
-            .log());
+            return Err(LinAlgError::EmptyPartition { side: "retained" }.log());
         }
         if eliminated.is_empty() {
-            return Err(LinAlgError::InvalidInput(
-                "Schur elimination needs at least one variable to eliminate".into(),
-            )
-            .log());
+            return Err(LinAlgError::EmptyPartition { side: "eliminated" }.log());
         }
 
         kept.sort_by_key(|b| b.col_start);
@@ -160,11 +154,7 @@ impl SchurPartition {
         }
 
         if let Some(col) = claimed.iter().position(|c| !c) {
-            return Err(LinAlgError::InvalidInput(format!(
-                "column {col} of the {total}-column system belongs to no variable; the \
-                 partition does not cover the problem"
-            ))
-            .log());
+            return Err(LinAlgError::UncoveredColumn { column: col, total }.log());
         }
 
         Ok(Self {
@@ -182,17 +172,15 @@ impl SchurPartition {
 
     fn claim(claimed: &mut [bool], col: usize, total: usize, key: VarKey) -> LinAlgResult<()> {
         let slot = claimed.get_mut(col).ok_or_else(|| {
-            LinAlgError::InvalidInput(format!(
-                "variable {key:?} spans column {col}, past the {total}-column system"
-            ))
+            LinAlgError::IndexOutOfRange {
+                what: "variable column",
+                index: col,
+                len: total,
+            }
             .log()
         })?;
         if *slot {
-            return Err(LinAlgError::InvalidInput(format!(
-                "column {col} is claimed by more than one variable (at {key:?}); variable \
-                 column ranges must not overlap"
-            ))
-            .log());
+            return Err(LinAlgError::OverlappingColumns { column: col, key }.log());
         }
         *slot = true;
         Ok(())
@@ -294,13 +282,10 @@ impl SchurPartition {
                         && other_block != this_block
                     {
                         let other = self.eliminated_blocks[other_block];
-                        return Err(LinAlgError::InvalidInput(format!(
-                            "variables {:?} and {:?} are both marked for elimination but are \
-                             connected by a factor, so H_ee is not block-diagonal and Schur \
-                             elimination would give a wrong step; eliminate only mutually \
-                             unconnected variables",
-                            block.key, other.key
-                        ))
+                        return Err(LinAlgError::ConnectedEliminated {
+                            first: block.key,
+                            second: other.key,
+                        }
                         .log());
                     }
                 }
@@ -552,12 +537,11 @@ impl EliminatedBlocks {
     }
 }
 
+/// Not logged: a singular block is [numerical](LinAlgError::is_numerical),
+/// and a larger damping on `H_ee` may cure it. The optimizer that gives up
+/// logs it.
 fn singular(key: VarKey, dof: usize) -> LinAlgError {
-    LinAlgError::SingularMatrix(format!(
-        "H_ee block for variable {key:?} ({dof}×{dof}) is singular even after regularization; \
-         the variable is unobserved or its observations are degenerate"
-    ))
-    .log()
+    LinAlgError::SingularBlock { key, dof }
 }
 
 #[cfg(test)]

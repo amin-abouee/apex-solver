@@ -15,6 +15,9 @@ pub mod problem;
 pub mod residual_block;
 pub mod variable;
 
+use crate::factors::FactorError;
+use crate::linearizer::LinearizerError;
+use apex_manifolds::ManifoldError;
 use slotmap::new_key_type;
 use thiserror::Error;
 
@@ -25,162 +28,159 @@ new_key_type! {
     pub struct FactorKey;
 }
 
-/// Core module error types for optimization problems and factors
+/// Errors of problem construction and variable bookkeeping.
+///
+/// Built and logged once where the bad input is found. The wrapped module
+/// errors were logged by their own origin and are carried here only for the
+/// context the hop adds.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum CoreError {
-    /// Residual block operation failed
-    #[error("Residual block error: {0}")]
-    ResidualBlock(String),
+    /// A key that is not (or no longer) in the problem.
+    #[error("unknown variable key {key:?}")]
+    UnknownVariable { key: VarKey },
 
-    /// Variable initialization or constraint error
-    #[error("Variable error: {0}")]
-    Variable(String),
+    /// A variable that residual blocks still reference.
+    #[error("variable {key:?} is still used by {blocks} residual block(s); remove them first")]
+    VariableInUse { key: VarKey, blocks: usize },
 
-    /// Factor linearization failed
-    #[error("Factor linearization failed: {0}")]
-    FactorLinearization(String),
+    /// A value whose length disagrees with the slot it is written to.
+    #[error("{what} has {actual} values, expected {expected}")]
+    DimensionMismatch {
+        what: &'static str,
+        expected: usize,
+        actual: usize,
+    },
 
-    /// Symbolic structure construction failed
-    #[error("Symbolic structure error: {0}")]
-    SymbolicStructure(String),
+    /// A tangent index past the variable's degrees of freedom.
+    #[error("index {index} is out of range for a variable with {dof} degrees of freedom")]
+    IndexOutOfRange { index: usize, dof: usize },
 
-    /// Parallel computation error (thread/mutex failures)
-    #[error("Parallel computation error: {0}")]
-    ParallelComputation(String),
+    /// Bounds that are not an ordered pair of numbers.
+    #[error("bounds [{lower}, {upper}] on index {index} are not an ordered pair of numbers")]
+    InvalidBounds {
+        index: usize,
+        lower: f64,
+        upper: f64,
+    },
 
-    /// Dimension mismatch between residual/Jacobian/variables
-    #[error("Dimension mismatch: {0}")]
-    DimensionMismatch(String),
+    /// A variable type that cannot hold a frozen linearization point.
+    #[error("this variable does not support a frozen linearization point")]
+    FreezeUnsupported,
 
-    /// Invalid constraint specification (bounds, fixed indices)
-    #[error("Invalid constraint: {0}")]
-    InvalidConstraint(String),
+    /// A self-whitening factor registered with a noise model as well.
+    #[error(
+        "this factor applies its own square-root information; register it with \
+         NoiseModel::null(), a second noise model would whiten the residual twice"
+    )]
+    DoubleWhitening,
 
-    /// Loss function error
-    #[error("Loss function error: {0}")]
-    LossFunction(String),
+    /// A scalar parameter outside its admissible range.
+    #[error("{owner} {param} must be {requirement}, got {value}")]
+    InvalidParameter {
+        owner: &'static str,
+        param: &'static str,
+        requirement: &'static str,
+        value: f64,
+    },
 
-    /// Invalid input parameter or configuration
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
+    /// A matrix argument of the wrong shape or with non-finite entries.
+    #[error("{what} is {rows}×{cols}; it must be non-empty, square and finite")]
+    InvalidMatrix {
+        what: &'static str,
+        rows: usize,
+        cols: usize,
+    },
+
+    /// A name that matches no registered option.
+    #[error("unknown {kind} {name:?}, expected one of: {valid}")]
+    UnknownName {
+        kind: &'static str,
+        name: String,
+        valid: String,
+    },
+
+    /// The factor rejected the variables it was registered with.
+    #[error("residual block registration rejected")]
+    Factor(#[from] FactorError),
+
+    /// A parameter block that is not a valid element of its manifold.
+    #[error("invalid variable value")]
+    Manifold(#[from] ManifoldError),
+
+    /// Residual or Jacobian assembly failed.
+    #[error("problem linearization failed")]
+    Linearizer(#[from] LinearizerError),
 }
 
 /// Result type for core module operations
 pub type CoreResult<T> = Result<T, CoreError>;
 
-impl From<crate::linearizer::LinearizerError> for CoreError {
-    fn from(err: crate::linearizer::LinearizerError) -> Self {
-        match err {
-            crate::linearizer::LinearizerError::SymbolicStructure(msg) => {
-                CoreError::SymbolicStructure(msg)
-            }
-            crate::linearizer::LinearizerError::ParallelComputation(msg) => {
-                CoreError::ParallelComputation(msg)
-            }
-            crate::linearizer::LinearizerError::Variable(msg) => CoreError::Variable(msg),
-            crate::linearizer::LinearizerError::FactorLinearization(msg) => {
-                CoreError::FactorLinearization(msg)
-            }
-            crate::linearizer::LinearizerError::InvalidInput(msg) => CoreError::InvalidInput(msg),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ErrorLogging;
+    use crate::error::{ApexSolverError, ApexSolverResult, ErrorChainExt};
+    use crate::factors::FactorResult;
 
-    // -------------------------------------------------------------------------
-    // CoreError Display — one test per variant
-    // -------------------------------------------------------------------------
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    #[test]
-    fn test_core_error_residual_block_display() {
-        let e = CoreError::ResidualBlock("bad block".into());
-        assert!(e.to_string().contains("bad block"));
+    fn validate() -> FactorResult<()> {
+        Err(FactorError::VariableCount {
+            factor: "BetweenFactor",
+            expected: 2,
+            actual: 1,
+        })
+    }
+
+    fn register() -> CoreResult<()> {
+        validate()?;
+        Ok(())
+    }
+
+    fn api() -> ApexSolverResult<()> {
+        register()?;
+        Ok(())
     }
 
     #[test]
-    fn test_core_error_variable_display() {
-        let e = CoreError::Variable("bad var".into());
-        assert!(e.to_string().contains("bad var"));
+    fn a_factor_error_reaches_the_root_through_core() -> TestResult {
+        let error = api().err().ok_or("expected an error")?;
+        assert!(matches!(
+            error,
+            ApexSolverError::Core(CoreError::Factor(FactorError::VariableCount { .. }))
+        ));
+        assert_eq!(
+            error.chain_compact(),
+            "residual block registration rejected → BetweenFactor expects 2 variables, got 1"
+        );
+        Ok(())
     }
 
     #[test]
-    fn test_core_error_factor_linearization_display() {
-        let e = CoreError::FactorLinearization("jacobian fail".into());
-        assert!(e.to_string().contains("jacobian fail"));
-    }
-
-    #[test]
-    fn test_core_error_symbolic_structure_display() {
-        let e = CoreError::SymbolicStructure("sparse error".into());
-        assert!(e.to_string().contains("sparse error"));
-    }
-
-    #[test]
-    fn test_core_error_parallel_computation_display() {
-        let e = CoreError::ParallelComputation("thread panic".into());
-        assert!(e.to_string().contains("thread panic"));
-    }
-
-    #[test]
-    fn test_core_error_dimension_mismatch_display() {
-        let e = CoreError::DimensionMismatch("3 vs 6".into());
-        assert!(e.to_string().contains("3 vs 6"));
-    }
-
-    #[test]
-    fn test_core_error_invalid_constraint_display() {
-        let e = CoreError::InvalidConstraint("out of bounds".into());
-        assert!(e.to_string().contains("out of bounds"));
-    }
-
-    #[test]
-    fn test_core_error_loss_function_display() {
-        let e = CoreError::LossFunction("huber weight".into());
-        assert!(e.to_string().contains("huber weight"));
-    }
-
-    #[test]
-    fn test_core_error_invalid_input_display() {
-        let e = CoreError::InvalidInput("null pointer".into());
-        assert!(e.to_string().contains("null pointer"));
-    }
-
-    // -------------------------------------------------------------------------
-    // log() and log_with_source() return self (variant preserved)
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_core_error_log_returns_self() {
-        let e = CoreError::InvalidInput("test_log".into());
-        let returned = e.log();
-        assert!(returned.to_string().contains("test_log"));
-    }
-
-    #[test]
-    fn test_core_error_log_with_source_returns_self() {
-        let e = CoreError::DimensionMismatch("mismatch".into());
-        let source = std::io::Error::other("source error");
-        let returned = e.log_with_source(source);
-        assert!(returned.to_string().contains("mismatch"));
-    }
-
-    // -------------------------------------------------------------------------
-    // CoreResult type alias
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_core_result_ok() {
-        let r: CoreResult<i32> = Ok(42);
-        assert!(matches!(r, Ok(42)));
-    }
-
-    #[test]
-    fn test_core_result_err() {
-        let r: CoreResult<i32> = Err(CoreError::InvalidInput("oops".into()));
-        assert!(r.is_err());
+    fn display_strings_name_their_values() {
+        let mismatch = CoreError::DimensionMismatch {
+            what: "parameter block",
+            expected: 7,
+            actual: 6,
+        };
+        assert_eq!(
+            mismatch.to_string(),
+            "parameter block has 6 values, expected 7"
+        );
+        let index = CoreError::IndexOutOfRange { index: 7, dof: 3 };
+        assert_eq!(
+            index.to_string(),
+            "index 7 is out of range for a variable with 3 degrees of freedom"
+        );
+        let parameter = CoreError::InvalidParameter {
+            owner: "HuberLoss",
+            param: "scale",
+            requirement: "finite and positive",
+            value: -1.0,
+        };
+        assert_eq!(
+            parameter.to_string(),
+            "HuberLoss scale must be finite and positive, got -1"
+        );
     }
 }

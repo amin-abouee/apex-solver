@@ -44,13 +44,13 @@ use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
 use nalgebra::{DMatrix, Matrix3, Vector2, Vector3};
 
-use crate::core::CoreError;
-use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
+use crate::error::ErrorLogging;
 use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_block_sizes;
+use crate::factors::common::validate::{expect_finite, expect_positive};
+use crate::factors::{Factor, FactorError, FactorResult};
 
 /// Geometric columns of [`InverseRangeProjectionFactor`] over pose group `G`:
 /// two states, two `SE3` extrinsics (6 each) and `ρ`.
@@ -72,26 +72,21 @@ struct Observation {
 
 impl Observation {
     fn new(
+        factor: &'static str,
         host_bearing: Vector3<f64>,
         measurement: Vector2<f64>,
         pixel_sigma: f64,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
         let norm = host_bearing.norm();
         if !norm.is_finite() || norm <= 0.0 {
-            return Err(CoreError::InvalidInput(format!(
-                "host bearing must be finite and non-zero, got {host_bearing:?}"
-            )));
+            return Err(FactorError::Degenerate {
+                factor,
+                what: "host bearing",
+            }
+            .log());
         }
-        if !measurement.iter().all(|v| v.is_finite()) {
-            return Err(CoreError::InvalidInput(format!(
-                "measurement must be finite, got {measurement:?}"
-            )));
-        }
-        if !pixel_sigma.is_finite() || pixel_sigma <= 0.0 {
-            return Err(CoreError::InvalidInput(format!(
-                "pixel sigma must be finite and positive, got {pixel_sigma}"
-            )));
-        }
+        expect_finite(factor, "measurement", measurement.iter())?;
+        expect_positive(factor, "pixel sigma", pixel_sigma)?;
         Ok(Self {
             host_bearing: host_bearing / norm,
             measurement,
@@ -218,9 +213,14 @@ impl<G: RigidPose, CAM> InverseRangeProjectionFactor<G, CAM> {
         host_bearing: Vector3<f64>,
         measurement: Vector2<f64>,
         pixel_sigma: f64,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
         Ok(Self {
-            observation: Observation::new(host_bearing, measurement, pixel_sigma)?,
+            observation: Observation::new(
+                "InverseRangeProjectionFactor",
+                host_bearing,
+                measurement,
+                pixel_sigma,
+            )?,
             marker: PhantomData,
         })
     }
@@ -298,7 +298,7 @@ where
         (2, moving_columns::<G>() + CAM::INTRINSIC_DIM)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[
@@ -345,9 +345,14 @@ impl<CAM> StereoInverseRangeFactor<CAM> {
         host_bearing: Vector3<f64>,
         measurement: Vector2<f64>,
         pixel_sigma: f64,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
         Ok(Self {
-            observation: Observation::new(host_bearing, measurement, pixel_sigma)?,
+            observation: Observation::new(
+                "StereoInverseRangeFactor",
+                host_bearing,
+                measurement,
+                pixel_sigma,
+            )?,
             camera: PhantomData,
         })
     }
@@ -405,7 +410,7 @@ where
         (2, STEREO_COLUMNS + CAM::INTRINSIC_DIM)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[SE3::REP_SIZE, SE3::REP_SIZE, 1, CAM::INTRINSIC_DIM],

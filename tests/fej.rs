@@ -6,7 +6,8 @@
 //! Jacobians of the states it touches drift afterwards fabricates information
 //! along the directions the measurements never observed.
 
-mod common;
+// `pub` so helpers a given test binary does not call are not reported as dead code.
+pub mod common;
 use common::lm_solver;
 
 use apex_solver::JacobianEvaluation;
@@ -34,14 +35,14 @@ fn chain(start: &[f64]) -> Result<(Problem, Vec<VarKey>), Box<dyn std::error::Er
         ]))),
         None,
         NoiseModel::from_sigmas(&[0.1, 0.1])?,
-    );
+    )?;
     for pair in keys.windows(2) {
         problem.add_residual_block_with_noise(
             &[pair[0], pair[1]],
             Box::new(BetweenFactor::new(Rn::from_vec(vec![1.0, 0.0]))),
             None,
             NoiseModel::from_sigmas(&[0.05, 0.05])?,
-        );
+        )?;
     }
     Ok((problem, keys))
 }
@@ -69,7 +70,7 @@ fn a_removed_key_cannot_be_frozen() -> TestResult {
     let (mut problem, _keys) = chain(&[0.0, 1.0, 2.0])?;
     let stray = problem.add_variable(ManifoldType::RN, DVector::from_column_slice(&[0.0]));
     problem.try_remove_variable(stray)?;
-    let Err(CoreError::Variable(_)) = problem.freeze_linearization_point(stray) else {
+    let Err(CoreError::UnknownVariable { .. }) = problem.freeze_linearization_point(stray) else {
         return Err("expected a Variable error for a removed key".into());
     };
     Ok(())
@@ -255,10 +256,14 @@ fn an_explicit_linearization_point_survives_a_rebuild() -> TestResult {
         Some(vec![1.0, 0.0])
     );
 
-    let Err(CoreError::Variable(message)) = problem.set_linearization_point(keys[1], &[1.0]) else {
+    let Err(CoreError::DimensionMismatch {
+        expected: 2,
+        actual: 1,
+        ..
+    }) = problem.set_linearization_point(keys[1], &[1.0])
+    else {
         return Err("a wrong-length linearization point must be rejected".into());
     };
-    assert!(message.contains("takes 2 parameters"), "{message}");
     Ok(())
 }
 

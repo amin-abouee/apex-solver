@@ -110,9 +110,10 @@ impl LazyNormalEquations {
         self.ensure(jacobians)?;
         match self.0.as_mut() {
             Some(cache) => cache.compute(residuals, jacobians),
-            None => Err(LinAlgError::InvalidState(
-                "normal equations cache not initialized".to_string(),
-            )),
+            None => Err(LinAlgError::NotInitialized {
+                component: "normal equations cache",
+            }
+            .log()),
         }
     }
 
@@ -121,9 +122,10 @@ impl LazyNormalEquations {
     pub fn damped_hessian(&self, damping: &Damping) -> LinAlgResult<SparseColMat<usize, f64>> {
         match self.0.as_ref() {
             Some(cache) => cache.damped_hessian(damping),
-            None => Err(LinAlgError::InvalidState(
-                "normal equations cache not initialized".to_string(),
-            )),
+            None => Err(LinAlgError::NotInitialized {
+                component: "normal equations cache",
+            }
+            .log()),
         }
     }
 
@@ -132,9 +134,10 @@ impl LazyNormalEquations {
     pub fn product_fingerprint(&self) -> LinAlgResult<super::pattern::PatternFingerprint> {
         match self.0.as_ref() {
             Some(cache) => Ok(cache.product_fingerprint()),
-            None => Err(LinAlgError::InvalidState(
-                "normal equations cache not initialized".to_string(),
-            )),
+            None => Err(LinAlgError::NotInitialized {
+                component: "normal equations cache",
+            }
+            .log()),
         }
     }
 
@@ -142,9 +145,10 @@ impl LazyNormalEquations {
     pub fn product_symbolic(&self) -> LinAlgResult<SymbolicSparseColMat<usize>> {
         match self.0.as_ref() {
             Some(cache) => Ok(cache.product_symbolic()),
-            None => Err(LinAlgError::InvalidState(
-                "normal equations cache not initialized".to_string(),
-            )),
+            None => Err(LinAlgError::NotInitialized {
+                component: "normal equations cache",
+            }
+            .log()),
         }
     }
 }
@@ -226,8 +230,11 @@ impl NormalEquationsCache {
         let (jt_pattern, value_perm) = transpose_symbolic(sym)?;
         let (product_symbolic, _) =
             sparse_sparse_matmul_symbolic(jt_pattern.rb(), sym).map_err(|e| {
-                LinAlgError::MatrixConversion(format!("Symbolic JᵀJ product failed: {e:?}"))
-                    .log_with_source(e)
+                LinAlgError::Symbolic {
+                    context: "the JᵀJ product",
+                    source: e.into(),
+                }
+                .log()
             })?;
 
         let ncols = jacobian.ncols();

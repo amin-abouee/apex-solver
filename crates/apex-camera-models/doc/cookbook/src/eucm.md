@@ -57,7 +57,7 @@ and the bearing is $(m_x, m_y, m_z)$ normalised to a unit ray.
 **Validity.** For $\alpha > \tfrac12$ a real solution requires
 $r^2 \le \dfrac{1}{(2\alpha - 1)\,\beta}$; violating this (or a negative
 radicand) raises `PointOutsideImage`, and a vanishing denominator raises
-`NumericalError`.
+`UnprojectionError::DenominatorTooSmall`.
 
 <a id="jacobians"></a>
 ## Point Jacobian

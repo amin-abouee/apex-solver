@@ -1,4 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Console output is this CLI's user interface (progress report).
 
 //! Extract topic data from ROS2 bag files
@@ -33,14 +32,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() != 4 {
-        eprintln!("Usage: {} <bag_path> <topic_name> <output_folder>", args[0]);
-        eprintln!("\nExamples:");
-        eprintln!(
+        writeln!(
+            std::io::stderr().lock(),
+            "Usage: {} <bag_path> <topic_name> <output_folder>",
+            args[0]
+        )?;
+        writeln!(std::io::stderr().lock(), "\nExamples:")?;
+        writeln!(
+            std::io::stderr().lock(),
             "  {} ./my_bag /camera/image_raw ./extracted_images/",
             args[0]
-        );
-        eprintln!("  {} ./my_bag /imu/data ./extracted_imu/", args[0]);
-        eprintln!("  {} ./my_bag /odom ./extracted_odom/", args[0]);
+        )?;
+        writeln!(
+            std::io::stderr().lock(),
+            "  {} ./my_bag /imu/data ./extracted_imu/",
+            args[0]
+        )?;
+        writeln!(
+            std::io::stderr().lock(),
+            "  {} ./my_bag /odom ./extracted_odom/",
+            args[0]
+        )?;
         std::process::exit(1);
     }
 
@@ -48,9 +60,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic_name = &args[2];
     let output_folder = &args[3];
 
-    println!("Opening bag: {bag_path}");
-    println!("Target topic: {topic_name}");
-    println!("Output folder: {output_folder}");
+    writeln!(std::io::stdout().lock(), "Opening bag: {bag_path}")?;
+    writeln!(std::io::stdout().lock(), "Target topic: {topic_name}")?;
+    writeln!(std::io::stdout().lock(), "Output folder: {output_folder}")?;
 
     fs::create_dir_all(output_folder)?;
 
@@ -63,32 +75,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find(|topic| topic.name.as_str() == topic_name)
         .ok_or_else(|| format!("Topic '{topic_name}' not found in bag"))?;
 
-    println!(
+    writeln!(
+        std::io::stdout().lock(),
         "Found topic: {} ({})",
-        target_topic.name, target_topic.message_type
-    );
-    println!("Message count: {}", target_topic.message_count);
+        target_topic.name,
+        target_topic.message_type
+    )?;
+    writeln!(
+        std::io::stdout().lock(),
+        "Message count: {}",
+        target_topic.message_count
+    )?;
 
-    println!("\nAvailable topics in bag:");
+    writeln!(std::io::stdout().lock(), "\nAvailable topics in bag:")?;
     for topic in &topics {
         let marker = if topic.name.as_str() == topic_name {
             ">> "
         } else {
             "   "
         };
-        println!(
+        writeln!(
+            std::io::stdout().lock(),
             "{}  {} ({}) - {} messages",
-            marker, topic.name, topic.message_type, topic.message_count
-        );
+            marker,
+            topic.name,
+            topic.message_type,
+            topic.message_count
+        )?;
     }
 
     match determine_export_strategy(&target_topic.message_type) {
         ExportStrategy::Images => {
-            println!("\nExporting as PNG image files...");
+            writeln!(
+                std::io::stdout().lock(),
+                "\nExporting as PNG image files..."
+            )?;
             extract_images(&mut reader, topic_name, output_folder)?;
         }
         ExportStrategy::Csv => {
-            println!("\nExporting as CSV file...");
+            writeln!(std::io::stdout().lock(), "\nExporting as CSV file...")?;
             extract_to_csv(
                 &mut reader,
                 topic_name,
@@ -98,8 +123,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("\nExtraction completed successfully!");
-    println!("Check output folder: {output_folder}");
+    writeln!(
+        std::io::stdout().lock(),
+        "\nExtraction completed successfully!"
+    )?;
+    writeln!(
+        std::io::stdout().lock(),
+        "Check output folder: {output_folder}"
+    )?;
 
     Ok(())
 }
@@ -137,18 +168,25 @@ fn extract_images(
                 Ok(image_info) => {
                     save_image_as_png(&output_path, &image_info)?;
                     if image_count % 100 == 0 {
-                        println!("  Extracted {} images...", image_count + 1);
+                        writeln!(
+                            std::io::stdout().lock(),
+                            "  Extracted {} images...",
+                            image_count + 1
+                        )?;
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to extract image {image_count}: {e}");
+                    writeln!(
+                        std::io::stderr().lock(),
+                        "Warning: Failed to extract image {image_count}: {e}"
+                    )?;
                 }
             }
             image_count += 1;
         }
     }
 
-    println!("Extracted {image_count} images");
+    writeln!(std::io::stdout().lock(), "Extracted {image_count} images")?;
 
     let summary_path = PathBuf::from(output_folder).join("image_summary.txt");
     let mut summary_file = fs::File::create(summary_path)?;
@@ -192,13 +230,19 @@ fn extract_to_csv(
             message_count += 1;
 
             if message_count % 1000 == 0 {
-                println!("  Processed {message_count} messages...");
+                writeln!(
+                    std::io::stdout().lock(),
+                    "  Processed {message_count} messages..."
+                )?;
             }
         }
     }
 
-    println!("Exported {message_count} messages to CSV");
-    println!("CSV file: {}", csv_path.display());
+    writeln!(
+        std::io::stdout().lock(),
+        "Exported {message_count} messages to CSV"
+    )?;
+    writeln!(std::io::stdout().lock(), "CSV file: {}", csv_path.display())?;
 
     Ok(())
 }

@@ -22,6 +22,8 @@
 //! - manif C++ library: include/manif/impl/se_2_3/
 //! - "A micro Lie theory for state estimation in robotics" - Solà et al.
 
+use crate::ElementResult;
+use crate::util::check_param_block;
 use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
@@ -405,6 +407,10 @@ impl LieGroup for SE23 {
         }
     }
 
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        check_param_block("SE23", s, Self::REP_SIZE, Some(3))
+    }
+
     fn vee(&self) -> Self::TangentVector {
         self.log(None)
     }
@@ -473,25 +479,12 @@ impl SE23Tangent {
         self.data.fixed_rows::<3>(6).into_owned()
     }
 
-    /// Create SE23Tangent from individual scalar components.
+    /// Create SE23Tangent from its scalar components.
     ///
     /// Order: [ρ_x, ρ_y, ρ_z, θ_x, θ_y, θ_z, ν_x, ν_y, ν_z]
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_components(
-        rho_x: f64,
-        rho_y: f64,
-        rho_z: f64,
-        theta_x: f64,
-        theta_y: f64,
-        theta_z: f64,
-        nu_x: f64,
-        nu_y: f64,
-        nu_z: f64,
-    ) -> Self {
+    pub fn from_components(components: [f64; 9]) -> Self {
         SE23Tangent {
-            data: Vector9::from_column_slice(&[
-                rho_x, rho_y, rho_z, theta_x, theta_y, theta_z, nu_x, nu_y, nu_z,
-            ]),
+            data: Vector9::from_column_slice(&components),
         }
     }
 
@@ -772,8 +765,6 @@ impl Tangent<SE23> for SE23Tangent {
     }
 
     fn generator(&self, i: usize) -> <SE23 as LieGroup>::LieAlgebra {
-        assert!(i < 9, "SE_2(3) only has generators for indices 0-8");
-
         let mut generator = SMatrix::<f64, 5, 5>::zeros();
 
         match i {
@@ -797,7 +788,7 @@ impl Tangent<SE23> for SE23Tangent {
                         generator[(0, 1)] = -1.0;
                         generator[(1, 0)] = 1.0;
                     }
-                    _ => unreachable!(),
+                    _ => {}
                 }
             }
             6..=8 => {
@@ -805,7 +796,7 @@ impl Tangent<SE23> for SE23Tangent {
                 let idx = i - 6;
                 generator[(idx, 4)] = 1.0;
             }
-            _ => unreachable!(),
+            _ => {}
         }
 
         generator
@@ -1085,14 +1076,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_se23_generator_invalid_index() {
-        let tangent = SE23Tangent::new(
-            Vector3::new(1.0, 1.0, 1.0),
-            Vector3::new(1.0, 1.0, 1.0),
-            Vector3::new(1.0, 1.0, 1.0),
+    fn test_se23_generator_out_of_range_is_zero_and_checked_form_errors() {
+        let tangent = SE23Tangent::zero();
+        assert_eq!(tangent.generator(9), SMatrix::<f64, 5, 5>::zeros());
+        assert_eq!(tangent.generator(usize::MAX), SMatrix::<f64, 5, 5>::zeros());
+        assert_eq!(
+            tangent.try_generator(9).err(),
+            Some(crate::TangentError::GeneratorIndex {
+                group: "SE23",
+                index: 9,
+                dim: 9
+            })
         );
-        let _generator = tangent.generator(9);
+        assert!(tangent.try_generator(9 - 1).is_ok());
     }
 
     #[test]
@@ -1166,7 +1162,7 @@ mod tests {
 
     #[test]
     fn test_se23_tangent_from_components() {
-        let tangent = SE23Tangent::from_components(1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 4.0, 5.0, 6.0);
+        let tangent = SE23Tangent::from_components([1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 4.0, 5.0, 6.0]);
 
         let expected = SE23Tangent::new(
             Vector3::new(1.0, 2.0, 3.0),
@@ -1558,13 +1554,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_se23_tangent_generator_out_of_range() {
-        let tangent = SE23Tangent::zero();
-        tangent.generator(9);
-    }
-
-    #[test]
     fn se23_param_slice_round_trip() {
         let g = SE23::random();
         let recovered = SE23::from_param_slice(g.as_param_slice());
@@ -1644,9 +1633,9 @@ mod se23_jacobian_fd_tests {
             ),
         ];
         for (rho, theta, nu) in cases {
-            let xi = SE23Tangent::from_components(
+            let xi = SE23Tangent::from_components([
                 rho.x, rho.y, rho.z, theta.x, theta.y, theta.z, nu.x, nu.y, nu.z,
-            );
+            ]);
             let analytic = xi.right_jacobian();
             let numeric = fd_right_jacobian(&xi);
             let err = (analytic - numeric).norm();

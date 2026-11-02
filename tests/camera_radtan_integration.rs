@@ -181,12 +181,12 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
             &[pose_keys[cam_idx], landmarks_key, intrinsics_key],
             Box::new(factor),
             None,
-        );
+        )?;
     }
 
     // Fix first camera pose to anchor gauge freedom (prevent drift)
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
 
     // ============================================================================
@@ -451,12 +451,12 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
             &[pose_keys[cam_idx], landmarks_key, intrinsics_key],
             Box::new(factor),
             None,
-        );
+        )?;
     }
 
     // Fix first camera
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
 
     // Optimize

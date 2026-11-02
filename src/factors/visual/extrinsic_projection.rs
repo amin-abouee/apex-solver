@@ -7,7 +7,7 @@
 //! that camera — so they belong in the graph as their own variable, where many
 //! observations can determine them.
 
-use apex_camera_models::{CameraModel, CameraModelError};
+use apex_camera_models::{CameraModel, ProjectionError};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
@@ -16,6 +16,7 @@ use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_block_sizes;
@@ -106,7 +107,7 @@ impl<CAM: CameraModel + Send + Sync + 'static> Factor for ExtrinsicProjectionFac
 
         let projection = match self.camera.project(&p_cam) {
             Ok(uv) => uv,
-            Err(CameraModelError::PointBehindCamera { z, min_z }) => {
+            Err(ProjectionError::PointBehindCamera { z, min_z }) => {
                 if self.verbose_cheirality {
                     warn!("ExtrinsicProjectionFactor: point behind camera (z={z}, min_z={min_z})");
                 }
@@ -170,7 +171,7 @@ impl<CAM: CameraModel + Send + Sync + 'static> Factor for ExtrinsicProjectionFac
         (2, 15)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[SE3::REP_SIZE, SE3::REP_SIZE, 3],

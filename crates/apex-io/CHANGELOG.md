@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (error propagation)
+- **Breaking:** `IoError` is now the crate root wrapping one error per module: `GraphError` (the old
+  pose-graph `IoError`), `BalError`, `TrajectoryError`, `AslError`, `LamariaError`, `DatasetError`,
+  `VrsError`/`LayoutError` and `BagError`, which in turn wraps `Ros1Error`, `Ros2BagError`, `McapError`,
+  `CdrError`, `PointCloudError`, `TranscodeError` and `DdsError`. `BagError::Generic` and the stringly
+  `VrsError::{Corrupt, Unsupported, Decompress, Layout, Usage}` are gone; zstd, lz4, rusqlite, serde,
+  rustdds and tokio errors are kept as `source()`. Errors are logged once through `ErrorLogging` in `error.rs`.
+- **Breaking:** `GraphLoader`, `FromCdr`, `FromRos1` (`from_ros1`), `CdrDeserializer`, the storage traits,
+  `utils::ensure_*`/`download_file` and `transcode::plan_topic` return their module error;
+  `deserialize_message` returns a `DecodedMessage` enum; `catalog_definition`/`catalog_md5` return
+  `TranscodeResult<Option<String>>`.
+
+### Fixed (error propagation)
+- No panics or unbounded allocations from malformed input: a short `EDGE_SE3:QUAT` line, BAL header
+  counts, ROS1 record/chunk lengths, and MCAP record lengths and offsets are checked.
+- ROS 2 `Imu`, `PoseWithCovariance`, `PointStamped`, `NavSatFix` and `Odometry` decode in spec order; a
+  short or broken message is an error instead of zero/identity/`"odom"`/`"base_link"` placeholders.
+- A VRS file with an unusable index warns with the cause before rebuilding it; the read-ahead reader
+  returns an error instead of spinning when its worker dies; unknown G2O/TORO records are reported once
+  per type; an MCAP or SQLite message on an unknown channel is an error or uses its own channel record,
+  never a blank connection.
+
 ### Added (LaMAria)
 - **`lamaria::Calibration`**: a typed reader for the dataset's `aria_calibrations/<sequence>.json` (two
   `RAD_TAN_THIN_PRISM_FISHEYE` cameras and the IMU: intrinsics, `T_body_sensor`, noise and saturation). All 86 files parse.

@@ -1,4 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Console output is this CLI's user interface (verification report).
 
 //! Check that two bags hold the same messages.
@@ -12,12 +11,12 @@
 //! Usage: `bag_verify <A> <B> [--topics a,b] [--start NS] [--end NS]`
 //! Exit status: 0 identical, 1 differences, 2 error.
 
-mod common;
+use std::io::Write as _;
 
 use apex_io::rosbag::transcode::{Dialect, Transcoder, dialect_of, plan_topic};
 use apex_io::rosbag::{BagReader, Selection};
 use clap::Parser;
-use common::CliResult;
+type CliResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -86,7 +85,7 @@ fn digest(path: &PathBuf, args: &Args) -> CliResult<BTreeMap<String, Digest>> {
         .cloned()
         .collect();
     for s in skipped {
-        eprintln!("WARN: not comparable ({s})");
+        writeln!(std::io::stderr().lock(), "WARN: not comparable ({s})")?;
     }
 
     let mut out: BTreeMap<String, Digest> = BTreeMap::new();
@@ -115,7 +114,7 @@ fn main() -> CliResult<()> {
     let (a, b) = match (digest(&args.a, &args), digest(&args.b, &args)) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => {
-            eprintln!("error: {e}");
+            writeln!(std::io::stderr().lock(), "error: {e}")?;
             std::process::exit(2);
         }
     };
@@ -124,22 +123,31 @@ fn main() -> CliResult<()> {
     for topic in topics {
         match (a.get(topic), b.get(topic)) {
             (Some(x), Some(y)) if x == y => {
-                println!("OK    {topic}: {} msgs, digest {:016x}", x.count, x.hash);
+                writeln!(
+                    std::io::stdout().lock(),
+                    "OK    {topic}: {} msgs, digest {:016x}",
+                    x.count,
+                    x.hash
+                )?;
             }
             (Some(x), Some(y)) => {
                 differences += 1;
-                println!(
+                writeln!(
+                    std::io::stdout().lock(),
                     "DIFF  {topic}: A {} msgs {:016x} / B {} msgs {:016x}",
-                    x.count, x.hash, y.count, y.hash
-                );
+                    x.count,
+                    x.hash,
+                    y.count,
+                    y.hash
+                )?;
             }
             (Some(_), None) => {
                 differences += 1;
-                println!("ONLY-A {topic}");
+                writeln!(std::io::stdout().lock(), "ONLY-A {topic}")?;
             }
             (None, _) => {
                 differences += 1;
-                println!("ONLY-B {topic}");
+                writeln!(std::io::stdout().lock(), "ONLY-B {topic}")?;
             }
         }
     }

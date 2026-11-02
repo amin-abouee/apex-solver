@@ -12,10 +12,11 @@
 //!   `serialization_format` and its schema name (e.g. `sensor_msgs/Image`)
 //!   as `message_type`; [`Reader::metadata`] returns `None`.
 
+use super::error::{Ros2BagError, Ros2BagResult as Result};
 use super::metadata::BagMetadata;
 use super::storage::mcap::{McapStorageReader, McapSummaryStats};
 use super::storage::{StorageReader, create_storage_reader};
-use crate::rosbag::error::{BagError, ReaderError, Result};
+use crate::error::ErrorLogging;
 use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage, TopicInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,15 +33,21 @@ impl MessageDecoder {
     fn new() -> Result<Self> {
         Ok(Self {
             decompressor: zstd::bulk::Decompressor::new()
-                .map_err(|e| ReaderError::generic(format!("zstd init failed: {e}")))?,
+                .map_err(|e| Ros2BagError::ZstdInit(e).log())?,
         })
     }
 
     /// Decode one payload. A payload that is not a zstd frame is a corrupt
     /// bag and an error -- never silently passed through.
     fn decode(&mut self, data: Vec<u8>) -> Result<Vec<u8>> {
-        let fail =
-            |e: std::io::Error| ReaderError::generic(format!("MESSAGE-compressed payload: {e}"));
+        self.decode_unlogged(data).map_err(ErrorLogging::log)
+    }
+
+    fn decode_unlogged(&mut self, data: Vec<u8>) -> Result<Vec<u8>> {
+        let fail = |source: std::io::Error| Ros2BagError::Zstd {
+            what: "decompression of a MESSAGE-compressed payload",
+            source,
+        };
         match zstd::zstd_safe::get_frame_content_size(&data) {
             // Fast path: the frame announces its size (rosbag2 one-shot compress).
             Ok(Some(size)) if size <= MAX_MESSAGE_FRAME => self
@@ -49,9 +56,7 @@ impl MessageDecoder {
                 .map_err(fail),
             // Streaming frames carry no size; let the decoder grow the output.
             Ok(_) => zstd::stream::decode_all(&data[..]).map_err(fail),
-            Err(_) => Err(ReaderError::generic(
-                "MESSAGE-compressed payload does not start with a zstd frame",
-            )),
+            Err(_) => Err(Ros2BagError::NotZstdFrame),
         }
     }
 
@@ -96,7 +101,7 @@ impl Reader {
         let bag_path = bag_path.as_ref().to_path_buf();
 
         if !bag_path.exists() {
-            return Err(ReaderError::BagNotFound { path: bag_path });
+            return Err(Ros2BagError::BagNotFound { path: bag_path }.log());
         }
 
         if bag_path.is_file() {
@@ -104,13 +109,7 @@ impl Reader {
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("mcap"))
             {
-                return Err(ReaderError::UnsupportedStorageFormat {
-                    format: format!(
-                        "bare bag file '{}' must be .mcap (a bag directory with metadata.yaml, \
-                         or a ROS1 .bag via Ros1Reader, otherwise)",
-                        bag_path.display()
-                    ),
-                });
+                return Err(Ros2BagError::BareFileNotMcap { path: bag_path }.log());
             }
             return Ok(Self {
                 bag_path,
@@ -160,7 +159,10 @@ impl Reader {
             return Ok(());
         }
 
-        let metadata = self.metadata.as_ref().ok_or(BagError::BagNotOpen)?;
+        let metadata = self
+            .metadata
+            .as_ref()
+            .ok_or_else(|| Ros2BagError::NotOpen.log())?;
         let info = metadata.info();
 
         // MESSAGE compression: payloads are zstd frames. Another named format
@@ -170,9 +172,10 @@ impl Reader {
         let message_mode = info.compression_mode.eq_ignore_ascii_case("message");
         if message_mode && !info.compression_format.is_empty() && info.compression_format != "zstd"
         {
-            return Err(ReaderError::UnsupportedCompressionFormat {
+            return Err(Ros2BagError::UnsupportedCompressionFormat {
                 format: info.compression_format.clone(),
-            });
+            }
+            .log());
         }
         let message_compressed = message_mode && info.compression_format == "zstd";
 
@@ -207,7 +210,7 @@ impl Reader {
 
         for path in &storage_paths {
             if !path.exists() {
-                return Err(ReaderError::StorageFileNotFound { path: path.clone() });
+                return Err(Ros2BagError::StorageFileNotFound { path: path.clone() }.log());
             }
         }
 
@@ -375,11 +378,7 @@ impl Reader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Box<dyn Iterator<Item = Result<Message>> + '_>> {
-        if !self.is_open {
-            return Err(ReaderError::BagNotOpen);
-        }
-
-        let storage = self.storage.as_ref().ok_or(BagError::BagNotOpen)?;
+        let storage = self.open_storage()?;
         let iterator = storage.messages_filtered(connections, start, stop)?;
         if self.message_compression {
             let mut decoder = MessageDecoder::new()?;
@@ -392,11 +391,7 @@ impl Reader {
 
     /// Get raw message data without deserialization for maximum performance
     pub fn raw_messages(&self) -> Result<Box<dyn Iterator<Item = Result<RawMessage>> + '_>> {
-        if !self.is_open {
-            return Err(ReaderError::BagNotOpen);
-        }
-
-        let storage = self.storage.as_ref().ok_or(BagError::BagNotOpen)?;
+        let storage = self.open_storage()?;
         let iterator = storage.raw_messages()?;
         if self.message_compression {
             let mut decoder = MessageDecoder::new()?;
@@ -414,11 +409,7 @@ impl Reader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Box<dyn Iterator<Item = Result<RawMessage>> + '_>> {
-        if !self.is_open {
-            return Err(ReaderError::BagNotOpen);
-        }
-
-        let storage = self.storage.as_ref().ok_or(BagError::BagNotOpen)?;
+        let storage = self.open_storage()?;
         let iterator = storage.raw_messages_filtered(connections, start, stop)?;
         if self.message_compression {
             let mut decoder = MessageDecoder::new()?;
@@ -436,17 +427,21 @@ impl Reader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Vec<RawMessage>> {
-        if !self.is_open {
-            return Err(ReaderError::BagNotOpen);
-        }
-
-        let storage = self.storage.as_ref().ok_or(BagError::BagNotOpen)?;
+        let storage = self.open_storage()?;
         let batch = storage.read_raw_messages_batch(connections, start, stop)?;
         if self.message_compression {
             let mut decoder = MessageDecoder::new()?;
             return batch.into_iter().map(|m| decoder.raw(m)).collect();
         }
         Ok(batch)
+    }
+
+    /// The open storage backend, or [`Ros2BagError::NotOpen`].
+    fn open_storage(&self) -> Result<&dyn StorageReader> {
+        match (&self.storage, self.is_open) {
+            (Some(storage), true) => Ok(storage.as_ref()),
+            _ => Err(Ros2BagError::NotOpen.log()),
+        }
     }
 
     /// Check if the bag is open
@@ -468,6 +463,7 @@ impl Reader {
 
 impl Drop for Reader {
     fn drop(&mut self) {
+        // The storage backends log their own close failures.
         let _ = self.close();
     }
 }
@@ -511,7 +507,7 @@ rosbag2_bagfile_information:
     #[test]
     fn test_reader_creation_with_missing_bag() -> TestResult {
         let result = Reader::new("/nonexistent/path");
-        assert!(matches!(result, Err(ReaderError::BagNotFound { .. })));
+        assert!(matches!(result, Err(Ros2BagError::BagNotFound { .. })));
         Ok(())
     }
 
@@ -519,7 +515,7 @@ rosbag2_bagfile_information:
     fn test_reader_creation_with_missing_metadata() -> TestResult {
         let temp_dir = TempDir::new()?;
         let result = Reader::new(temp_dir.path());
-        assert!(matches!(result, Err(ReaderError::MetadataNotFound { .. })));
+        assert!(matches!(result, Err(Ros2BagError::MetadataNotFound { .. })));
         Ok(())
     }
 
@@ -709,7 +705,7 @@ rosbag2_bagfile_information:
         fs::write(&bag_path, b"#ROSBAG V2.0")?;
         assert!(matches!(
             Reader::new(&bag_path),
-            Err(ReaderError::UnsupportedStorageFormat { .. })
+            Err(Ros2BagError::BareFileNotMcap { .. })
         ));
         Ok(())
     }

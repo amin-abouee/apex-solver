@@ -20,8 +20,8 @@ use smallvec::SmallVec;
 use apex_manifolds::capability::ConstDoF;
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::{Factor, NormalBlocks};
+use crate::error::ErrorLogging;
+use crate::factors::{Factor, FactorError, FactorResult, NormalBlocks};
 
 /// Most blocks an inner factor takes without the parameter list spilling to
 /// the heap.
@@ -47,17 +47,19 @@ impl<F: Factor, G: ConstDoF> RightOffset<F, G> {
     ///
     /// # Errors
     ///
-    /// A block column that does not fit the inner Jacobian, as
-    /// [`CoreError::DimensionMismatch`].
-    pub fn new(inner: F, block: usize, column: usize, offset: G) -> CoreResult<Self> {
+    /// A block column that does not fit the inner Jacobian.
+    pub fn new(inner: F, block: usize, column: usize, offset: G) -> FactorResult<Self> {
         const { assert!(G::DOF <= MAX_DOF) };
         let dof = G::DOF;
-        if column + dof > inner.jacobian_shape().1 {
-            return Err(CoreError::DimensionMismatch(format!(
-                "RightOffset: block columns {column}..{} exceed the factor's {}",
-                column + dof,
-                inner.jacobian_shape().1
-            )));
+        let columns = inner.jacobian_shape().1;
+        if column + dof > columns {
+            return Err(FactorError::IndexOutOfRange {
+                factor: "RightOffset",
+                what: "last block column",
+                index: column + dof - 1,
+                len: columns,
+            }
+            .log());
         }
         let adjoint = offset.inverse(None).adjoint();
         let adjoint = (0..dof * dof)
@@ -140,7 +142,7 @@ impl<F: Factor, G: ConstDoF + Send + Sync + 'static> Factor for RightOffset<F, G
         self.inner.whitens_internally()
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         self.inner.validate_variables(variables)
     }
 }
@@ -154,7 +156,9 @@ mod tests {
     use faer::Mat;
     use nalgebra::{UnitQuaternion, Vector3};
 
-    fn factor() -> Result<LidarMapPlanesFactor<SE23>, CoreError> {
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn factor() -> Result<LidarMapPlanesFactor<SE23>, Box<dyn std::error::Error>> {
         let matches = (0..6)
             .map(|k| {
                 let f = f64::from(k);
@@ -164,13 +168,13 @@ mod tests {
                     sigma: 0.02,
                 })
             })
-            .collect::<Result<Vec<_>, CoreError>>()?;
-        LidarMapPlanesFactor::new(matches)
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        Ok(LidarMapPlanesFactor::new(matches)?)
     }
 
     /// Its normal equations are the inner ones carried by `Ad(Δ⁻¹)`.
     #[test]
-    fn offset_normal_equations_match_its_jacobian() -> Result<(), CoreError> {
+    fn offset_normal_equations_match_its_jacobian() -> TestResult {
         let state = SE23::new(
             Vector3::new(0.4, -1.2, 0.3),
             Vector3::new(0.5, 0.1, -0.2),
@@ -194,7 +198,7 @@ mod tests {
     /// The offset factor equals the inner one at `X·Δ`, and its Jacobian
     /// matches finite differences in `X`.
     #[test]
-    fn offset_residual_and_jacobian_are_exact() -> Result<(), CoreError> {
+    fn offset_residual_and_jacobian_are_exact() -> TestResult {
         let state = SE23::new(
             Vector3::new(0.4, -1.2, 0.3),
             Vector3::new(0.5, 0.1, -0.2),

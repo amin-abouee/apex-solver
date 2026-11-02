@@ -29,11 +29,11 @@ use nalgebra::{Matrix3, SymmetricEigen, Vector3};
 use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
 
-use crate::core::CoreError;
-use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
-use crate::factors::common::validate::expect_manifolds;
+use crate::factors::common::validate::{
+    expect_at_least, expect_finite, expect_manifolds, expect_positive,
+};
+use crate::factors::{Factor, FactorResult};
 
 use super::map_plane::lidar_point_chain;
 
@@ -94,33 +94,16 @@ impl<G: ActsOnPoints3> LidarPlaneBundleFactor<G> {
         points: Vec<Vec<Vector3<f64>>>,
         fixed: Vec<Vector3<f64>>,
         sigma: f64,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
         let name = "LidarPlaneBundleFactor";
-        if points.is_empty() || points.iter().any(Vec::is_empty) {
-            return Err(CoreError::InvalidInput(format!(
-                "{name}: every frame needs at least one point"
-            )));
-        }
+        expect_at_least(name, "frame count", points.len(), 1)?;
+        let fewest = points.iter().map(Vec::len).min().unwrap_or(0);
+        expect_at_least(name, "frame point count", fewest, 1)?;
         let free: usize = points.iter().map(Vec::len).sum();
-        if free + fixed.len() < 3 {
-            return Err(CoreError::InvalidInput(format!(
-                "{name}: a plane needs three points, got {}",
-                free + fixed.len()
-            )));
-        }
-        let finite = points
-            .iter()
-            .flatten()
-            .chain(&fixed)
-            .all(|p| p.iter().all(|v| v.is_finite()));
-        if !finite {
-            return Err(CoreError::InvalidInput(format!("{name}: non-finite point")));
-        }
-        if !(sigma.is_finite() && sigma > 0.0) {
-            return Err(CoreError::InvalidInput(format!(
-                "{name}: sigma must be finite and positive, got {sigma}"
-            )));
-        }
+        expect_at_least(name, "plane point count", free + fixed.len(), 3)?;
+        let all = points.iter().flatten().chain(&fixed);
+        expect_finite(name, "point", all.flat_map(|p| p.iter()))?;
+        expect_positive(name, "sigma", sigma)?;
         Ok(Self {
             extrinsic,
             points,
@@ -209,7 +192,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for LidarPlaneBundleFactor
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_manifolds(
             variables,
             &vec![G::NAME; self.points.len()],
@@ -226,6 +209,8 @@ mod tests {
     use apex_manifolds::{LieGroup, Tangent};
     use faer::Mat;
     use nalgebra::UnitQuaternion;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn extrinsic() -> SE3 {
         SE3::new(
@@ -270,9 +255,7 @@ mod tests {
 
     /// `Jᵀr` is the gradient of the plane-eliminated cost — checked against
     /// central differences of the cost itself, plane re-fitted each time.
-    fn check_gradient<G: ActsOnPoints3 + Send + Sync + 'static>(
-        states: Vec<G>,
-    ) -> Result<(), CoreError> {
+    fn check_gradient<G: ActsOnPoints3 + Send + Sync + 'static>(states: Vec<G>) -> TestResult {
         const EPS: f64 = 1e-6;
         let dof = G::DOF;
         let points: Vec<Vec<Vector3<f64>>> = states
@@ -332,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gradient_is_exact_on_se23() -> Result<(), CoreError> {
+    fn the_gradient_is_exact_on_se23() -> TestResult {
         check_gradient(vec![
             SE23::new(
                 Vector3::new(0.0, 0.0, 0.0),
@@ -353,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gradient_is_exact_on_se3_and_sim3() -> Result<(), CoreError> {
+    fn the_gradient_is_exact_on_se3_and_sim3() -> TestResult {
         check_gradient(vec![
             SE3::new(
                 Vector3::zeros(),
@@ -379,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn a_consistent_plane_costs_only_its_noise() -> Result<(), CoreError> {
+    fn a_consistent_plane_costs_only_its_noise() -> TestResult {
         let states = vec![
             SE3::new(Vector3::zeros(), UnitQuaternion::identity()),
             SE3::new(

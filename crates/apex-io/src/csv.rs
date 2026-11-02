@@ -34,7 +34,6 @@ pub(crate) fn split_rows(content: &str, separator: Option<char>) -> Vec<Vec<&str
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

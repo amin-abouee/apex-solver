@@ -44,6 +44,7 @@ use nalgebra::{Matrix3, SMatrix, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::group_point::{act_point, expect_two_states};
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_block_sizes;
@@ -147,7 +148,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for GpsFactor<G> {
         (3, 2 * G::DOF)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_two_states::<G>(variables, "GpsFactor")
     }
 
@@ -389,7 +390,7 @@ impl Factor for GpsAsyncFactor {
         (3, 21)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[SE3::REP_SIZE, 9, SE3::REP_SIZE],

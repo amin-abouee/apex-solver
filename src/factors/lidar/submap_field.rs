@@ -30,9 +30,8 @@ use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::Factor;
-use crate::factors::common::validate::expect_manifolds;
+use crate::factors::common::validate::{expect_manifolds, expect_point_and_sigma};
+use crate::factors::{Factor, FactorError, FactorResult};
 
 use super::distance_field::DistanceField;
 use super::map_plane::lidar_point_chain;
@@ -51,18 +50,21 @@ pub fn occupancy_sigma(gradient: &Vector3<f64>, log_odds_min: f64, sigma_d: f64)
     (variance.is_finite() && variance > 0.0).then(|| variance.sqrt())
 }
 
-fn check_inputs(name: &str, point: &Vector3<f64>, sigma: f64) -> CoreResult<()> {
-    if !point.iter().all(|value| value.is_finite()) {
-        return Err(CoreError::InvalidInput(format!(
-            "{name}: point {point:?} is not finite"
-        )));
-    }
-    if !(sigma.is_finite() && sigma > 0.0) {
-        return Err(CoreError::InvalidInput(format!(
-            "{name}: sigma must be finite and positive, got {sigma}"
-        )));
-    }
-    Ok(())
+/// The field gradient at the predicted point and the occupancy sigma it
+/// gives. Both failures are expected per-point outcomes (a point past the
+/// mapped volume, a flat field), so they are returned unlogged.
+fn occupancy_weight<F: DistanceField>(
+    factor: &'static str,
+    field: &F,
+    point: &Vector3<f64>,
+    log_odds_min: f64,
+    sigma_d: f64,
+) -> FactorResult<f64> {
+    let (_, gradient) = query(field, point).ok_or(FactorError::OutsideField { factor })?;
+    occupancy_sigma(&gradient, log_odds_min, sigma_d).ok_or(FactorError::Degenerate {
+        factor,
+        what: "occupancy weighting",
+    })
 }
 
 /// Field value and gradient at `point`, if the point is in the domain and the
@@ -111,10 +113,9 @@ impl<G: ActsOnPoints3, F: DistanceField> LidarSubmapFieldFactor<G, F> {
     ///
     /// # Errors
     ///
-    /// A group without a 3-D point action, a non-finite point, or a `sigma`
-    /// that is not finite and positive — all [`CoreError::InvalidInput`].
-    pub fn new(field: Arc<F>, point_l: Vector3<f64>, sigma: f64) -> CoreResult<Self> {
-        check_inputs("LidarSubmapFieldFactor", &point_l, sigma)?;
+    /// A non-finite point, or a `sigma` that is not finite and positive.
+    pub fn new(field: Arc<F>, point_l: Vector3<f64>, sigma: f64) -> FactorResult<Self> {
+        expect_point_and_sigma("LidarSubmapFieldFactor", &point_l, sigma)?;
         Ok(Self {
             field,
             point_l,
@@ -137,19 +138,16 @@ impl<G: ActsOnPoints3, F: DistanceField> LidarSubmapFieldFactor<G, F> {
         predicted_anchor: &G,
         predicted_state: &G,
         extrinsic: &SE3,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
         let world = lidar_point_chain(predicted_state, extrinsic, &point_l).world;
         let point_a = into_anchor(predicted_anchor, &world).point;
-        let (_, gradient) = query(field.as_ref(), &point_a).ok_or_else(|| {
-            CoreError::InvalidInput(
-                "LidarSubmapFieldFactor: predicted point is outside the field".to_string(),
-            )
-        })?;
-        let sigma = occupancy_sigma(&gradient, log_odds_min, sigma_d).ok_or_else(|| {
-            CoreError::InvalidInput(
-                "LidarSubmapFieldFactor: occupancy weighting gives no positive scale".to_string(),
-            )
-        })?;
+        let sigma = occupancy_weight(
+            "LidarSubmapFieldFactor",
+            field.as_ref(),
+            &point_a,
+            log_odds_min,
+            sigma_d,
+        )?;
         Self::new(field, point_l, sigma)
     }
 
@@ -207,7 +205,7 @@ where
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_manifolds(
             variables,
             &[G::NAME, G::NAME, "SE3"],
@@ -235,8 +233,8 @@ impl<G: ActsOnPoints3, F: DistanceField> SubmapAlignmentFactor<G, F> {
     /// # Errors
     ///
     /// As [`LidarSubmapFieldFactor::new`].
-    pub fn new(field: Arc<F>, point_b: Vector3<f64>, sigma: f64) -> CoreResult<Self> {
-        check_inputs("SubmapAlignmentFactor", &point_b, sigma)?;
+    pub fn new(field: Arc<F>, point_b: Vector3<f64>, sigma: f64) -> FactorResult<Self> {
+        expect_point_and_sigma("SubmapAlignmentFactor", &point_b, sigma)?;
         Ok(Self {
             field,
             point_b,
@@ -257,19 +255,16 @@ impl<G: ActsOnPoints3, F: DistanceField> SubmapAlignmentFactor<G, F> {
         sigma_d: f64,
         predicted_a: &G,
         predicted_b: &G,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
         let world = predicted_b.act(&point_b, None, None);
         let point_a = into_anchor(predicted_a, &world).point;
-        let (_, gradient) = query(field.as_ref(), &point_a).ok_or_else(|| {
-            CoreError::InvalidInput(
-                "SubmapAlignmentFactor: predicted point is outside the field".to_string(),
-            )
-        })?;
-        let sigma = occupancy_sigma(&gradient, log_odds_min, sigma_d).ok_or_else(|| {
-            CoreError::InvalidInput(
-                "SubmapAlignmentFactor: occupancy weighting gives no positive scale".to_string(),
-            )
-        })?;
+        let sigma = occupancy_weight(
+            "SubmapAlignmentFactor",
+            field.as_ref(),
+            &point_a,
+            log_odds_min,
+            sigma_d,
+        )?;
         Self::new(field, point_b, sigma)
     }
 
@@ -329,7 +324,7 @@ where
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_manifolds(
             variables,
             &[G::NAME, G::NAME],
@@ -347,6 +342,8 @@ mod tests {
     use apex_manifolds::so3::SO3;
     use faer::Mat;
     use nalgebra::UnitQuaternion;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     /// `L(p) = pᵀ·A·p − 1`, an ellipsoid with distinct axes (so every pose
     /// direction is seen), defined within `radius` of the origin.
@@ -412,10 +409,7 @@ mod tests {
 
     /// Frame-to-submap and submap-to-submap Jacobians against central
     /// differences, every block, in group `G`'s own chart.
-    fn check_group<G: ActsOnPoints3 + Send + Sync + 'static>(
-        anchor: G,
-        state: G,
-    ) -> Result<(), CoreError> {
+    fn check_group<G: ActsOnPoints3 + Send + Sync + 'static>(anchor: G, state: G) -> TestResult {
         let dof = G::DOF;
         let triple = |a: &G, k: &G, e: &SE3| {
             vec![
@@ -466,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn se3_poses() -> Result<(), CoreError> {
+    fn se3_poses() -> TestResult {
         check_group(
             SE3::new(Vector3::new(0.2, 0.1, -0.1), rotation(0.1)),
             SE3::new(Vector3::new(0.5, -0.3, 0.2), rotation(0.3)),
@@ -474,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn se23_navigation_states() -> Result<(), CoreError> {
+    fn se23_navigation_states() -> TestResult {
         check_group(
             SE23::new(
                 Vector3::new(0.2, 0.1, -0.1),
@@ -490,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn sim3_similarities() -> Result<(), CoreError> {
+    fn sim3_similarities() -> TestResult {
         check_group(
             Sim3::new(Vector3::new(0.2, 0.1, -0.1), rotation(0.1), 0.9),
             Sim3::new(Vector3::new(0.5, -0.3, 0.2), rotation(0.3), 1.2),
@@ -498,14 +492,14 @@ mod tests {
     }
 
     #[test]
-    fn so3_rotations() -> Result<(), CoreError> {
+    fn so3_rotations() -> TestResult {
         check_group(SO3::new(rotation(0.1)), SO3::new(rotation(0.3)))
     }
 
     /// With anchor and state equal, the residual is the field at the point's
     /// body position, over σ.
     #[test]
-    fn the_residual_is_the_field_over_sigma() -> Result<(), CoreError> {
+    fn the_residual_is_the_field_over_sigma() -> TestResult {
         let pose = SE3::new(Vector3::new(0.5, -0.3, 0.2), rotation(0.3));
         let factor = LidarSubmapFieldFactor::<SE3, _>::new(field(), point(), 0.5)?;
         let params = vec![
@@ -515,15 +509,13 @@ mod tests {
         ];
         let (residual, _) = linearize(&factor, &params);
         let body = extrinsic().act(&point(), None, None);
-        let (value, _) = field()
-            .query(&body)
-            .ok_or_else(|| CoreError::InvalidInput("outside".to_string()))?;
+        let (value, _) = field().query(&body).ok_or("outside")?;
         assert!((residual - value / 0.5).abs() < 1e-12, "{residual}");
         Ok(())
     }
 
     #[test]
-    fn points_outside_the_field_contribute_nothing() -> Result<(), CoreError> {
+    fn points_outside_the_field_contribute_nothing() -> TestResult {
         let small = Arc::new(Ellipsoid { radius: 0.1 });
         let pose = SE3::new(Vector3::new(0.5, -0.3, 0.2), rotation(0.3));
         let factor = LidarSubmapFieldFactor::<SE3, _>::new(small.clone(), point(), 0.1)?;
@@ -553,10 +545,9 @@ mod tests {
     }
 
     #[test]
-    fn occupancy_weighting_follows_okvis2x() -> Result<(), CoreError> {
+    fn occupancy_weighting_follows_okvis2x() -> TestResult {
         let gradient = Vector3::new(3.0, 0.0, 4.0);
-        let sigma = occupancy_sigma(&gradient, -3.0, 0.1)
-            .ok_or_else(|| CoreError::InvalidInput("no sigma".to_string()))?;
+        let sigma = occupancy_sigma(&gradient, -3.0, 0.1).ok_or("no sigma")?;
         assert!((sigma - 1.25_f64.sqrt()).abs() < 1e-12, "{sigma}");
         assert!(occupancy_sigma(&gradient, 0.0, 0.0).is_none());
 
@@ -593,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn inputs_are_checked() -> Result<(), CoreError> {
+    fn inputs_are_checked() -> TestResult {
         assert!(LidarSubmapFieldFactor::<SE3, _>::new(field(), point(), 0.0).is_err());
         let nan = Vector3::new(f64::NAN, 0.0, 0.0);
         assert!(SubmapAlignmentFactor::<SE3, _>::new(field(), nan, 0.1).is_err());

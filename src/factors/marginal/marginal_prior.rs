@@ -28,8 +28,25 @@ use smallvec::SmallVec;
 use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::Factor;
+use crate::error::ErrorLogging;
+use crate::factors::common::validate::{expect_count, expect_dof, expect_manifold};
+use crate::factors::{Factor, FactorError, FactorResult};
+
+/// The error for a square-root information or offset of the wrong size.
+fn size_mismatch(
+    factor: &'static str,
+    what: &'static str,
+    expected: usize,
+    actual: usize,
+) -> FactorError {
+    FactorError::DimensionMismatch {
+        factor,
+        what,
+        expected,
+        actual,
+    }
+    .log()
+}
 
 /// Compute the concatenated local tangent `θ(x ⊟ x₀)` of the connected
 /// variables (one `&[f64]` param slice per block, in block order) into the
@@ -64,25 +81,27 @@ impl MarginalPriorFactor {
         sqrt_info: DMatrix<f64>,
         offset: DVector<f64>,
         local_log: LocalLogFn,
-    ) -> CoreResult<Self> {
+    ) -> FactorResult<Self> {
+        const FACTOR: &str = "MarginalPriorFactor";
         let total: usize = dims.iter().sum();
         if sqrt_info.nrows() != total {
-            return Err(CoreError::DimensionMismatch(format!(
-                "sqrt_info has {} rows, expected Σdims = {total}",
-                sqrt_info.nrows()
-            )));
+            return Err(size_mismatch(
+                FACTOR,
+                "sqrt_info rows",
+                total,
+                sqrt_info.nrows(),
+            ));
         }
         if sqrt_info.ncols() != total {
-            return Err(CoreError::DimensionMismatch(format!(
-                "sqrt_info has {} columns, expected Σdims = {total}",
-                sqrt_info.ncols()
-            )));
+            return Err(size_mismatch(
+                FACTOR,
+                "sqrt_info columns",
+                total,
+                sqrt_info.ncols(),
+            ));
         }
         if offset.len() != total {
-            return Err(CoreError::DimensionMismatch(format!(
-                "offset has length {}, expected {total}",
-                offset.len()
-            )));
+            return Err(size_mismatch(FACTOR, "offset", total, offset.len()));
         }
         Ok(Self {
             sqrt_info,
@@ -148,26 +167,15 @@ impl Factor for MarginalPriorFactor {
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != self.dims.len() {
-            return Err(format!(
-                "MarginalPriorFactor expects {} variables, got {}",
-                self.dims.len(),
-                variables.len()
-            ));
-        }
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        const FACTOR: &str = "MarginalPriorFactor";
+        expect_count(variables, self.dims.len(), FACTOR)?;
         // Each block's tangent dim must match the variable it is registered
         // with: `sqrt_info` is indexed by `dims`, while the assembly scatters
         // Jacobian columns by the variable's own dof. A mismatch would land
         // the columns in the wrong place without any error.
-        for (i, (variable, &dim)) in variables.iter().zip(&self.dims).enumerate() {
-            let dof = variable.dof();
-            if dof != dim {
-                return Err(format!(
-                    "MarginalPriorFactor block {i} declares tangent dim {dim} but the \
-                     registered variable has dof {dof}"
-                ));
-            }
+        for (block, (variable, &dim)) in variables.iter().zip(&self.dims).enumerate() {
+            expect_dof(*variable, block, dim, FACTOR)?;
         }
         Ok(())
     }
@@ -195,23 +203,34 @@ impl<G: LieGroup> MarginalPriorFactorT<G> {
     ///
     /// # Errors
     ///
-    /// [`CoreError::DimensionMismatch`] if `sqrt_info` or `offset` do not
+    /// [`FactorError::DimensionMismatch`] if `sqrt_info` or `offset` do not
     /// match the anchors' total tangent dimension.
-    pub fn new(anchors: Vec<G>, sqrt_info: DMatrix<f64>, offset: DVector<f64>) -> CoreResult<Self> {
+    pub fn new(
+        anchors: Vec<G>,
+        sqrt_info: DMatrix<f64>,
+        offset: DVector<f64>,
+    ) -> FactorResult<Self> {
+        const FACTOR: &str = "MarginalPriorFactorT";
         let dims: Vec<usize> = anchors.iter().map(LieGroup::tangent_dim).collect();
         let total: usize = dims.iter().sum();
-        if sqrt_info.nrows() != total || sqrt_info.ncols() != total {
-            return Err(CoreError::DimensionMismatch(format!(
-                "sqrt_info is {}x{}, expected {total}x{total}",
+        if sqrt_info.nrows() != total {
+            return Err(size_mismatch(
+                FACTOR,
+                "sqrt_info rows",
+                total,
                 sqrt_info.nrows(),
-                sqrt_info.ncols()
-            )));
+            ));
+        }
+        if sqrt_info.ncols() != total {
+            return Err(size_mismatch(
+                FACTOR,
+                "sqrt_info columns",
+                total,
+                sqrt_info.ncols(),
+            ));
         }
         if offset.len() != total {
-            return Err(CoreError::DimensionMismatch(format!(
-                "offset has length {}, expected {total}",
-                offset.len()
-            )));
+            return Err(size_mismatch(FACTOR, "offset", total, offset.len()));
         }
         Ok(Self {
             sqrt_info,
@@ -273,23 +292,12 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for MarginalPriorFactorT<G> {
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != self.dims.len() {
-            return Err(format!(
-                "MarginalPriorFactorT expects {} variables, got {}",
-                self.dims.len(),
-                variables.len()
-            ));
-        }
-        for (i, (variable, &dim)) in variables.iter().zip(&self.dims).enumerate() {
-            if variable.manifold_type_name() != G::NAME || variable.dof() != dim {
-                return Err(format!(
-                    "MarginalPriorFactorT block {i} expects {} with dof {dim}, got {} with dof {}",
-                    G::NAME,
-                    variable.manifold_type_name(),
-                    variable.dof()
-                ));
-            }
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        const FACTOR: &str = "MarginalPriorFactorT";
+        expect_count(variables, self.dims.len(), FACTOR)?;
+        for (block, (variable, &dim)) in variables.iter().zip(&self.dims).enumerate() {
+            expect_manifold(*variable, block, G::NAME, FACTOR)?;
+            expect_dof(*variable, block, dim, FACTOR)?;
         }
         Ok(())
     }
@@ -693,8 +701,19 @@ mod tests {
         let err = factor
             .validate_variables(&[se3_var, rn_var])
             .err()
-            .ok_or_else(|| CoreError::InvalidInput("dof mismatch must be rejected".to_string()))?;
-        assert!(err.contains("dof 1"), "{err}");
+            .ok_or("dof mismatch must be rejected")?;
+        assert!(
+            matches!(
+                err,
+                FactorError::VariableDof {
+                    block: 1,
+                    expected: 6,
+                    actual: 1,
+                    ..
+                }
+            ),
+            "{err}"
+        );
         Ok(())
     }
 }

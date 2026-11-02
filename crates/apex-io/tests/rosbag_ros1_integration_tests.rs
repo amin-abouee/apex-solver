@@ -1,7 +1,5 @@
 //! ROS1 bag round-trip + filter + compression matrix.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use apex_io::rosbag::ros1::{
     Ros1Compression, Ros1Reader, Ros1Writer,
     deserialize::{Ros1Deserializer, Ros1Serializer},
@@ -10,6 +8,8 @@ use apex_io::rosbag::ros1::{
 use apex_io::rosbag::types::Connection;
 use std::path::PathBuf;
 use tempfile::tempdir;
+
+type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 const IMU_TYPE: &str = "sensor_msgs/Imu";
 const POSE_TYPE: &str = "geometry_msgs/PoseStamped";
@@ -59,46 +59,40 @@ fn write_demo_bag(
     path: &PathBuf,
     compression: Ros1Compression,
     n: u64,
-) -> (Connection, Connection) {
-    let mut w = Ros1Writer::new(path).expect("new writer");
-    w.set_compression(compression).expect("set compression");
+) -> std::result::Result<(Connection, Connection), Box<dyn std::error::Error>> {
+    let mut w = Ros1Writer::new(path)?;
+    w.set_compression(compression)?;
     // Small chunk threshold so we exercise multiple chunks during the test.
-    w.set_chunk_threshold(8 * 1024).expect("chunk threshold");
-    w.open().expect("open");
+    w.set_chunk_threshold(8 * 1024)?;
+    w.open()?;
 
-    let imu_conn = w
-        .add_connection("/imu", IMU_TYPE, "abc123", "", false)
-        .expect("imu conn");
-    let pose_conn = w
-        .add_connection("/pose", POSE_TYPE, "def456", "", false)
-        .expect("pose conn");
+    let imu_conn = w.add_connection("/imu", IMU_TYPE, "abc123", "", false)?;
+    let pose_conn = w.add_connection("/pose", POSE_TYPE, "def456", "", false)?;
 
     for i in 0..n {
         let imu = make_imu(i);
         let mut s = Ros1Serializer::new();
         imu.to_ros1(&mut s);
-        w.write(&imu_conn, imu.header.stamp_ns, s.as_slice())
-            .unwrap();
+        w.write(&imu_conn, imu.header.stamp_ns, s.as_slice())?;
 
         let pose = make_pose(i);
         let mut s = Ros1Serializer::new();
         pose.to_ros1(&mut s);
-        w.write(&pose_conn, pose.header.stamp_ns, s.as_slice())
-            .unwrap();
+        w.write(&pose_conn, pose.header.stamp_ns, s.as_slice())?;
     }
-    w.close().expect("close");
-    (imu_conn, pose_conn)
+    w.close()?;
+    Ok((imu_conn, pose_conn))
 }
 
 #[test]
-fn round_trip_uncompressed() {
-    let dir = tempdir().unwrap();
+fn round_trip_uncompressed() -> TestResult {
+    let dir = tempdir()?;
     let path = dir.path().join("uncompressed.bag");
     let n = 200u64;
-    let (imu_conn, _) = write_demo_bag(&path, Ros1Compression::None, n);
+    let (imu_conn, _) = write_demo_bag(&path, Ros1Compression::None, n)?;
 
-    let mut r = Ros1Reader::new(&path).expect("new reader");
-    r.open().expect("open reader");
+    let mut r = Ros1Reader::new(&path)?;
+    r.open()?;
 
     assert_eq!(r.message_count(), 2 * n);
     assert_eq!(r.connections().len(), 2);
@@ -107,7 +101,7 @@ fn round_trip_uncompressed() {
     assert_eq!(imu_topic.message_count, n);
     assert_eq!(imu_topic.message_type, IMU_TYPE);
 
-    let msgs = r.messages().expect("messages");
+    let msgs = r.messages()?;
     // Monotonic timestamps.
     for w in msgs.windows(2) {
         assert!(w[0].timestamp <= w[1].timestamp);
@@ -117,51 +111,54 @@ fn round_trip_uncompressed() {
     let imu_msg = msgs
         .iter()
         .find(|m| m.connection.id == imu_conn.id)
-        .expect("imu message");
+        .ok_or("missing value")?;
     let mut d = Ros1Deserializer::new(&imu_msg.data);
-    let imu = Imu::from_ros1(&mut d).expect("decode imu");
+    let imu = Imu::from_ros1(&mut d)?;
     assert_eq!(imu.linear_acceleration.z, 9.81);
     assert_eq!(imu.header.frame_id, "imu_link");
     assert_eq!(d.remaining(), 0);
+    Ok(())
 }
 
 #[test]
-fn round_trip_bz2() {
-    let dir = tempdir().unwrap();
+fn round_trip_bz2() -> TestResult {
+    let dir = tempdir()?;
     let path = dir.path().join("bz2.bag");
     let n = 100u64;
-    write_demo_bag(&path, Ros1Compression::Bz2, n);
+    write_demo_bag(&path, Ros1Compression::Bz2, n)?;
 
-    let mut r = Ros1Reader::new(&path).unwrap();
-    r.open().unwrap();
+    let mut r = Ros1Reader::new(&path)?;
+    r.open()?;
     assert_eq!(r.message_count(), 2 * n);
-    let raw = r.raw_messages().unwrap();
+    let raw = r.raw_messages()?;
     assert_eq!(raw.len() as u64, 2 * n);
+    Ok(())
 }
 
 #[test]
-fn round_trip_lz4() {
-    let dir = tempdir().unwrap();
+fn round_trip_lz4() -> TestResult {
+    let dir = tempdir()?;
     let path = dir.path().join("lz4.bag");
     let n = 100u64;
-    write_demo_bag(&path, Ros1Compression::Lz4, n);
+    write_demo_bag(&path, Ros1Compression::Lz4, n)?;
 
-    let mut r = Ros1Reader::new(&path).unwrap();
-    r.open().unwrap();
+    let mut r = Ros1Reader::new(&path)?;
+    r.open()?;
     assert_eq!(r.message_count(), 2 * n);
-    let raw = r.raw_messages().unwrap();
+    let raw = r.raw_messages()?;
     assert_eq!(raw.len() as u64, 2 * n);
+    Ok(())
 }
 
 #[test]
-fn filter_by_topic_and_time() {
-    let dir = tempdir().unwrap();
+fn filter_by_topic_and_time() -> TestResult {
+    let dir = tempdir()?;
     let path = dir.path().join("filter.bag");
     let n = 200u64;
-    let (imu_conn, _pose_conn) = write_demo_bag(&path, Ros1Compression::None, n);
+    let (imu_conn, _pose_conn) = write_demo_bag(&path, Ros1Compression::None, n)?;
 
-    let mut r = Ros1Reader::new(&path).unwrap();
-    r.open().unwrap();
+    let mut r = Ros1Reader::new(&path)?;
+    r.open()?;
 
     // 2 s window starting at i=50 (50 * 10 ms = 0.5 s offset).  Window is
     // 0.5s..2.5s so 200 imu samples is too many — clamp to whatever fits.
@@ -175,25 +172,25 @@ fn filter_by_topic_and_time() {
         .cloned()
         .collect();
 
-    let msgs = r
-        .messages_filtered(Some(&imu_only), Some(start), Some(stop))
-        .unwrap();
+    let msgs = r.messages_filtered(Some(&imu_only), Some(start), Some(stop))?;
     assert_eq!(msgs.len(), 100);
     for m in &msgs {
         assert_eq!(m.connection.id, imu_conn.id);
         assert!(m.timestamp >= start && m.timestamp < stop);
     }
+    Ok(())
 }
 
 #[test]
-fn read_without_open_errors() {
-    let dir = tempdir().unwrap();
+fn read_without_open_errors() -> TestResult {
+    let dir = tempdir()?;
     let path = dir.path().join("noopen.bag");
-    write_demo_bag(&path, Ros1Compression::None, 5);
+    write_demo_bag(&path, Ros1Compression::None, 5)?;
 
-    let mut r = Ros1Reader::new(&path).unwrap();
+    let mut r = Ros1Reader::new(&path)?;
     // Did not call open().
     assert!(r.messages().is_err());
+    Ok(())
 }
 
 mod lazy_index {

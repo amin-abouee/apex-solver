@@ -27,6 +27,8 @@
 //! amplifying errors at large rotations. Composition chains drift multiplicatively —
 //! re-project periodically for long chains.
 
+use crate::ElementResult;
+use crate::util::check_param_block;
 use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
@@ -427,6 +429,10 @@ impl LieGroup for SE3 {
         }
     }
 
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        check_param_block("SE3", s, Self::REP_SIZE, Some(3))
+    }
+
     /// Vee operator: log(g)^∨.
     ///
     /// Maps a group element g ∈ G to its tangent vector log(g)^∨ ∈ 𝔤.
@@ -781,9 +787,11 @@ impl Tangent<SE3> for SE3Tangent {
     /// is near zero, it remains unchanged.
     fn normalize(&mut self) {
         let theta_norm = self.theta().norm();
-        self.data[3] /= theta_norm;
-        self.data[4] /= theta_norm;
-        self.data[5] /= theta_norm;
+        if theta_norm > f64::EPSILON {
+            self.data[3] /= theta_norm;
+            self.data[4] /= theta_norm;
+            self.data[5] /= theta_norm;
+        }
     }
 
     /// Return a unit tangent vector in the same direction.
@@ -866,10 +874,8 @@ impl Tangent<SE3> for SE3Tangent {
     /// * `i` - Index of the generator (0-5 for SE(3))
     ///
     /// # Returns
-    /// The generator matrix
+    /// The generator matrix, or the zero matrix when `i` is out of range
     fn generator(&self, i: usize) -> <SE3 as LieGroup>::LieAlgebra {
-        assert!(i < 6, "SE(3) only has generators for indices 0-5");
-
         let mut generator = Matrix4::zeros();
 
         match i {
@@ -900,7 +906,7 @@ impl Tangent<SE3> for SE3Tangent {
                 generator[(0, 1)] = -1.0;
                 generator[(1, 0)] = 1.0;
             }
-            _ => unreachable!(),
+            _ => {}
         }
 
         generator
@@ -1465,10 +1471,35 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_se3_generator_invalid_index() {
+    fn test_se3_tangent_normalize_leaves_a_zero_rotation_unchanged() {
+        let mut tangent = SE3Tangent::new(Vector3::new(1.0, 2.0, 3.0), Vector3::zeros());
+        tangent.normalize();
+        assert!(tangent.as_slice().iter().all(|v| v.is_finite()));
+        assert_eq!(tangent.as_slice(), &[1.0, 2.0, 3.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_se3_tangent_normalize_gives_a_unit_rotation_part() {
+        let mut tangent = SE3Tangent::new(Vector3::new(1.0, 2.0, 3.0), Vector3::new(0.0, 3.0, 4.0));
+        tangent.normalize();
+        assert!((tangent.theta().norm() - 1.0).abs() < 1e-15);
+        assert_eq!(tangent.rho(), Vector3::new(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn test_se3_generator_out_of_range_is_zero_and_checked_form_errors() {
         let tangent = SE3Tangent::new(Vector3::new(1.0, 1.0, 1.0), Vector3::new(1.0, 1.0, 1.0));
-        let _generator = tangent.generator(6); // Should panic for SE(3)
+        assert_eq!(tangent.generator(6), Matrix4::zeros());
+        assert_eq!(tangent.generator(usize::MAX), Matrix4::zeros());
+        assert_eq!(
+            tangent.try_generator(6).err(),
+            Some(crate::TangentError::GeneratorIndex {
+                group: "SE3",
+                index: 6,
+                dim: 6
+            })
+        );
+        assert!(tangent.try_generator(6 - 1).is_ok());
     }
 
     #[test]

@@ -30,7 +30,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// The prior on `x0` is what makes `H = JᵀJ` invertible. Without it the graph has
 /// a 3-dimensional gauge freedom and the covariance is genuinely undefined — the
 /// old code only appeared to work there because damping made `H + λI` invertible.
-fn pose_graph() -> (Problem, Vec<VarKey>) {
+fn pose_graph() -> Result<(Problem, Vec<VarKey>), Box<dyn std::error::Error>> {
     pose_graph_in(JacobianMode::Sparse)
 }
 
@@ -38,7 +38,7 @@ fn pose_graph() -> (Problem, Vec<VarKey>) {
 ///
 /// A solver must be paired with the matching `JacobianMode`; the optimizer
 /// rejects a mismatch instead of substituting a solver of its own.
-fn pose_graph_in(mode: JacobianMode) -> (Problem, Vec<VarKey>) {
+fn pose_graph_in(mode: JacobianMode) -> Result<(Problem, Vec<VarKey>), Box<dyn std::error::Error>> {
     let mut problem = Problem::new(mode);
 
     let x0 = problem.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]);
@@ -52,16 +52,16 @@ fn pose_graph_in(mode: JacobianMode) -> (Problem, Vec<VarKey>) {
         (x2, x3, SE2::from_xy_angle(1.0, 0.0, -0.1)),
         (x0, x3, SE2::from_xy_angle(3.0, 0.0, 0.0)),
     ] {
-        problem.add_residual_block(&[a, b], Box::new(BetweenFactor::new(m)), None);
+        problem.add_residual_block(&[a, b], Box::new(BetweenFactor::new(m)), None)?;
     }
 
     problem.add_residual_block(
         &[x0],
         Box::new(PriorFactor::<SE2>::new(SE2::identity())),
         None,
-    );
+    )?;
 
-    (problem, vec![x0, x1, x2, x3])
+    Ok((problem, vec![x0, x1, x2, x3]))
 }
 
 fn assert_covariances_match(
@@ -95,7 +95,7 @@ fn covariances_from_lm(
     use_jacobi_scaling: bool,
     damping: f64,
 ) -> Result<SecondaryMap<VarKey, Mat<f64>>, Box<dyn std::error::Error>> {
-    let (mut problem, _) = pose_graph();
+    let (mut problem, _) = pose_graph()?;
     let config = LevenbergMarquardtConfig::new()
         .with_linear_solver_type(LinearSolverType::SparseCholesky)
         .with_max_iterations(200)
@@ -118,7 +118,7 @@ fn covariances_from_lm(
 /// scaled coordinates, `(D·H·D)⁻¹` instead of `H⁻¹`.
 #[test]
 fn covariance_is_invariant_to_jacobi_scaling() -> TestResult {
-    let (_, keys) = pose_graph();
+    let (_, keys) = pose_graph()?;
     let without = covariances_from_lm(false, 1e-3)?;
     let with = covariances_from_lm(true, 1e-3)?;
     assert_covariances_match(&without, &with, &keys, 1e-6, "jacobi scaling on vs off");
@@ -131,7 +131,7 @@ fn covariance_is_invariant_to_jacobi_scaling() -> TestResult {
 /// damping values, since the returned matrix was `(H + λI)⁻¹`.
 #[test]
 fn covariance_is_invariant_to_damping() -> TestResult {
-    let (_, keys) = pose_graph();
+    let (_, keys) = pose_graph()?;
     let reference = covariances_from_lm(false, 1e-8)?;
     for damping in [1e-3, 1.0] {
         let other = covariances_from_lm(false, damping)?;
@@ -153,10 +153,10 @@ fn covariance_is_invariant_to_damping() -> TestResult {
 /// under the old code it was wrong on both counts, out of the box.
 #[test]
 fn covariance_agrees_across_optimizers() -> TestResult {
-    let (_, keys) = pose_graph();
+    let (_, keys) = pose_graph()?;
     let reference = covariances_from_lm(false, 1e-3)?;
 
-    let (mut problem, _) = pose_graph();
+    let (mut problem, _) = pose_graph()?;
     let gn = GaussNewton::with_config(
         GaussNewtonConfig::new()
             .with_max_iterations(200)
@@ -169,7 +169,7 @@ fn covariance_agrees_across_optimizers() -> TestResult {
     .ok_or("Gauss-Newton must populate covariances")?;
     assert_covariances_match(&reference, &gn, &keys, 1e-6, "LM vs Gauss-Newton");
 
-    let (mut problem, _) = pose_graph();
+    let (mut problem, _) = pose_graph()?;
     let dl = DogLeg::with_config(
         DogLegConfig::new()
             .with_max_iterations(200)
@@ -191,7 +191,7 @@ fn covariance_agrees_across_optimizers() -> TestResult {
 /// post-hoc from `result.parameters` must agree exactly.
 #[test]
 fn flag_path_matches_explicit_api() -> TestResult {
-    let (mut problem, keys) = pose_graph();
+    let (mut problem, keys) = pose_graph()?;
     let result = LevenbergMarquardt::with_config(
         LevenbergMarquardtConfig::new()
             .with_max_iterations(200)
@@ -214,7 +214,7 @@ fn flag_path_matches_explicit_api() -> TestResult {
 /// here with variance scaling enabled.
 #[test]
 fn flag_path_honors_covariance_options() -> TestResult {
-    let (mut problem, keys) = pose_graph();
+    let (mut problem, keys) = pose_graph()?;
     let options = CovarianceOptions::new().with_variance_scaling(true);
     let result = LevenbergMarquardt::with_config(
         LevenbergMarquardtConfig::new()
@@ -244,7 +244,7 @@ fn flag_path_honors_covariance_options() -> TestResult {
 /// `σ̂² = 2·cost / (m − n)`.
 #[test]
 fn scaled_and_unscaled_covariance_configurable_from_solver_config() -> TestResult {
-    let (mut problem, keys) = pose_graph();
+    let (mut problem, keys) = pose_graph()?;
 
     let base = || {
         LevenbergMarquardtConfig::new()
@@ -305,7 +305,7 @@ fn scaled_and_unscaled_covariance_configurable_from_solver_config() -> TestResul
 /// explicit API called with the same options at that solver's solution.
 #[test]
 fn gauss_newton_and_dog_leg_honor_covariance_options() -> TestResult {
-    let (mut problem, keys) = pose_graph();
+    let (mut problem, keys) = pose_graph()?;
     let options = CovarianceOptions::new().with_variance_scaling(true);
 
     let gn = GaussNewton::with_config(
@@ -352,7 +352,7 @@ fn gauss_newton_and_dog_leg_honor_covariance_options() -> TestResult {
 /// pseudo-inverse reduces to the ordinary inverse there.
 #[test]
 fn dense_svd_matches_cholesky_when_full_rank() -> TestResult {
-    let (mut problem, keys) = pose_graph();
+    let (mut problem, keys) = pose_graph()?;
     let result = LevenbergMarquardt::with_config(
         LevenbergMarquardtConfig::new()
             .with_max_iterations(200)
@@ -390,7 +390,7 @@ fn dense_svd_matches_cholesky_when_full_rank() -> TestResult {
 /// `tests/bundle_adjustment_integration.rs`.
 #[test]
 fn covariance_available_for_every_linear_solver() -> TestResult {
-    let (_, keys) = pose_graph();
+    let (_, keys) = pose_graph()?;
     let reference = covariances_from_lm(false, 1e-3)?;
 
     for (solver_type, mode) in [
@@ -399,7 +399,7 @@ fn covariance_available_for_every_linear_solver() -> TestResult {
         (LinearSolverType::DenseCholesky, JacobianMode::Dense),
         (LinearSolverType::DenseQR, JacobianMode::Dense),
     ] {
-        let (mut problem, _) = pose_graph_in(mode);
+        let (mut problem, _) = pose_graph_in(mode)?;
         let result = LevenbergMarquardt::with_config(
             LevenbergMarquardtConfig::new()
                 .with_linear_solver_type(solver_type)
@@ -436,7 +436,7 @@ fn gauge_free_problem_is_reported_rather_than_masked() -> TestResult {
         &[x0, x1],
         Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0))),
         None,
-    );
+    )?;
 
     // The solve itself still succeeds — LM damping makes `H + λI` invertible even
     // though `H` is not. That is exactly what used to hide the problem.

@@ -25,6 +25,7 @@ use super::bag::{ContainerParams, OutputCompression, SensorConfig, SensorParams}
 use super::error::{BagError, Result};
 use super::transcode::{Dialect, catalog_definition, catalog_md5};
 use super::types::{Connection, MessageDefinition, MessageDefinitionFormat};
+use crate::error::ErrorLogging;
 use crate::vrs::aria::{AriaRecording, AriaSensor, Sample};
 use crate::vrs::datalayout::{DataLayout, LayoutWriter, Piece, PieceKind, Scalar};
 use crate::vrs::{
@@ -34,8 +35,15 @@ use crate::vrs::{
 use std::collections::BTreeMap;
 use std::path::Path;
 
-fn vrs_err(e: VrsError) -> BagError {
-    BagError::generic(format!("VRS: {e}"))
+/// A `DataLayout` access that aborts a read or a write; layout errors are
+/// not logged where they are built, so they are logged here.
+fn layout_err(e: impl Into<VrsError>) -> BagError {
+    BagError::from(e.into()).log()
+}
+
+/// A built-in catalog that does not parse aborts the open.
+fn layout_or_catalog(e: super::transcode::TranscodeError) -> BagError {
+    BagError::from(e).log()
 }
 
 const TAG_TOPIC: &str = "apex_ros_topic";
@@ -114,7 +122,7 @@ pub(crate) struct VrsBagReader {
 
 impl VrsBagReader {
     pub(crate) fn open(path: &Path) -> Result<Self> {
-        let rec = AriaRecording::open(path).map_err(vrs_err)?;
+        let rec = AriaRecording::open(path)?;
         let mut entries = Vec::new();
         let mut connections = Vec::new();
         let (mut start, mut end, mut total) = (f64::INFINITY, f64::NEG_INFINITY, 0u64);
@@ -128,11 +136,22 @@ impl VrsBagReader {
             let user = |k: &str| tags.and_then(|t| t.user.get(k)).cloned();
 
             let (source, conn, frame_id) = if let Some(topic) = user(TAG_TOPIC) {
-                let definition = user(TAG_DEFINITION).unwrap_or_default();
+                // A ROS stream needs its type; the definition and hash may be
+                // absent (the connection then reports no definition) and the
+                // encoding defaults to ROS1, as the writer of these files did
+                // before it recorded one.
+                let message_type = user(TAG_TYPE).ok_or_else(|| {
+                    BagError::VrsStreamTag {
+                        type_id: stream.type_id,
+                        instance: stream.instance,
+                        tag: TAG_TYPE,
+                    }
+                    .log()
+                })?;
                 let conn = connection(
                     topic,
-                    user(TAG_TYPE).unwrap_or_default(),
-                    definition,
+                    message_type,
+                    user(TAG_DEFINITION).unwrap_or_default(),
                     user(TAG_HASH).unwrap_or_default(),
                     user(TAG_ENCODING).unwrap_or_else(|| "ros1".into()),
                 );
@@ -143,8 +162,12 @@ impl VrsBagReader {
                 let conn = connection(
                     map.topic.to_string(),
                     map.message_type.to_string(),
-                    catalog_definition(map.message_type, Dialect::Ros1).unwrap_or_default(),
-                    catalog_md5(map.message_type).unwrap_or_default(),
+                    catalog_definition(map.message_type, Dialect::Ros1)
+                        .map_err(layout_or_catalog)?
+                        .unwrap_or_default(),
+                    catalog_md5(map.message_type)
+                        .map_err(layout_or_catalog)?
+                        .unwrap_or_default(),
                     "ros1".into(),
                 );
                 (Source::Aria(sensor), conn, map.frame_id)
@@ -243,33 +266,36 @@ impl VrsBagReader {
         while let Some(meta) = self
             .rec
             .vrs_mut()
-            .next_record_into(&mut st.cursor, &mut st.raw)
-            .map_err(vrs_err)?
+            .next_record_into(&mut st.cursor, &mut st.raw)?
         {
             let Some(&i) = st.by_stream.get(&meta.stream) else {
                 continue;
             };
             out.clear();
-            let ts_ns = match self.entries[i].source {
-                Source::Native => match native_message(&self.rec, &meta, &st.raw, out)? {
-                    Some(ts) => ts,
-                    None => continue,
-                },
-                Source::Aria(_) => {
-                    let sample = self.rec.decode_record(meta, &st.raw).map_err(vrs_err)?;
-                    // Message `seq` = ordinal within the stream: the same message
-                    // gets the same bytes whichever query returns it.
-                    let seq = self.rec.vrs().data_ordinal(meta.index).unwrap_or(0) as u32;
-                    match aria_message(&sample, seq, self.entries[i].frame_id, out) {
+            let ts_ns =
+                match self.entries[i].source {
+                    Source::Native => match native_message(&self.rec, &meta, &st.raw, out)? {
                         Some(ts) => ts,
                         None => continue,
+                    },
+                    Source::Aria(_) => {
+                        let sample = self.rec.decode_record(meta, &st.raw)?;
+                        // Message `seq` = ordinal within the stream: the same message
+                        // gets the same bytes whichever query returns it.
+                        let seq =
+                            self.rec.vrs().data_ordinal(meta.index).ok_or_else(|| {
+                                BagError::VrsRecordNotData { index: meta.index }.log()
+                            })? as u32;
+                        match aria_message(&sample, seq, self.entries[i].frame_id, out) {
+                            Some(ts) => ts,
+                            None => continue,
+                        }
                     }
-                }
-                Source::Raw => {
-                    out.extend_from_slice(&st.raw);
-                    (meta.timestamp.max(0.0) * 1e9).round() as u64
-                }
-            };
+                    Source::Raw => {
+                        out.extend_from_slice(&st.raw);
+                        (meta.timestamp.max(0.0) * 1e9).round() as u64
+                    }
+                };
             if st.start_ns.is_some_and(|s| ts_ns < s) || st.end_ns.is_some_and(|e| ts_ns >= e) {
                 continue;
             }
@@ -287,10 +313,16 @@ impl VrsBagReader {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        params.calibration = self
-            .rec
-            .calibration_json()
-            .and_then(|j| serde_json::from_str(j).ok());
+        // The calibration is optional metadata: a tag that does not parse is
+        // reported and left out rather than failing the whole read.
+        params.calibration = match self.rec.calibration_json().map(serde_json::from_str) {
+            Some(Ok(calibration)) => Some(calibration),
+            Some(Err(error)) => {
+                tracing::warn!(%error, "VRS calibration_json tag is not valid JSON, left out");
+                None
+            }
+            None => None,
+        };
 
         let sensors: Vec<(usize, AriaSensor, &'static str)> = self
             .entries
@@ -305,7 +337,7 @@ impl VrsBagReader {
             let topic = self.connections[i].topic.clone();
             let (config, serial) = match sensor {
                 AriaSensor::Rgb | AriaSensor::SlamLeft | AriaSensor::SlamRight => {
-                    let c = self.rec.camera_config(sensor).map_err(vrs_err)?;
+                    let c = self.rec.camera_config(sensor)?;
                     (
                         SensorConfig::Camera {
                             width: c.width,
@@ -317,7 +349,7 @@ impl VrsBagReader {
                     )
                 }
                 AriaSensor::ImuRight | AriaSensor::ImuLeft | AriaSensor::Magnetometer => {
-                    let c = self.rec.imu_config(sensor).map_err(vrs_err)?;
+                    let c = self.rec.imu_config(sensor)?;
                     (
                         SensorConfig::Imu {
                             nominal_rate_hz: c.nominal_rate,
@@ -495,14 +527,20 @@ fn native_message(
     let layout = rec
         .vrs()
         .record_layout(meta.stream, RecordType::Data, meta.format_version)
-        .ok_or_else(|| BagError::generic("VRS: ROS stream without a data format"))?;
-    let blocks = layout.split(payload).map_err(vrs_err)?;
+        .ok_or_else(|| {
+            BagError::VrsNoDataFormat {
+                type_id: meta.stream.type_id,
+                instance: meta.stream.instance,
+            }
+            .log()
+        })?;
+    let blocks = layout.split(payload).map_err(layout_err)?;
     let (Some(Block::Layout(v)), Some(Block::Custom(bytes))) = (blocks.first(), blocks.get(1))
     else {
-        return Err(BagError::generic("VRS: malformed ROS message record"));
+        return Err(BagError::VrsMalformedRecord { index: meta.index }.log());
     };
     out.extend_from_slice(bytes);
-    Ok(Some(v.get_u64("log_time_ns").map_err(vrs_err)?))
+    Ok(Some(v.get_u64("log_time_ns").map_err(layout_err)?))
 }
 
 // ---- writer -------------------------------------------------------------------------
@@ -538,7 +576,11 @@ impl VrsBagWriter {
             OutputCompression::Zstd => Compression::Zstd,
             OutputCompression::Lz4 => Compression::Lz4,
             OutputCompression::Bz2 => {
-                return Err(BagError::writer("vrs does not support bz2 compression"));
+                return Err(BagError::Unsupported {
+                    container: "vrs",
+                    what: "bz2 compression",
+                }
+                .log());
             }
         };
         let writer = VrsWriter::create(
@@ -547,15 +589,14 @@ impl VrsBagWriter {
                 compression,
                 ..VrsWriteOptions::default()
             },
-        )
-        .map_err(vrs_err)?;
+        )?;
         let data_layout = DataLayout::from_pieces(vec![Piece {
             name: "log_time_ns".into(),
             kind: PieceKind::Value(Scalar::U64),
             offset: Some(0),
             index: None,
         }])
-        .map_err(vrs_err)?;
+        .map_err(layout_err)?;
         let config_layout = DataLayout::from_pieces(vec![
             string_piece("topic", 0),
             string_piece("message_type", 1),
@@ -563,7 +604,7 @@ impl VrsBagWriter {
             string_piece("serialization_format", 3),
             string_piece("type_hash", 4),
         ])
-        .map_err(vrs_err)?;
+        .map_err(layout_err)?;
         Ok(Self {
             writer,
             data_layout,
@@ -584,14 +625,13 @@ impl VrsBagWriter {
         type_hash: &str,
     ) -> Result<usize> {
         if self.started {
-            return Err(BagError::writer(
-                "VRS output needs every topic declared before the first message",
-            ));
+            return Err(BagError::VrsTopicsAfterStart.log());
         }
         let index = self.streams.len();
         let id = StreamId::new(
             WRITER_BASE_TYPE_ID
-                + i32::try_from(index).map_err(|_| BagError::writer("too many topics"))?,
+                + i32::try_from(index)
+                    .map_err(|_| BagError::TooManyConnections { count: index }.log())?,
             1,
         );
         let mut tags = StreamTags::default();
@@ -604,34 +644,31 @@ impl VrsBagWriter {
         tags.user
             .insert(TAG_ENCODING.into(), serialization_format.to_string());
         tags.user.insert(TAG_HASH.into(), type_hash.to_string());
-        self.writer.add_stream(id, tags).map_err(vrs_err)?;
-        self.writer
-            .define_record_format(
-                id,
-                RecordType::Configuration,
-                1,
-                "data_layout",
-                &[&self.config_layout],
-            )
-            .map_err(vrs_err)?;
-        self.writer
-            .define_record_format(
-                id,
-                RecordType::Data,
-                1,
-                "data_layout/size=8+custom",
-                &[&self.data_layout],
-            )
-            .map_err(vrs_err)?;
+        self.writer.add_stream(id, tags)?;
+        self.writer.define_record_format(
+            id,
+            RecordType::Configuration,
+            1,
+            "data_layout",
+            &[&self.config_layout],
+        )?;
+        self.writer.define_record_format(
+            id,
+            RecordType::Data,
+            1,
+            "data_layout/size=8+custom",
+            &[&self.data_layout],
+        )?;
 
         let mut cfg = LayoutWriter::new(&self.config_layout);
-        cfg.set_string("topic", topic).map_err(vrs_err)?;
+        cfg.set_string("topic", topic).map_err(layout_err)?;
         cfg.set_string("message_type", message_type)
-            .map_err(vrs_err)?;
-        cfg.set_string("definition", definition).map_err(vrs_err)?;
+            .map_err(layout_err)?;
+        cfg.set_string("definition", definition)
+            .map_err(layout_err)?;
         cfg.set_string("serialization_format", serialization_format)
-            .map_err(vrs_err)?;
-        cfg.set_string("type_hash", type_hash).map_err(vrs_err)?;
+            .map_err(layout_err)?;
+        cfg.set_string("type_hash", type_hash).map_err(layout_err)?;
         self.pending_config.push(cfg.finish());
         self.streams.push(StreamInfo { id });
         Ok(index)
@@ -640,16 +677,14 @@ impl VrsBagWriter {
     fn write_configurations(&mut self) -> Result<()> {
         if !self.started {
             for (info, cfg) in self.streams.iter().zip(&self.pending_config) {
-                self.writer
-                    .write_record_with(
-                        info.id,
-                        RecordType::Configuration,
-                        1,
-                        0.0,
-                        cfg,
-                        Compression::None,
-                    )
-                    .map_err(vrs_err)?;
+                self.writer.write_record_with(
+                    info.id,
+                    RecordType::Configuration,
+                    1,
+                    0.0,
+                    cfg,
+                    Compression::None,
+                )?;
             }
             self.started = true;
         }
@@ -661,7 +696,7 @@ impl VrsBagWriter {
         let id = self
             .streams
             .get(stream)
-            .ok_or_else(|| BagError::connection_not_found(format!("stream {stream}")))?
+            .ok_or_else(|| BagError::UnknownHandle { handle: stream }.log())?
             .id;
         let mut payload = Vec::with_capacity(8 + data.len());
         payload.extend_from_slice(&timestamp_ns.to_le_bytes());
@@ -675,32 +710,33 @@ impl VrsBagWriter {
                 &payload,
                 self.compression,
             )
-            .map_err(vrs_err)
+            .map_err(BagError::from)
     }
 
     pub(crate) fn finish(&mut self) -> Result<()> {
         self.write_configurations()?;
-        self.writer.finish().map(|_| ()).map_err(vrs_err)
+        self.writer.finish().map(|_| ()).map_err(BagError::from)
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
     use crate::rosbag::ros1::deserialize::Ros1Deserializer;
     use crate::rosbag::ros1::messages as r1;
     use crate::rosbag::transcode::plan_topic;
     use crate::vrs::aria::{BaroSample, GpsSample, ImageFrame, ImuSample};
 
-    fn conn_for(m: &Mapped) -> Connection {
-        connection(
+    fn conn_for(m: &Mapped) -> std::result::Result<Connection, Box<dyn std::error::Error>> {
+        Ok(connection(
             m.topic.to_string(),
             m.message_type.to_string(),
-            catalog_definition(m.message_type, Dialect::Ros1).unwrap(),
-            catalog_md5(m.message_type).unwrap(),
+            catalog_definition(m.message_type, Dialect::Ros1)?.ok_or("no definition")?,
+            catalog_md5(m.message_type)?.ok_or("no md5")?,
             "ros1".into(),
-        )
+        ))
     }
 
     fn imu_sample(stream: StreamId) -> ImuSample {
@@ -718,7 +754,7 @@ mod tests {
     /// Every message we synthesise must be exactly what its ROS definition
     /// says: the strict transcoder rejects truncated or over-long payloads.
     #[test]
-    fn aria_messages_are_valid_for_their_ros_types() {
+    fn aria_messages_are_valid_for_their_ros_types() -> TestResult {
         let samples = [
             (
                 AriaSensor::ImuRight,
@@ -766,31 +802,30 @@ mod tests {
             ),
         ];
         for (sensor, sample) in samples {
-            let map = aria_mapping(sensor).unwrap();
+            let map = aria_mapping(sensor).ok_or("no mapping")?;
             let mut bytes = Vec::new();
-            let ts = aria_message(&sample, 7, map.frame_id, &mut bytes).unwrap();
+            let ts = aria_message(&sample, 7, map.frame_id, &mut bytes).ok_or("no message")?;
             assert!(ts > 0);
-            let plan = plan_topic(&conn_for(&map), Dialect::Ros2)
-                .unwrap_or_else(|e| panic!("{}: {e}", map.topic));
+            let plan = plan_topic(&conn_for(&map)?, Dialect::Ros2)?;
             let mut cdr = Vec::new();
-            plan.transcoder
-                .convert(&bytes, &mut cdr)
-                .unwrap_or_else(|e| panic!("{}: {e}", map.topic));
+            plan.transcoder.convert(&bytes, &mut cdr)?;
         }
+        Ok(())
     }
 
     #[test]
-    fn imu_message_decodes_with_the_typed_ros1_decoder() {
+    fn imu_message_decodes_with_the_typed_ros1_decoder() -> TestResult {
         let mut bytes = Vec::new();
         let sample = Sample::Imu(imu_sample(StreamId::new(1202, 1)));
-        aria_message(&sample, 5, "imu-right", &mut bytes).unwrap();
-        let imu = r1::Imu::from_ros1(&mut Ros1Deserializer::new(&bytes)).unwrap();
+        aria_message(&sample, 5, "imu-right", &mut bytes).ok_or("no message")?;
+        let imu = r1::Imu::from_ros1(&mut Ros1Deserializer::new(&bytes))?;
         assert_eq!(imu.header.seq, 5);
         assert_eq!(imu.header.stamp_ns, 12_500_000_123);
         assert_eq!(imu.header.frame_id, "imu-right");
         assert_eq!(imu.linear_acceleration.z, 9.5);
         assert_eq!(imu.angular_velocity.y, f64::from(0.2f32));
         assert_eq!(imu.orientation_covariance[0], -1.0);
+        Ok(())
     }
 
     #[test]
@@ -805,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn mapping_covers_the_documented_sensors() {
+    fn mapping_covers_the_documented_sensors() -> TestResult {
         for sensor in [
             AriaSensor::Rgb,
             AriaSensor::SlamLeft,
@@ -816,10 +851,11 @@ mod tests {
             AriaSensor::Barometer,
             AriaSensor::Gps,
         ] {
-            let m = aria_mapping(sensor).unwrap();
-            assert!(catalog_definition(m.message_type, Dialect::Ros1).is_some());
-            assert!(catalog_md5(m.message_type).is_some());
+            let m = aria_mapping(sensor).ok_or("no mapping")?;
+            assert!(catalog_definition(m.message_type, Dialect::Ros1)?.is_some());
+            assert!(catalog_md5(m.message_type)?.is_some());
         }
         assert!(aria_mapping(AriaSensor::Wifi).is_none());
+        Ok(())
     }
 }

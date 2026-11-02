@@ -18,6 +18,7 @@ use nalgebra::Vector3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::group_point::{act_point, expect_state_and_point};
 
 /// Pose-to-point factor over `[T_wr, p_body]`, for any state that moves points.
@@ -75,7 +76,7 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for PoseToPointFactor<G> {
         (3, G::DOF + 3)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_state_and_point::<G>(variables, "PoseToPointFactor")
     }
 }

@@ -6,8 +6,12 @@
 //! See the [f-theta cookbook chapter](../doc/cookbook/src/f-theta.html) for the full
 //! projection, unprojection, and Jacobian derivations.
 
-use crate::{CONVERGENCE_THRESHOLD, CameraModel, CameraModelError, GEOMETRIC_PRECISION, MIN_DEPTH};
-use crate::{DistortionModel, PinholeParams};
+use crate::error::ErrorLogging;
+use crate::{
+    CONVERGENCE_THRESHOLD, CameraModel, DistortionModel, EstimationError, EstimationResult,
+    GEOMETRIC_PRECISION, MIN_DEPTH, ParamError, ParamResult, PinholeParams, ProjectionError,
+    ProjectionResult, UnprojectionError, UnprojectionResult, check_param_count,
+};
 use nalgebra::{DVector, Matrix3xX, SMatrix, Vector2, Vector3};
 
 /// NVIDIA f-theta fisheye camera with 6 intrinsic parameters.
@@ -20,13 +24,15 @@ pub struct FThetaCamera {
     pub cx: f64,
     /// Principal point y (v₀ in the paper), pixels.
     pub cy: f64,
-    /// Forward-polynomial distortion — must be [`DistortionModel::FTheta`].
+    /// Forward-polynomial distortion — must be [`DistortionModel::FTheta`]; the
+    /// checked constructors reject any other variant, and a struct literal with
+    /// one projects to NaN.
     pub distortion: DistortionModel,
 }
 
 impl std::fmt::Debug for FThetaCamera {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (k1, k2, k3, k4) = self.distortion_params();
+        let (k1, k2, k3, k4) = self.coefficients();
         f.debug_struct("FThetaCamera")
             .field("cx", &self.cx)
             .field("cy", &self.cy)
@@ -43,8 +49,9 @@ impl FThetaCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
-    /// [`DistortionModel::FTheta`], or if any parameter fails validation.
+    /// Returns [`ParamError::DistortionVariant`] if `distortion` is not
+    /// [`DistortionModel::FTheta`], or the error of any parameter that fails
+    /// validation; logged here.
     ///
     /// # Example
     ///
@@ -56,42 +63,61 @@ impl FThetaCamera {
     /// assert_eq!(camera.get_model_name(), "ftheta");
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    pub fn new(cx: f64, cy: f64, distortion: DistortionModel) -> Result<Self, CameraModelError> {
+    pub fn new(cx: f64, cy: f64, distortion: DistortionModel) -> ParamResult<Self> {
         let cam = Self { cx, cy, distortion };
-        cam.validate_params()?;
+        cam.validate_params().map_err(ErrorLogging::log)?;
         Ok(cam)
     }
 
-    /// Build directly from the six scalar parameters `[cx, cy, k1, k2, k3, k4]`.
-    pub fn try_from_params(params: &[f64]) -> Result<Self, CameraModelError> {
-        Self::try_from(params)
+    /// Build directly from the six scalar parameters `[cx, cy, k1, k2, k3, k4]`,
+    /// logging the rejection.
+    ///
+    /// # Errors
+    ///
+    /// [`ParamError::ParamCount`] unless there are exactly 6 values, or the
+    /// validation error.
+    pub fn try_from_params(params: &[f64]) -> ParamResult<Self> {
+        Self::try_from(params).map_err(ErrorLogging::log)
     }
 
     /// Extract `(k1, k2, k3, k4)` from the stored distortion.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `self.distortion` is not [`DistortionModel::FTheta`] — this
-    /// cannot happen after successful construction.
+    /// [`ParamError::DistortionVariant`] if `self.distortion` is not
+    /// [`DistortionModel::FTheta`]; only a struct literal can build one.
+    pub fn distortion_params(&self) -> ParamResult<(f64, f64, f64, f64)> {
+        match self.distortion {
+            DistortionModel::FTheta { k1, k2, k3, k4 } => Ok((k1, k2, k3, k4)),
+            other => Err(ParamError::DistortionVariant {
+                model: "ftheta",
+                expected: "FTheta",
+                actual: other.variant_name(),
+            }
+            .log()),
+        }
+    }
+
+    /// `(k1, k2, k3, k4)` for the hot path, NaN for a mismatched variant.
     #[inline]
-    pub fn distortion_params(&self) -> (f64, f64, f64, f64) {
+    fn coefficients(&self) -> (f64, f64, f64, f64) {
         match self.distortion {
             DistortionModel::FTheta { k1, k2, k3, k4 } => (k1, k2, k3, k4),
-            _ => unreachable!("FThetaCamera always has FTheta distortion"),
+            _ => (f64::NAN, f64::NAN, f64::NAN, f64::NAN),
         }
     }
 
     /// Evaluate the forward polynomial f(θ) = k₁θ + k₂θ² + k₃θ³ + k₄θ⁴.
     #[inline]
     fn poly_forward(&self, theta: f64) -> f64 {
-        let (k1, k2, k3, k4) = self.distortion_params();
+        let (k1, k2, k3, k4) = self.coefficients();
         theta * (k1 + theta * (k2 + theta * (k3 + theta * k4)))
     }
 
     /// Evaluate the derivative f′(θ) = k₁ + 2k₂θ + 3k₃θ² + 4k₄θ³.
     #[inline]
     fn poly_forward_deriv(&self, theta: f64) -> f64 {
-        let (k1, k2, k3, k4) = self.distortion_params();
+        let (k1, k2, k3, k4) = self.coefficients();
         k1 + theta * (2.0 * k2 + theta * (3.0 * k3 + theta * 4.0 * k4))
     }
 
@@ -112,12 +138,17 @@ impl FThetaCamera {
         &self,
         points_3d: &Matrix3xX<f64>,
         points_2d: &nalgebra::Matrix2xX<f64>,
-    ) -> Result<Self, CameraModelError> {
+    ) -> EstimationResult<Self> {
         let n = points_3d.ncols();
+        if points_2d.ncols() != n {
+            return Err(EstimationError::PointCountMismatch {
+                points_3d: n,
+                points_2d: points_2d.ncols(),
+            }
+            .log());
+        }
         if n < 4 {
-            return Err(CameraModelError::InvalidParams(
-                "linear_estimation requires at least 4 correspondences".to_string(),
-            ));
+            return Err(EstimationError::TooFewPoints { got: n, need: 4 }.log());
         }
 
         let mut a = nalgebra::DMatrix::<f64>::zeros(n, 4);
@@ -152,7 +183,7 @@ impl FThetaCamera {
         let svd = a.svd(true, true);
         let coeffs = svd
             .solve(&b, GEOMETRIC_PRECISION)
-            .map_err(|e| CameraModelError::InvalidParams(format!("SVD solve failed: {e}")))?;
+            .map_err(|reason| EstimationError::SvdSolve { reason }.log())?;
 
         let distortion = DistortionModel::FTheta {
             k1: coeffs[0],
@@ -160,7 +191,7 @@ impl FThetaCamera {
             k3: coeffs[2],
             k4: coeffs[3],
         };
-        FThetaCamera::new(self.cx, self.cy, distortion)
+        FThetaCamera::new(self.cx, self.cy, distortion).map_err(EstimationError::from)
     }
 }
 
@@ -172,11 +203,11 @@ impl CameraModel for FThetaCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 6>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
-    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
+    fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector2<f64>> {
         let (x, y, z) = (p_cam.x, p_cam.y, p_cam.z);
 
         if z < MIN_DEPTH {
-            return Err(CameraModelError::PointBehindCamera {
+            return Err(ProjectionError::PointBehindCamera {
                 z,
                 min_z: MIN_DEPTH,
             });
@@ -198,7 +229,7 @@ impl CameraModel for FThetaCamera {
         ))
     }
 
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+    fn unproject(&self, point_2d: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>> {
         let dx = point_2d.x - self.cx;
         let dy = point_2d.y - self.cy;
         let r_d = (dx * dx + dy * dy).sqrt();
@@ -207,7 +238,7 @@ impl CameraModel for FThetaCamera {
             return Ok(Vector3::new(0.0, 0.0, 1.0));
         }
 
-        let (k1, ..) = self.distortion_params();
+        let (k1, ..) = self.coefficients();
 
         // Newton-Raphson: solve f(theta) = r_d
         let mut theta = r_d / k1;
@@ -225,10 +256,7 @@ impl CameraModel for FThetaCamera {
         }
 
         if !theta.is_finite() || theta < 0.0 {
-            return Err(CameraModelError::NumericalError {
-                operation: "ftheta_unproject".to_string(),
-                details: format!("Newton-Raphson diverged, theta={theta}"),
-            });
+            return Err(UnprojectionError::Diverged { theta });
         }
 
         let sin_theta = theta.sin();
@@ -249,7 +277,7 @@ impl CameraModel for FThetaCamera {
 
         if r_p < GEOMETRIC_PRECISION {
             // Limit at optical axis: ∂u/∂x = k₁/z, ∂v/∂y = k₁/z
-            let k1 = self.distortion_params().0;
+            let k1 = self.coefficients().0;
             j[(0, 0)] = k1 / z;
             j[(1, 1)] = k1 / z;
             return j;
@@ -301,23 +329,19 @@ impl CameraModel for FThetaCamera {
         j
     }
 
-    fn validate_params(&self) -> Result<(), CameraModelError> {
+    fn validate_params(&self) -> ParamResult<()> {
         if !self.cx.is_finite() || !self.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointNotFinite {
+            return Err(ParamError::PrincipalPointNotFinite {
                 cx: self.cx,
                 cy: self.cy,
             });
         }
-        match self.distortion {
-            DistortionModel::FTheta { .. } => self.distortion.validate(),
-            _ => Err(CameraModelError::InvalidParams(
-                "FThetaCamera requires DistortionModel::FTheta".to_string(),
-            )),
-        }
+        self.distortion.expect_variant("ftheta", "FTheta")?;
+        self.distortion.validate()
     }
 
     fn get_pinhole_params(&self) -> PinholeParams {
-        let (k1, ..) = self.distortion_params();
+        let (k1, ..) = self.coefficients();
         PinholeParams {
             fx: k1,
             fy: k1,
@@ -340,7 +364,7 @@ impl CameraModel for FThetaCamera {
 /// Parameter order: `[cx, cy, k1, k2, k3, k4]`.
 impl From<&FThetaCamera> for [f64; 6] {
     fn from(cam: &FThetaCamera) -> Self {
-        let (k1, k2, k3, k4) = cam.distortion_params();
+        let (k1, k2, k3, k4) = cam.coefficients();
         [cam.cx, cam.cy, k1, k2, k3, k4]
     }
 }
@@ -368,15 +392,10 @@ impl From<&FThetaCamera> for DVector<f64> {
 }
 
 impl TryFrom<&[f64]> for FThetaCamera {
-    type Error = CameraModelError;
+    type Error = ParamError;
 
-    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
-        if params.len() != 6 {
-            return Err(CameraModelError::InvalidParams(format!(
-                "FThetaCamera requires 6 parameters, got {}",
-                params.len()
-            )));
-        }
+    fn try_from(params: &[f64]) -> ParamResult<Self> {
+        check_param_count("ftheta", 6, params)?;
         let cam = FThetaCamera::from([
             params[0], params[1], params[2], params[3], params[4], params[5],
         ]);
@@ -543,7 +562,7 @@ mod tests {
         let p = Vector3::new(0.0, 0.0, -1.0);
         assert!(matches!(
             cam.project(&p),
-            Err(CameraModelError::PointBehindCamera { .. })
+            Err(ProjectionError::PointBehindCamera { .. })
         ));
     }
 
@@ -633,12 +652,12 @@ mod tests {
     }
 
     #[test]
-    fn test_jacobian_point_optical_axis() {
+    fn test_jacobian_point_optical_axis() -> TestResult {
         let cam = make_camera();
         let z = 2.0_f64;
         let p = Vector3::new(0.0, 0.0, z);
         let j = cam.jacobian_point(&p);
-        let k1 = cam.distortion_params().0;
+        let k1 = cam.distortion_params()?.0;
         let expected = k1 / z;
         assert!((j[(0, 0)] - expected).abs() < 1e-10, "J[0,0]={}", j[(0, 0)]);
         assert!((j[(1, 1)] - expected).abs() < 1e-10, "J[1,1]={}", j[(1, 1)]);
@@ -646,6 +665,7 @@ mod tests {
         assert!(j[(0, 2)].abs() < 1e-10);
         assert!(j[(1, 0)].abs() < 1e-10);
         assert!(j[(1, 2)].abs() < 1e-10);
+        Ok(())
     }
 
     #[test]
@@ -759,27 +779,29 @@ mod tests {
     }
 
     #[test]
-    fn test_dvector_conversion() {
+    fn test_dvector_conversion() -> TestResult {
         let cam = make_camera();
         let v: DVector<f64> = (&cam).into();
         assert_eq!(v.len(), 6);
         assert!((v[0] - cam.cx).abs() < 1e-15);
-        let (k1, k2, k3, k4) = cam.distortion_params();
+        let (k1, k2, k3, k4) = cam.distortion_params()?;
         assert!((v[2] - k1).abs() < 1e-15);
         assert!((v[3] - k2).abs() < 1e-15);
         assert!((v[4] - k3).abs() < 1e-15);
         assert!((v[5] - k4).abs() < 1e-15);
+        Ok(())
     }
 
     #[test]
-    fn test_get_pinhole_params() {
+    fn test_get_pinhole_params() -> TestResult {
         let cam = make_camera();
         let pp = cam.get_pinhole_params();
-        let (k1, ..) = cam.distortion_params();
+        let (k1, ..) = cam.distortion_params()?;
         assert!((pp.fx - k1).abs() < 1e-15);
         assert!((pp.fy - k1).abs() < 1e-15);
         assert!((pp.cx - cam.cx).abs() < 1e-15);
         assert!((pp.cy - cam.cy).abs() < 1e-15);
+        Ok(())
     }
 
     // ── linear estimation ─────────────────────────────────────────────────────
@@ -825,15 +847,21 @@ mod tests {
     // ── batch projection ──────────────────────────────────────────────────────
 
     #[test]
-    fn test_project_batch_sentinel() {
+    fn test_project_batch_reports_each_point() {
         let cam = make_camera();
         let pts = Matrix3xX::from_columns(&[
             Vector3::new(0.1, 0.2, 1.0),
             Vector3::new(0.0, 0.0, -1.0), // behind camera
         ]);
         let result = cam.project_batch(&pts);
-        assert!(result[(0, 0)].is_finite());
-        assert!((result[(0, 1)] - 1e6).abs() < 1.0);
-        assert!((result[(1, 1)] - 1e6).abs() < 1.0);
+        assert_eq!(result.len(), 2);
+        assert!(result[0].is_ok_and(|uv| uv.x.is_finite() && uv.y.is_finite()));
+        assert_eq!(
+            result[1],
+            Err(ProjectionError::PointBehindCamera {
+                z: -1.0,
+                min_z: MIN_DEPTH
+            })
+        );
     }
 }

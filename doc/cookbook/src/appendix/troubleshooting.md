@@ -11,10 +11,9 @@ that answers the question.
 | Symptom | Cause | Where |
 |---|---|---|
 | `CoreError::DimensionMismatch` at registration | the noise model's dimension ≠ the factor's `residual_dim()` | `core::noise.rs` |
-| `CoreError::InvalidInput` about whitening | an internally-whitening factor registered with a non-null noise model | `core::problem.rs`, `factors/mod.rs` |
-| a factor's own validation message | the variables' dimensions disagree with what the factor expects | `factors/common/validate.rs` |
-| a panic at registration | the panicking path (`add_residual_block`) was used with an invalid registration | use the `try_` variants |
-| the block measures nothing | an unknown `VarKey` was registered | the `try_` path rejects it with `CoreError::Variable` |
+| `CoreError::DoubleWhitening` | an internally-whitening factor registered with a non-null noise model | `core::problem.rs`, `factors/mod.rs` |
+| `CoreError::Factor(FactorError::Variable…)` | the variables' number, size or manifold disagree with what the factor expects | `factors/common/validate.rs` |
+| `CoreError::UnknownVariable` | an unknown `VarKey` was registered | `core/problem.rs` |
 | a `DimensionMismatch` about the Jacobian shape | the factor's column count is not the sum of the blocks' DoF | `core/problem.rs` |
 
 </div>

@@ -6,8 +6,8 @@
 //! structs: runs of fixed-size fields and primitive arrays (image and cloud
 //! payloads) are copied as byte slices.
 
+use super::error::{TranscodeError, TranscodeResult as Result};
 use super::msgdef::{ArrayKind, Dialect, FieldType, Registry};
-use crate::rosbag::error::{BagError, Result};
 
 /// Maximum nesting depth while compiling (guards recursive definitions).
 const MAX_DEPTH: usize = 32;
@@ -58,12 +58,13 @@ fn compile_fields(
     depth: usize,
 ) -> Result<Vec<Op>> {
     if depth > MAX_DEPTH {
-        return Err(BagError::schema_validation(format!(
-            "message '{name}' nests deeper than {MAX_DEPTH} levels"
-        )));
+        return Err(TranscodeError::TooDeep {
+            name: name.to_string(),
+            max: MAX_DEPTH,
+        });
     }
-    let def = reg.get(name).ok_or_else(|| {
-        BagError::schema_validation(format!("message type '{name}' is not defined"))
+    let def = reg.get(name).ok_or_else(|| TranscodeError::UndefinedType {
+        name: name.to_string(),
     })?;
     let mut ops = Vec::new();
     for field in &def.fields {
@@ -151,7 +152,11 @@ impl<'a> Input<'a> {
             .pos
             .checked_add(n)
             .filter(|&e| e <= self.buf.len())
-            .ok_or_else(|| BagError::invalid_message_data("message truncated"))?;
+            .ok_or(TranscodeError::Truncated {
+                position: self.pos,
+                need: n,
+                available: self.buf.len().saturating_sub(self.pos),
+            })?;
         let s = &self.buf[self.pos..end];
         self.pos = end;
         Ok(s)
@@ -197,15 +202,14 @@ fn run(ops: &[Op], inp: &mut Input<'_>, out: &mut Output<'_>) -> Result<()> {
             }
             Op::Str => {
                 let len = inp.u32()? as usize;
+                let start = inp.pos;
                 let raw = inp.take(len)?;
                 let text = if inp.aligned {
                     // CDR: length counts the terminating NUL.
                     match raw.split_last() {
                         Some((0, rest)) => rest,
                         Some(_) => {
-                            return Err(BagError::invalid_message_data(
-                                "CDR string missing NUL terminator",
-                            ));
+                            return Err(TranscodeError::MissingNul { position: start });
                         }
                         None => &[][..],
                     }
@@ -247,9 +251,10 @@ fn run(ops: &[Op], inp: &mut Input<'_>, out: &mut Output<'_>) -> Result<()> {
                 }
                 if let Some(size) = scalar {
                     inp.align(*size);
-                    let total = n
-                        .checked_mul(*size)
-                        .ok_or_else(|| BagError::invalid_message_data("array size overflow"))?;
+                    let total = n.checked_mul(*size).ok_or(TranscodeError::ArrayOverflow {
+                        count: n,
+                        size: *size,
+                    })?;
                     let bytes = inp.take(total)?;
                     out.align(*size);
                     out.buf.extend_from_slice(bytes);
@@ -283,12 +288,8 @@ impl Transcoder {
         let origin_in = if in_aligned {
             match input {
                 [_, 1, _, _, ..] => 4,
-                [_, 0, _, _, ..] => {
-                    return Err(BagError::invalid_message_data(
-                        "big-endian CDR payloads are not supported",
-                    ));
-                }
-                _ => return Err(BagError::invalid_message_data("CDR payload too short")),
+                [_, 0, _, _, ..] => return Err(TranscodeError::BigEndian),
+                _ => return Err(TranscodeError::PayloadTooShort { len: input.len() }),
             }
         } else {
             0
@@ -313,17 +314,16 @@ impl Transcoder {
         let trailing = input.len() - inp.pos.min(input.len());
         let allowed = if in_aligned { 3 } else { 0 };
         if trailing > allowed {
-            return Err(BagError::invalid_message_data(format!(
-                "{trailing} unread bytes after message (definition mismatch?)"
-            )));
+            return Err(TranscodeError::TrailingBytes { count: trailing });
         }
         Ok(())
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::super::catalog::catalog;
     use super::super::msgdef::{ArrayKind, FieldType, Registry};
     use super::*;
@@ -393,8 +393,12 @@ mod tests {
             self.cdr.extend_from_slice(&v.to_le_bytes());
         }
 
-        fn msg(&mut self, reg: &Registry, name: &str) {
-            let def = reg.get(name).expect("defined");
+        fn msg(
+            &mut self,
+            reg: &Registry,
+            name: &str,
+        ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let def = reg.get(name).ok_or("missing value")?;
             for f in &def.fields {
                 let count = match f.array {
                     ArrayKind::Scalar => 1,
@@ -421,17 +425,18 @@ mod tests {
                             self.scalar(4);
                             self.string();
                         }
-                        FieldType::Msg(dep) => self.msg(reg, dep),
+                        FieldType::Msg(dep) => self.msg(reg, dep)?,
                     }
                 }
             }
+            Ok(())
         }
     }
 
     /// Every standard type, random contents: the transcoder must reproduce
     /// the independently-encoded bytes in both directions.
     #[test]
-    fn matches_reference_encoders_for_every_catalog_type() {
+    fn matches_reference_encoders_for_every_catalog_type() -> TestResult {
         let reg = catalog().unwrap_or_else(|e| panic!("{e}"));
         let mut checked = 0;
         for name in reg.names() {
@@ -441,7 +446,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
             for seed in 1..=20u64 {
                 let mut b = Both::new(seed * 0x9E37_79B9 + checked);
-                b.msg(reg, &name);
+                b.msg(reg, &name)?;
                 let mut out = Vec::new();
                 to_cdr
                     .convert(&b.ros1, &mut out)
@@ -455,6 +460,7 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 100, "only {checked} types checked");
+        Ok(())
     }
 
     #[test]

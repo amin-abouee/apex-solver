@@ -5,13 +5,18 @@
 //! Suitable for narrow FOV lenses and as a baseline for calibration.
 //! See the [cookbook](../doc/cookbook/src/pinhole.html) for the formulation.
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
+use crate::error::ErrorLogging;
+use crate::{
+    CameraModel, DistortionModel, ParamError, ParamResult, PinholeParams, ProjectionError,
+    ProjectionResult, UnprojectionResult, check_param_count,
+};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Pinhole camera model with 4 intrinsic parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PinholeCamera {
     pub pinhole: PinholeParams,
+    /// Must be [`DistortionModel::None`]; the checked constructors reject any other variant.
     pub distortion: DistortionModel,
 }
 
@@ -29,7 +34,7 @@ impl PinholeCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if:
+    /// Returns a [`ParamError`], logged here, if:
     /// - The distortion model is not `None`.
     /// - Parameters are invalid (e.g., negative focal length, infinite principal point).
     ///
@@ -43,15 +48,12 @@ impl PinholeCamera {
     /// let camera = PinholeCamera::new(pinhole, distortion)?;
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    pub fn new(
-        pinhole: PinholeParams,
-        distortion: DistortionModel,
-    ) -> Result<Self, CameraModelError> {
+    pub fn new(pinhole: PinholeParams, distortion: DistortionModel) -> ParamResult<Self> {
         let camera = Self {
             pinhole,
             distortion,
         };
-        camera.validate_params()?;
+        camera.validate_params().map_err(ErrorLogging::log)?;
         Ok(camera)
     }
 
@@ -86,19 +88,15 @@ impl From<&PinholeCamera> for [f64; 4] {
     }
 }
 
-/// Parameter order: `[fx, fy, cx, cy]`. Returns an error if the slice has
-/// fewer than 4 elements.
+/// Parameter order: `[fx, fy, cx, cy]`. Fails unless the slice has exactly 4
+/// elements that form a valid camera. Not logged: the solver decodes
+/// intrinsics blocks with it on every linearization.
 impl TryFrom<&[f64]> for PinholeCamera {
-    type Error = CameraModelError;
+    type Error = ParamError;
 
-    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
-        if params.len() < 4 {
-            return Err(CameraModelError::InvalidParams(format!(
-                "PinholeCamera requires at least 4 parameters, got {}",
-                params.len()
-            )));
-        }
-        Ok(Self {
+    fn try_from(params: &[f64]) -> ParamResult<Self> {
+        check_param_count("pinhole", 4, params)?;
+        let camera = Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -106,7 +104,9 @@ impl TryFrom<&[f64]> for PinholeCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::None,
-        })
+        };
+        camera.validate_params()?;
+        Ok(camera)
     }
 }
 
@@ -125,14 +125,15 @@ impl From<[f64; 4]> for PinholeCamera {
     }
 }
 
-/// Like [`<PinholeCamera as TryFrom<&[f64]>>::try_from`] but also validates
-/// the resulting parameters. Returns
-/// [`CameraModelError::InvalidParams`] on a short slice and a validation
-/// error otherwise.
-pub fn try_from_params(params: &[f64]) -> Result<PinholeCamera, CameraModelError> {
-    let camera = PinholeCamera::try_from(params)?;
-    camera.validate_params()?;
-    Ok(camera)
+/// Like [`<PinholeCamera as TryFrom<&[f64]>>::try_from`], and logs the
+/// rejection.
+///
+/// # Errors
+///
+/// [`ParamError::ParamCount`] unless there are exactly 4 values, or the
+/// validation error.
+pub fn try_from_params(params: &[f64]) -> ParamResult<PinholeCamera> {
+    PinholeCamera::try_from(params).map_err(ErrorLogging::log)
 }
 
 impl CameraModel for PinholeCamera {
@@ -146,10 +147,10 @@ impl CameraModel for PinholeCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::PointBehindCamera`] when `z < GEOMETRIC_PRECISION`.
-    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
+    /// Returns [`ProjectionError::PointBehindCamera`] when `z < GEOMETRIC_PRECISION`.
+    fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector2<f64>> {
         if !self.check_projection_condition(p_cam.z) {
-            return Err(CameraModelError::PointBehindCamera {
+            return Err(ProjectionError::PointBehindCamera {
                 z: p_cam.z,
                 min_z: crate::GEOMETRIC_PRECISION,
             });
@@ -167,7 +168,7 @@ impl CameraModel for PinholeCamera {
     /// # Errors
     ///
     /// Never fails; the `Result` is for trait uniformity.
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+    fn unproject(&self, point_2d: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>> {
         let mx = (point_2d.x - self.pinhole.cx) / self.pinhole.fx;
         let my = (point_2d.y - self.pinhole.cy) / self.pinhole.fy;
 
@@ -211,9 +212,10 @@ impl CameraModel for PinholeCamera {
     ///
     /// - `fx > 0`, `fy > 0` and finite.
     /// - `cx`, `cy` finite.
-    fn validate_params(&self) -> Result<(), CameraModelError> {
+    /// - distortion is [`DistortionModel::None`].
+    fn validate_params(&self) -> ParamResult<()> {
         self.pinhole.validate()?;
-        self.get_distortion().validate()
+        self.distortion.expect_variant("pinhole", "None")
     }
 
     /// Returns the linear intrinsics `(fx, fy, cx, cy)`.

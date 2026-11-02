@@ -1,6 +1,7 @@
 //! Storage backend implementations for ROS2 bag files
 
-use crate::rosbag::error::Result;
+use crate::error::ErrorLogging;
+use crate::rosbag::ros2::error::{Ros2BagError, Ros2BagResult as Result};
 use crate::rosbag::types::{
     CompressionMode, Connection, Message, MessageDefinition, RawMessage, StoragePlugin,
 };
@@ -96,7 +97,7 @@ pub trait StorageWriter: std::any::Any {
 pub fn create_storage_reader(
     storage_id: &str,
     paths: Vec<&Path>,
-    #[allow(unused_variables)] connections: Vec<Connection>,
+    connections: Vec<Connection>,
 ) -> Result<Box<dyn StorageReader>> {
     match storage_id {
         "sqlite3" => Ok(Box::new(sqlite::SqliteReader::new(paths, connections)?)),
@@ -115,14 +116,13 @@ pub fn create_storage_reader(
             } else if has_mcap {
                 Ok(Box::new(mcap::McapStorageReader::new(paths, connections)?))
             } else {
-                Err(crate::rosbag::error::BagError::UnsupportedStorageFormat {
-                    format: "unknown (no .db3 or .mcap files found)".to_string(),
-                })
+                Err(Ros2BagError::NoStorageFiles.log())
             }
         }
-        _ => Err(crate::rosbag::error::BagError::UnsupportedStorageFormat {
+        _ => Err(Ros2BagError::UnsupportedStorageFormat {
             format: storage_id.to_string(),
-        }),
+        }
+        .log()),
     }
 }
 
@@ -167,7 +167,7 @@ mod tests {
         let result = create_storage_reader("hdf5", vec![path.as_path()], vec![]);
         assert!(matches!(
             result,
-            Err(crate::rosbag::error::BagError::UnsupportedStorageFormat { .. })
+            Err(Ros2BagError::UnsupportedStorageFormat { .. })
         ));
         Ok(())
     }

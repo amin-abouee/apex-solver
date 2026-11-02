@@ -5,7 +5,12 @@
 //! [double-sphere cookbook chapter](../doc/cookbook/src/double-sphere.html) for the full
 //! projection, unprojection, and Jacobian derivations.
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
+use crate::error::ErrorLogging;
+use crate::{
+    CameraModel, DistortionModel, EstimationError, EstimationResult, ParamError, ParamResult,
+    PinholeParams, ProjectionError, ProjectionResult, UnprojectionError, UnprojectionResult,
+    check_param_count,
+};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 use std::fmt;
 
@@ -13,6 +18,8 @@ use std::fmt;
 #[derive(Clone, Copy, PartialEq)]
 pub struct DoubleSphereCamera {
     pub pinhole: PinholeParams,
+    /// Must be [`DistortionModel::DoubleSphere`]; the checked constructors reject any
+    /// other variant, and a struct literal with one projects to NaN.
     pub distortion: DistortionModel,
 }
 
@@ -21,7 +28,7 @@ impl DoubleSphereCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// Returns a [`ParamError`], logged here, if `distortion` is not
     /// [`DistortionModel::DoubleSphere`], or if validation fails (e.g. non-positive
     /// focal length, alpha out of range).
     ///
@@ -36,15 +43,12 @@ impl DoubleSphereCamera {
     /// assert_eq!(camera.get_model_name(), "double_sphere");
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    pub fn new(
-        pinhole: PinholeParams,
-        distortion: DistortionModel,
-    ) -> Result<Self, CameraModelError> {
+    pub fn new(pinhole: PinholeParams, distortion: DistortionModel) -> ParamResult<Self> {
         let model = Self {
             pinhole,
             distortion,
         };
-        model.validate_params()?;
+        model.validate_params().map_err(ErrorLogging::log)?;
         Ok(model)
     }
 
@@ -53,7 +57,7 @@ impl DoubleSphereCamera {
     fn distortion_params(&self) -> (f64, f64) {
         match self.distortion {
             DistortionModel::DoubleSphere { xi, alpha } => (xi, alpha),
-            _ => (0.0, 0.0),
+            _ => (f64::NAN, f64::NAN),
         }
     }
 
@@ -73,21 +77,17 @@ impl DoubleSphereCamera {
         (w1 + xi) / (2.0 * w1 * xi + xi * xi + 1.0).sqrt()
     }
 
-    /// Returns `Ok(true)` if the projection is valid for the given `z` and Euclidean
-    /// distance `d1`; `Ok(false)` if not. Returns an error only for unrecoverable
-    /// numerical failures.
-    fn check_projection_condition(&self, z: f64, d1: f64) -> Result<bool, CameraModelError> {
-        Ok(z > -self.cone_ratio() * d1)
+    /// Returns `true` if the projection is valid for the given `z` and Euclidean
+    /// distance `d1`.
+    fn check_projection_condition(&self, z: f64, d1: f64) -> bool {
+        z > -self.cone_ratio() * d1
     }
 
-    /// Returns `Ok(true)` if the squared normalised radius is within the unprojection
+    /// Returns `true` if the squared normalised radius is within the unprojection
     /// domain (only constrains for `alpha > 0.5`).
-    fn check_unprojection_condition(&self, r_squared: f64) -> Result<bool, CameraModelError> {
+    fn check_unprojection_condition(&self, r_squared: f64) -> bool {
         let (_, alpha) = self.distortion_params();
-        if alpha > 0.5 && r_squared > 1.0 / (2.0 * alpha - 1.0) {
-            return Ok(false);
-        }
-        Ok(true)
+        !(alpha > 0.5 && r_squared > 1.0 / (2.0 * alpha - 1.0))
     }
 
     /// Estimates the `alpha` parameter via linear least-squares given 3D–2D
@@ -97,11 +97,13 @@ impl DoubleSphereCamera {
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
         points_2d: &nalgebra::Matrix2xX<f64>,
-    ) -> Result<(), CameraModelError> {
+    ) -> EstimationResult<()> {
         if points_2d.ncols() != points_3d.ncols() {
-            return Err(CameraModelError::InvalidParams(
-                "Number of 2D and 3D points must match".to_string(),
-            ));
+            return Err(EstimationError::PointCountMismatch {
+                points_3d: points_3d.ncols(),
+                points_2d: points_2d.ncols(),
+            }
+            .log());
         }
 
         let num_points = points_2d.ncols();
@@ -130,17 +132,16 @@ impl DoubleSphereCamera {
         let alpha = match svd.solve(&b, 1e-10) {
             Ok(sol) => sol[0],
             Err(err_msg) => {
-                return Err(CameraModelError::NumericalError {
-                    operation: "svd_solve".to_string(),
-                    details: err_msg.to_string(),
-                });
+                return Err(EstimationError::SvdSolve { reason: err_msg }.log());
             }
         };
 
-        self.distortion = DistortionModel::DoubleSphere { xi: 0.0, alpha };
-
-        self.validate_params()?;
-
+        let estimated = Self {
+            pinhole: self.pinhole,
+            distortion: DistortionModel::DoubleSphere { xi: 0.0, alpha },
+        };
+        estimated.validate_params().map_err(ErrorLogging::log)?;
+        *self = estimated;
         Ok(())
     }
 }
@@ -190,16 +191,11 @@ impl From<&DoubleSphereCamera> for [f64; 6] {
 /// Creates a camera from a slice with layout `[fx, fy, cx, cy, xi, alpha]`.
 /// Returns an error if the slice has fewer than 6 elements.
 impl TryFrom<&[f64]> for DoubleSphereCamera {
-    type Error = CameraModelError;
+    type Error = ParamError;
 
-    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
-        if params.len() < 6 {
-            return Err(CameraModelError::InvalidParams(format!(
-                "DoubleSphereCamera requires at least 6 parameters, got {}",
-                params.len()
-            )));
-        }
-        Ok(Self {
+    fn try_from(params: &[f64]) -> ParamResult<Self> {
+        check_param_count("double_sphere", 6, params)?;
+        let camera = Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -210,7 +206,9 @@ impl TryFrom<&[f64]> for DoubleSphereCamera {
                 xi: params[4],
                 alpha: params[5],
             },
-        })
+        };
+        camera.validate_params()?;
+        Ok(camera)
     }
 }
 
@@ -235,10 +233,8 @@ impl From<[f64; 6]> for DoubleSphereCamera {
 /// Creates a `DoubleSphereCamera` from a parameter slice with full validation.
 /// Unlike [`<DoubleSphereCamera as TryFrom<&[f64]>>::try_from`], this also calls
 /// [`CameraModel::validate_params`] and returns any validation errors.
-pub fn try_from_params(params: &[f64]) -> Result<DoubleSphereCamera, CameraModelError> {
-    let camera = DoubleSphereCamera::try_from(params)?;
-    camera.validate_params()?;
-    Ok(camera)
+pub fn try_from_params(params: &[f64]) -> ParamResult<DoubleSphereCamera> {
+    DoubleSphereCamera::try_from(params).map_err(ErrorLogging::log)
 }
 
 impl CameraModel for DoubleSphereCamera {
@@ -247,14 +243,14 @@ impl CameraModel for DoubleSphereCamera {
     type PointJacobian = SMatrix<f64, 2, 3>;
 
     /// Projects a 3D point in the camera frame to 2D image coordinates.
-    /// Returns [`CameraModelError::ProjectionOutOfBounds`] if the point is outside
+    /// Returns [`ProjectionError::OutOfDomain`] if the point is outside
     /// the cone domain (`check_projection_condition`), or
-    /// [`CameraModelError::DenominatorTooSmall`] if the projection denominator
+    /// [`ProjectionError::DenominatorTooSmall`] if the projection denominator
     /// collapses. Note the cone failure is *not* reported as
     /// `PointBehindCamera`: for wide-FOV parameterisations the model can
     /// legitimately image points with `z < 0`, so "behind the camera" is not
     /// the right description of the boundary.
-    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
+    fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector2<f64>> {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
@@ -263,8 +259,11 @@ impl CameraModel for DoubleSphereCamera {
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
 
-        if !self.check_projection_condition(z, d1)? {
-            return Err(CameraModelError::ProjectionOutOfBounds);
+        if !self.check_projection_condition(z, d1) {
+            return Err(ProjectionError::OutOfDomain {
+                model: "double_sphere",
+                z,
+            });
         }
 
         let xi_d1_z = xi * d1 + z;
@@ -272,7 +271,7 @@ impl CameraModel for DoubleSphereCamera {
         let denom = alpha * d2 + (1.0 - alpha) * xi_d1_z;
 
         if denom < crate::GEOMETRIC_PRECISION {
-            return Err(CameraModelError::DenominatorTooSmall {
+            return Err(ProjectionError::DenominatorTooSmall {
                 denom,
                 threshold: crate::GEOMETRIC_PRECISION,
             });
@@ -288,7 +287,7 @@ impl CameraModel for DoubleSphereCamera {
     /// so the deficit is the distance to that cone and its gradient follows
     /// `‖p_cam‖`; the trait default (`-z`, gradient `-e_z`) would be wrong
     /// everywhere the cone boundary differs from `z = 0`. As with FOV,
-    /// `project` reports this condition as `ProjectionOutOfBounds` rather
+    /// `project` reports this condition as `OutOfDomain` rather
     /// than `PointBehindCamera`, so this override is what describes that
     /// boundary correctly (the solver does not charge it yet — see the
     /// trait's Status note).
@@ -312,9 +311,9 @@ impl CameraModel for DoubleSphereCamera {
     }
 
     /// Unprojects a 2D image point to a unit 3D ray via the double-sphere algebraic
-    /// inverse. Returns [`CameraModelError::PointOutsideImage`] if the unprojection
+    /// inverse. Returns [`UnprojectionError::PointOutsideImage`] if the unprojection
     /// domain (`check_unprojection_condition`) is violated.
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+    fn unproject(&self, point_2d: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>> {
         let u = point_2d.x;
         let v = point_2d.y;
 
@@ -323,8 +322,8 @@ impl CameraModel for DoubleSphereCamera {
         let my = (v - self.pinhole.cy) / self.pinhole.fy;
         let r2 = mx * mx + my * my;
 
-        if !self.check_unprojection_condition(r2)? {
-            return Err(CameraModelError::PointOutsideImage { x: u, y: v });
+        if !self.check_unprojection_condition(r2) {
+            return Err(UnprojectionError::PointOutsideImage { x: u, y: v });
         }
 
         let mz_num = 1.0 - alpha * alpha * r2;
@@ -337,7 +336,7 @@ impl CameraModel for DoubleSphereCamera {
         let denom_term = mz2 + r2;
 
         if denom_term < crate::GEOMETRIC_PRECISION {
-            return Err(CameraModelError::PointOutsideImage { x: u, y: v });
+            return Err(UnprojectionError::PointOutsideImage { x: u, y: v });
         }
 
         let k = num_term / denom_term;
@@ -458,10 +457,12 @@ impl CameraModel for DoubleSphereCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any rule is violated.
-    fn validate_params(&self) -> Result<(), CameraModelError> {
+    /// Returns a [`ParamError`] if any rule is violated.
+    fn validate_params(&self) -> ParamResult<()> {
         self.pinhole.validate()?;
-        self.get_distortion().validate()
+        self.distortion
+            .expect_variant("double_sphere", "DoubleSphere")?;
+        self.distortion.validate()
     }
 
     /// Returns the pinhole parameters.

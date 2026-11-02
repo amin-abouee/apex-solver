@@ -1,4 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Console output is this CLI's user interface (CSV on stdout).
 
 //! Export one stream of an Aria VRS file.

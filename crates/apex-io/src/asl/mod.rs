@@ -2,7 +2,7 @@ pub mod error;
 pub mod ground_truth;
 pub mod types;
 
-pub use error::{AslError, Result};
+pub use error::{AslError, AslResult, Result};
 pub use ground_truth::{AslLayout, AslTrajectoryLoader};
 pub use types::{AslDataset, CameraData, CameraFrame, GroundTruthPose, ImuMeasurement};
 
@@ -29,7 +29,11 @@ impl AslStream {
     pub fn open_camera<P: AsRef<Path>>(mav0_path: P, cam_idx: usize) -> Result<Self> {
         let dataset = AslReader::load(mav0_path)?;
         if cam_idx >= dataset.cameras.len() {
-            return Err(AslError::CameraNotFound { index: cam_idx });
+            return Err(AslError::CameraNotFound {
+                index: cam_idx,
+                count: dataset.cameras.len(),
+            }
+            .log());
         }
         Ok(Self {
             dataset,
@@ -68,7 +72,7 @@ impl AslStream {
         Some(
             image::open(&path)
                 .map(|img| (ts, img))
-                .map_err(AslError::ImageLoad),
+                .map_err(|e| AslError::image(&path, e).log()),
         )
     }
 
@@ -116,6 +120,7 @@ impl AslStream {
     }
 }
 
+use crate::error::ErrorLogging;
 use nalgebra::Vector3;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -131,7 +136,8 @@ impl AslReader {
         if !mav0.is_dir() {
             return Err(AslError::InvalidMav0Directory {
                 path: mav0.to_path_buf(),
-            });
+            }
+            .log());
         }
 
         let sensor_entries = discover_sensors(mav0)?;
@@ -184,7 +190,7 @@ impl AslDataset {
 
     pub fn load_image(&self, cam_idx: usize, frame_idx: usize) -> Result<image::DynamicImage> {
         let path = self.frame_path(cam_idx, frame_idx)?;
-        image::open(&path).map_err(AslError::ImageLoad)
+        image::open(&path).map_err(|e| AslError::image(&path, e).log())
     }
 
     #[cfg(feature = "asl-async")]
@@ -194,24 +200,30 @@ impl AslDataset {
         frame_idx: usize,
     ) -> Result<image::DynamicImage> {
         let path = self.frame_path(cam_idx, frame_idx)?;
-        tokio::task::spawn_blocking(move || image::open(&path).map_err(AslError::ImageLoad))
-            .await
-            .map_err(|e| AslError::Io(std::io::Error::other(e.to_string())))?
+        let task_path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            image::open(&task_path).map_err(|e| AslError::image(&task_path, e).log())
+        })
+        .await
+        .map_err(|source| AslError::ImageTask { path, source }.log())?
     }
 
     fn frame_path(&self, cam_idx: usize, frame_idx: usize) -> Result<PathBuf> {
-        let cam = self
-            .cameras
-            .get(cam_idx)
-            .ok_or(AslError::CameraNotFound { index: cam_idx })?;
-        let frame = cam
-            .frames
-            .get(frame_idx)
-            .ok_or(AslError::FrameOutOfBounds {
+        let cam = self.cameras.get(cam_idx).ok_or_else(|| {
+            AslError::CameraNotFound {
+                index: cam_idx,
+                count: self.cameras.len(),
+            }
+            .log()
+        })?;
+        let frame = cam.frames.get(frame_idx).ok_or_else(|| {
+            AslError::FrameOutOfBounds {
                 cam_idx,
                 frame_idx,
                 total: cam.frames.len(),
-            })?;
+            }
+            .log()
+        })?;
         Ok(frame.image_path.clone())
     }
 }
@@ -252,9 +264,7 @@ pub fn load_mav0_trajectory<P: AsRef<Path>>(mav0: P) -> Result<Option<Trajectory
     for sensor in ["state_groundtruth_estimate0", "mocap0"] {
         let candidate = base.join(sensor).join("data.csv");
         if candidate.is_file() {
-            return AslTrajectoryLoader::load(&candidate)
-                .map(Some)
-                .map_err(AslError::GroundTruth);
+            return Ok(Some(AslTrajectoryLoader::load(&candidate)?));
         }
     }
     Ok(None)
@@ -306,9 +316,10 @@ enum LoadedSensor {
 fn discover_sensors(mav0: &Path) -> Result<Vec<SensorEntry>> {
     let mut entries: Vec<SensorEntry> = Vec::new();
 
-    for dir_entry in std::fs::read_dir(mav0)? {
-        let dir_entry = dir_entry?;
-        if !dir_entry.file_type()?.is_dir() {
+    let read_error = |e: std::io::Error| AslError::read(mav0, e).log();
+    for dir_entry in std::fs::read_dir(mav0).map_err(read_error)? {
+        let dir_entry = dir_entry.map_err(read_error)?;
+        if !dir_entry.file_type().map_err(read_error)?.is_dir() {
             continue;
         }
         let name = dir_entry.file_name();
@@ -349,7 +360,8 @@ fn discover_sensors(mav0: &Path) -> Result<Vec<SensorEntry>> {
     if entries.is_empty() {
         return Err(AslError::NoSensorsFound {
             path: mav0.to_path_buf(),
-        });
+        }
+        .log());
     }
 
     Ok(entries)
@@ -382,7 +394,7 @@ fn load_sensor(entry: &SensorEntry) -> Result<LoadedSensor> {
         }
         SensorEntry::GroundTruth { source, path } => {
             let csv_path = path.join("data.csv");
-            let trajectory = AslTrajectoryLoader::load(&csv_path).map_err(AslError::GroundTruth)?;
+            let trajectory = AslTrajectoryLoader::load(&csv_path)?;
             Ok(LoadedSensor::GroundTruth(
                 *source,
                 trajectory.poses().to_vec(),
@@ -395,20 +407,20 @@ fn load_sensor(entry: &SensorEntry) -> Result<LoadedSensor> {
 // Shared CSV helper
 // ---------------------------------------------------------------------------
 
-fn parse_f64(path: &Path, line: usize, field: &str, value: &str) -> Result<f64> {
+fn parse_f64(path: &Path, line: usize, field: &'static str, value: &str) -> Result<f64> {
     value.parse::<f64>().map_err(|_| AslError::InvalidNumber {
         path: path.to_path_buf(),
         line,
-        field: field.to_owned(),
+        field,
         value: value.to_owned(),
     })
 }
 
-fn parse_u64(path: &Path, line: usize, field: &str, value: &str) -> Result<u64> {
+fn parse_u64(path: &Path, line: usize, field: &'static str, value: &str) -> Result<u64> {
     value.parse::<u64>().map_err(|_| AslError::InvalidNumber {
         path: path.to_path_buf(),
         line,
-        field: field.to_owned(),
+        field,
         value: value.to_owned(),
     })
 }
@@ -418,8 +430,13 @@ fn parse_u64(path: &Path, line: usize, field: &str, value: &str) -> Result<u64> 
 // ---------------------------------------------------------------------------
 
 fn parse_imu_csv(csv_path: &Path) -> Result<Vec<ImuMeasurement>> {
-    let content = std::fs::read_to_string(csv_path)?;
-    let rows = crate::csv::split_rows(&content, Some(','));
+    let content =
+        std::fs::read_to_string(csv_path).map_err(|e| AslError::read(csv_path, e).log())?;
+    parse_imu_rows(&content, csv_path).map_err(ErrorLogging::log)
+}
+
+fn parse_imu_rows(content: &str, csv_path: &Path) -> Result<Vec<ImuMeasurement>> {
+    let rows = crate::csv::split_rows(content, Some(','));
     let mut measurements = Vec::with_capacity(rows.len());
 
     for (row_idx, fields) in rows.iter().enumerate() {
@@ -451,8 +468,13 @@ fn parse_imu_csv(csv_path: &Path) -> Result<Vec<ImuMeasurement>> {
 }
 
 fn parse_camera_csv(csv_path: &Path, data_dir: &Path) -> Result<Vec<CameraFrame>> {
-    let content = std::fs::read_to_string(csv_path)?;
-    let rows = crate::csv::split_rows(&content, Some(','));
+    let content =
+        std::fs::read_to_string(csv_path).map_err(|e| AslError::read(csv_path, e).log())?;
+    parse_camera_rows(&content, csv_path, data_dir).map_err(ErrorLogging::log)
+}
+
+fn parse_camera_rows(content: &str, csv_path: &Path, data_dir: &Path) -> Result<Vec<CameraFrame>> {
+    let rows = crate::csv::split_rows(content, Some(','));
     let mut frames = Vec::with_capacity(rows.len());
 
     for (row_idx, fields) in rows.iter().enumerate() {
@@ -482,54 +504,61 @@ fn parse_camera_csv(csv_path: &Path, data_dir: &Path) -> Result<Vec<CameraFrame>
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
     use tempfile::TempDir;
 
-    fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+    fn write_file(
+        dir: &Path,
+        name: &str,
+        content: &str,
+    ) -> std::result::Result<PathBuf, Box<dyn std::error::Error>> {
         let path = dir.join(name);
-        std::fs::write(&path, content).unwrap();
-        path
+        std::fs::write(&path, content)?;
+        Ok(path)
     }
 
     // --- IMU CSV ---
 
     #[test]
-    fn parse_imu_csv_valid() {
-        let tmp = TempDir::new().unwrap();
+    fn parse_imu_csv_valid() -> TestResult {
+        let tmp = TempDir::new()?;
         let csv = write_file(
             tmp.path(),
             "data.csv",
             "#timestamp [ns],wx,wy,wz,ax,ay,az\n\
              100,1.0,2.0,3.0,4.0,5.0,6.0\n\
              200,0.1,0.2,0.3,0.4,0.5,0.6\n",
-        );
-        let rows = parse_imu_csv(&csv).unwrap();
+        )?;
+        let rows = parse_imu_csv(&csv)?;
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].timestamp_ns, 100);
         assert!((rows[0].angular_velocity.x - 1.0).abs() < 1e-10);
         assert!((rows[1].linear_acceleration.z - 0.6).abs() < 1e-10);
+        Ok(())
     }
 
     #[test]
-    fn parse_imu_csv_skips_comment_lines() {
-        let tmp = TempDir::new().unwrap();
+    fn parse_imu_csv_skips_comment_lines() -> TestResult {
+        let tmp = TempDir::new()?;
         let csv = write_file(
             tmp.path(),
             "data.csv",
             "# first comment\n\
              # second comment\n\
              100,1.0,2.0,3.0,4.0,5.0,6.0\n",
-        );
-        let rows = parse_imu_csv(&csv).unwrap();
+        )?;
+        let rows = parse_imu_csv(&csv)?;
         assert_eq!(rows.len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn parse_imu_csv_missing_fields_returns_error() {
-        let tmp = TempDir::new().unwrap();
-        let csv = write_file(tmp.path(), "data.csv", "100,1.0,2.0\n");
+    fn parse_imu_csv_missing_fields_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let csv = write_file(tmp.path(), "data.csv", "100,1.0,2.0\n")?;
         let result = parse_imu_csv(&csv);
         assert!(matches!(
             result,
@@ -539,42 +568,45 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
     }
 
     #[test]
-    fn parse_imu_csv_invalid_number_returns_error() {
-        let tmp = TempDir::new().unwrap();
-        let csv = write_file(tmp.path(), "data.csv", "100,NaN_bad,2.0,3.0,4.0,5.0,6.0\n");
+    fn parse_imu_csv_invalid_number_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
+        let csv = write_file(tmp.path(), "data.csv", "100,NaN_bad,2.0,3.0,4.0,5.0,6.0\n")?;
         let result = parse_imu_csv(&csv);
         assert!(matches!(result, Err(AslError::InvalidNumber { .. })));
+        Ok(())
     }
 
     // --- Camera CSV ---
 
     #[test]
-    fn parse_camera_csv_valid() {
-        let tmp = TempDir::new().unwrap();
+    fn parse_camera_csv_valid() -> TestResult {
+        let tmp = TempDir::new()?;
         let data_dir = tmp.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&data_dir)?;
         let csv = write_file(
             tmp.path(),
             "data.csv",
             "#timestamp [ns],filename\n\
              100,100.png\n\
              200,200.png\n",
-        );
-        let frames = parse_camera_csv(&csv, &data_dir).unwrap();
+        )?;
+        let frames = parse_camera_csv(&csv, &data_dir)?;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].timestamp_ns, 100);
         assert_eq!(frames[0].image_path, data_dir.join("100.png"));
         assert_eq!(frames[1].timestamp_ns, 200);
+        Ok(())
     }
 
     #[test]
-    fn parse_camera_csv_missing_fields_returns_error() {
-        let tmp = TempDir::new().unwrap();
+    fn parse_camera_csv_missing_fields_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
         let data_dir = tmp.path().join("data");
-        let csv = write_file(tmp.path(), "data.csv", "100\n");
+        let csv = write_file(tmp.path(), "data.csv", "100\n")?;
         let result = parse_camera_csv(&csv, &data_dir);
         assert!(matches!(
             result,
@@ -584,6 +616,7 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
     }
 
     // --- Ground truth CSV ---
@@ -591,25 +624,26 @@ mod tests {
     /// Ground-truth parsing is delegated to `AslTrajectoryLoader`; a malformed
     /// file must surface as an error, not a silently empty track.
     #[test]
-    fn ground_truth_parse_errors_surface() {
-        let tmp = TempDir::new().unwrap();
-        let dir = sensor_dir(tmp.path(), "mocap0", "1000,1,2\n");
+    fn ground_truth_parse_errors_surface() -> TestResult {
+        let tmp = TempDir::new()?;
+        let dir = sensor_dir(tmp.path(), "mocap0", "1000,1,2\n")?;
         use crate::trajectory::TrajectoryLoader as _;
         let result = AslTrajectoryLoader::load(dir.join("data.csv"));
         assert!(result.is_err(), "a 3-column GT row must be refused");
         let _ = dir;
+        Ok(())
     }
 
     // --- Sensor discovery ---
 
     #[test]
-    fn sensor_discovery_finds_cameras_and_imu() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join("cam0")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("cam1")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("imu0")).unwrap();
+    fn sensor_discovery_finds_cameras_and_imu() -> TestResult {
+        let tmp = TempDir::new()?;
+        std::fs::create_dir_all(tmp.path().join("cam0"))?;
+        std::fs::create_dir_all(tmp.path().join("cam1"))?;
+        std::fs::create_dir_all(tmp.path().join("imu0"))?;
 
-        let entries = discover_sensors(tmp.path()).unwrap();
+        let entries = discover_sensors(tmp.path())?;
         let cam_count = entries
             .iter()
             .filter(|e| matches!(e, SensorEntry::Camera { .. }))
@@ -620,27 +654,32 @@ mod tests {
             .count();
         assert_eq!(cam_count, 2);
         assert_eq!(imu_count, 1);
+        Ok(())
     }
 
     /// A ground-truth row, w-first, 8 columns.
     const GT_ROW: &str = "1000,1.0,2.0,3.0,1.0,0.0,0.0,0.0\n";
 
     /// Build a sensor directory holding `data.csv`.
-    fn sensor_dir(root: &Path, name: &str, content: &str) -> PathBuf {
+    fn sensor_dir(
+        root: &Path,
+        name: &str,
+        content: &str,
+    ) -> std::result::Result<PathBuf, Box<dyn std::error::Error>> {
         let dir = root.join(name);
-        std::fs::create_dir_all(&dir).unwrap();
-        write_file(&dir, "data.csv", content);
-        dir
+        std::fs::create_dir_all(&dir)?;
+        write_file(&dir, "data.csv", content)?;
+        Ok(dir)
     }
 
     /// EuRoC ships `state_groundtruth_estimate0`, which went unmatched — so
     /// every EuRoC sequence reported no ground truth at all.
     #[test]
-    fn discover_sensors_finds_state_groundtruth_estimate0() {
-        let tmp = TempDir::new().unwrap();
-        sensor_dir(tmp.path(), "state_groundtruth_estimate0", GT_ROW);
+    fn discover_sensors_finds_state_groundtruth_estimate0() -> TestResult {
+        let tmp = TempDir::new()?;
+        sensor_dir(tmp.path(), "state_groundtruth_estimate0", GT_ROW)?;
 
-        let entries = discover_sensors(tmp.path()).unwrap();
+        let entries = discover_sensors(tmp.path())?;
         assert!(
             entries.iter().any(|e| matches!(
                 e,
@@ -651,23 +690,25 @@ mod tests {
             )),
             "state_groundtruth_estimate0 must be discovered"
         );
+        Ok(())
     }
 
     /// With both present the richer source must win, and must do so
     /// deterministically rather than by `read_dir` order.
     #[test]
-    fn discover_sensors_prefers_state_estimate_over_mocap() {
-        let tmp = TempDir::new().unwrap();
-        sensor_dir(tmp.path(), "mocap0", GT_ROW);
-        sensor_dir(tmp.path(), "state_groundtruth_estimate0", GT_ROW);
-        sensor_dir(tmp.path(), "imu0", "1000,0,0,0,0,0,0\n");
+    fn discover_sensors_prefers_state_estimate_over_mocap() -> TestResult {
+        let tmp = TempDir::new()?;
+        sensor_dir(tmp.path(), "mocap0", GT_ROW)?;
+        sensor_dir(tmp.path(), "state_groundtruth_estimate0", GT_ROW)?;
+        sensor_dir(tmp.path(), "imu0", "1000,0,0,0,0,0,0\n")?;
 
-        let dataset = AslReader::load(tmp.path()).unwrap();
+        let dataset = AslReader::load(tmp.path())?;
         assert!(dataset.has_ground_truth());
         assert!(
             GroundTruthSource::StateEstimate > GroundTruthSource::Mocap,
             "the ordering that makes the merge deterministic must hold"
         );
+        Ok(())
     }
 
     /// EuRoC MH and V sequences ship `leica0/`, which is **position only, 4
@@ -675,76 +716,80 @@ mod tests {
     /// parser and turn `AslReader::load` on those sequences from working into a
     /// column-count error. It must stay skipped.
     #[test]
-    fn discover_sensors_ignores_leica0() {
-        let tmp = TempDir::new().unwrap();
-        sensor_dir(tmp.path(), "leica0", "1000,1.0,2.0,3.0\n");
-        sensor_dir(tmp.path(), "imu0", "1000,0,0,0,0,0,0\n");
+    fn discover_sensors_ignores_leica0() -> TestResult {
+        let tmp = TempDir::new()?;
+        sensor_dir(tmp.path(), "leica0", "1000,1.0,2.0,3.0\n")?;
+        sensor_dir(tmp.path(), "imu0", "1000,0,0,0,0,0,0\n")?;
 
-        let dataset = AslReader::load(tmp.path()).unwrap();
+        let dataset = AslReader::load(tmp.path())?;
         assert!(
             !dataset.has_ground_truth(),
             "leica0 is position-only and must not be read as ground truth"
         );
+        Ok(())
     }
 
     #[test]
-    fn sensor_discovery_empty_dir_returns_error() {
-        let tmp = TempDir::new().unwrap();
+    fn sensor_discovery_empty_dir_returns_error() -> TestResult {
+        let tmp = TempDir::new()?;
         let result = discover_sensors(tmp.path());
         assert!(matches!(result, Err(AslError::NoSensorsFound { .. })));
+        Ok(())
     }
 
     #[test]
-    fn invalid_mav0_path_returns_error() {
+    fn invalid_mav0_path_returns_error() -> TestResult {
         let result = AslReader::load("/this/path/does/not/exist");
         assert!(matches!(result, Err(AslError::InvalidMav0Directory { .. })));
+        Ok(())
     }
 
     // --- AslDataset accessors ---
 
-    fn make_synthetic_dataset() -> AslDataset {
-        let tmp = TempDir::new().unwrap();
+    fn make_synthetic_dataset() -> std::result::Result<AslDataset, Box<dyn std::error::Error>> {
+        let tmp = TempDir::new()?;
         let mav0 = tmp.path().to_path_buf();
 
         // cam0
         let cam0_dir = mav0.join("cam0");
         let cam0_data = cam0_dir.join("data");
-        std::fs::create_dir_all(&cam0_data).unwrap();
+        std::fs::create_dir_all(&cam0_data)?;
         write_file(
             &cam0_dir,
             "data.csv",
             "#timestamp,filename\n100,100.png\n200,200.png\n",
-        );
+        )?;
 
         // imu0
         let imu_dir = mav0.join("imu0");
-        std::fs::create_dir_all(&imu_dir).unwrap();
+        std::fs::create_dir_all(&imu_dir)?;
         write_file(
             &imu_dir,
             "data.csv",
             "#ts,wx,wy,wz,ax,ay,az\n100,1.0,0.0,0.0,0.0,0.0,9.8\n",
-        );
+        )?;
 
         // mocap0
         let mocap_dir = mav0.join("mocap0");
-        std::fs::create_dir_all(&mocap_dir).unwrap();
+        std::fs::create_dir_all(&mocap_dir)?;
         write_file(
             &mocap_dir,
             "data.csv",
             "#ts,px,py,pz,qw,qx,qy,qz\n100,0.0,0.0,0.0,1.0,0.0,0.0,0.0\n",
-        );
+        )?;
 
         // Keep tmp alive by leaking for this test (ok in tests)
         let path = mav0.clone();
         std::mem::forget(tmp);
-        AslReader::load(&path).expect("synthetic dataset should load")
+        Ok(AslReader::load(&path)?)
     }
 
     #[test]
-    fn dataset_accessors_correct() {
-        let ds = make_synthetic_dataset();
+    fn dataset_accessors_correct() -> TestResult {
+        let ds = make_synthetic_dataset()?;
         assert_eq!(ds.camera_count(), 1);
         assert_eq!(ds.imu_sample_count(), 1);
         assert!(ds.has_ground_truth());
+        Ok(())
     }
 }

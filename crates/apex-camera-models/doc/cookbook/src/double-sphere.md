@@ -38,7 +38,7 @@ and the pixel is $u = f_x \, x/D + c_x$, $v = f_y \, y/D + c_y$.
 $w_1 = (1-\alpha)/\alpha$ if $\alpha > \tfrac12$, else $w_1 = \alpha/(1-\alpha)$,
 and $w_2 = \dfrac{w_1 + \xi}{\sqrt{2 w_1 \xi + \xi^2 + 1}}$. The forward map
 requires the geometric condition $z > -w_2\, d_1$; failing it raises
-`ProjectionOutOfBounds`. The denominator must also satisfy $D \ge \epsilon_g$,
+`ProjectionError::OutOfDomain`. The denominator must also satisfy $D \ge \epsilon_g$,
 else `DenominatorTooSmall`.
 
 <a id="unprojection"></a>

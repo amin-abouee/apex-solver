@@ -282,7 +282,6 @@ struct SchurSettings {
 }
 
 /// Run bundle adjustment with specified solver and optimization type
-#[cfg_attr(not(feature = "visualization"), allow(unused_variables))]
 fn run_bundle_adjustment(
     dataset: &BalDataset,
     num_points: usize,
@@ -358,9 +357,11 @@ fn run_bundle_adjustment(
                 &mut problem,
                 dataset,
                 &valid_obs,
-                &pose_keys,
-                &pt_keys,
-                &intr_keys,
+                &BalKeys {
+                    poses: &pose_keys,
+                    points: &pt_keys,
+                    intrinsics: &intr_keys,
+                },
                 true,
             )?;
         }
@@ -369,9 +370,11 @@ fn run_bundle_adjustment(
                 &mut problem,
                 dataset,
                 &valid_obs,
-                &pose_keys,
-                &pt_keys,
-                &intr_keys,
+                &BalKeys {
+                    poses: &pose_keys,
+                    points: &pt_keys,
+                    intrinsics: &intr_keys,
+                },
                 false,
             )?;
         }
@@ -380,9 +383,11 @@ fn run_bundle_adjustment(
                 &mut problem,
                 dataset,
                 &valid_obs,
-                &pose_keys,
-                &pt_keys,
-                &intr_keys,
+                &BalKeys {
+                    poses: &pose_keys,
+                    points: &pt_keys,
+                    intrinsics: &intr_keys,
+                },
                 false,
             )?;
         }
@@ -391,9 +396,11 @@ fn run_bundle_adjustment(
                 &mut problem,
                 dataset,
                 &valid_obs,
-                &pose_keys,
-                &pt_keys,
-                &intr_keys,
+                &BalKeys {
+                    poses: &pose_keys,
+                    points: &pt_keys,
+                    intrinsics: &intr_keys,
+                },
                 false,
             )?;
         }
@@ -402,9 +409,11 @@ fn run_bundle_adjustment(
                 &mut problem,
                 dataset,
                 &valid_obs,
-                &pose_keys,
-                &pt_keys,
-                &intr_keys,
+                &BalKeys {
+                    poses: &pose_keys,
+                    points: &pt_keys,
+                    intrinsics: &intr_keys,
+                },
                 true,
             )?;
         }
@@ -413,7 +422,7 @@ fn run_bundle_adjustment(
     // Fix first camera pose (gauge freedom) - all 6 DOF
     info!("Fixing first camera pose (all 6 DOF) for gauge freedom...");
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
 
     // Configure solver
@@ -448,20 +457,23 @@ fn run_bundle_adjustment(
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
-    #[cfg(feature = "visualization")]
+    // Without the `visualization` feature the flag is accepted and ignored.
     if with_visualizer {
-        use apex_solver::observers::RerunObserver;
-        use apex_solver::observers::visualization::VisualizationConfig;
-        let config = VisualizationConfig::for_bundle_adjustment()
-            .with_camera_frustum_scale(0.1)
-            .with_initial_landmark_color([255, 255, 255])
-            .with_optimized_landmark_color([255, 255, 255]);
-        match RerunObserver::with_config(true, None, config) {
-            Ok(observer) => {
-                solver.add_observer(observer);
-                info!("Rerun visualization enabled for bundle adjustment");
+        #[cfg(feature = "visualization")]
+        {
+            use apex_solver::observers::RerunObserver;
+            use apex_solver::observers::visualization::VisualizationConfig;
+            let config = VisualizationConfig::for_bundle_adjustment()
+                .with_camera_frustum_scale(0.1)
+                .with_initial_landmark_color([255, 255, 255])
+                .with_optimized_landmark_color([255, 255, 255]);
+            match RerunObserver::with_config(true, None, config) {
+                Ok(observer) => {
+                    solver.add_observer(observer);
+                    info!("Rerun visualization enabled for bundle adjustment");
+                }
+                Err(e) => tracing::warn!("Failed to create Rerun observer: {}", e),
             }
-            Err(e) => tracing::warn!("Failed to create Rerun observer: {}", e),
         }
     }
 
@@ -541,14 +553,18 @@ fn run_bundle_adjustment(
 }
 
 /// Helper function to add factors with a specific optimization configuration
-#[allow(clippy::too_many_arguments)]
+/// The variable keys of the cameras, points and intrinsics, by BAL index.
+struct BalKeys<'a> {
+    poses: &'a [VarKey],
+    points: &'a [VarKey],
+    intrinsics: &'a [VarKey],
+}
+
 fn add_factors<OP>(
     problem: &mut Problem,
     dataset: &BalDataset,
     valid_obs: &[&apex_solver::apex_io::BalObservation],
-    pose_keys: &[VarKey],
-    pt_keys: &[VarKey],
-    intr_keys: &[VarKey],
+    keys: &BalKeys<'_>,
     include_intrinsics: bool,
 ) -> Result<(), Box<dyn Error>>
 where
@@ -575,19 +591,20 @@ where
         let factor: ProjectionFactor<BALPinholeCameraStrict, OP> =
             ProjectionFactor::new(observations, camera);
 
-        let pose_key = pose_keys[obs.camera_index];
-        let pt_key = pt_keys[obs.point_index];
-        let intr_key = intr_keys[obs.camera_index];
+        let pose_key = keys.poses[obs.camera_index];
+        let pt_key = keys.points[obs.point_index];
+        let intr_key = keys.intrinsics[obs.camera_index];
 
-        let loss = match HuberLoss::new(1.0) {
-            Ok(l) => Box::new(l),
-            Err(_) => continue,
-        };
+        let loss = Box::new(HuberLoss::new(1.0)?);
 
         if include_intrinsics {
-            problem.add_residual_block(&[pose_key, pt_key, intr_key], Box::new(factor), Some(loss));
+            problem.add_residual_block(
+                &[pose_key, pt_key, intr_key],
+                Box::new(factor),
+                Some(loss),
+            )?;
         } else {
-            problem.add_residual_block(&[pose_key, pt_key], Box::new(factor), Some(loss));
+            problem.add_residual_block(&[pose_key, pt_key], Box::new(factor), Some(loss))?;
         }
     }
     Ok(())

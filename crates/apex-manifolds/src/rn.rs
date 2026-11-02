@@ -9,19 +9,24 @@
 //!
 //! # Dimension limits
 //!
-//! Most operations accept any `n`, but the two that leave Rⁿ do not:
+//! Rⁿ is dynamically sized, so two operands can disagree on dimension. The
+//! trait methods are infallible and never panic: they treat the shorter operand
+//! as the common prefix, copy the remaining entries of `self` unchanged and
+//! size the result and its Jacobians like `self`. A debug build asserts that the
+//! dimensions match, since a mismatch is a caller bug. The `try_` variants
+//! ([`Rn::try_compose`], [`Rn::try_right_plus`], [`Rn::try_right_minus`],
+//! [`Rn::try_interp`], [`Rn::try_act`]) return [`RnError::DimensionMismatch`]
+//! instead.
 //!
-//! - [`Rn::act`] is the translation action on R³ and is only defined for
-//!   `Rn(3)`: dimensions other than 3 hit at best a `debug_assert` (debug
-//!   builds) and at worst an out-of-bounds panic or a silently truncated
-//!   translation (release builds). Do not call it on any other `n`.
-//! - The default [`LieGroup::between`] composes `inverse` + `compose` and
-//!   requires both operands to share one dimension (asserted).
+//! [`Rn::act`] is the translation action on R³ and is only defined for
+//! `Rn(3)`: on any other dimension the missing components count as zero and
+//! the extra ones are ignored.
 //!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
-use crate::{Interpolatable, LieGroup, Tangent};
+use crate::error::ErrorLogging;
+use crate::{ElementError, ElementResult, Interpolatable, LieGroup, RnError, RnResult, Tangent};
 use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use std::{
     fmt,
@@ -94,6 +99,29 @@ impl Display for RnTangent {
             write!(f, "{:.4}", val)?;
         }
         write!(f, "])")
+    }
+}
+
+/// `op(a[i], b[i])` over the common prefix of `a` and `b`; entries of `a` past
+/// `b`'s length are copied. The result has `a`'s dimension.
+fn combine_prefix(
+    a: &DVector<f64>,
+    b: &DVector<f64>,
+    op: impl Fn(f64, f64) -> f64,
+) -> DVector<f64> {
+    DVector::from_fn(a.len(), |i, _| match b.get(i) {
+        Some(&other) => op(a[i], other),
+        None => a[i],
+    })
+}
+
+/// Fails, logging once, unless both dimensions are equal.
+#[track_caller]
+fn check_dim(expected: usize, actual: usize) -> RnResult<()> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(RnError::DimensionMismatch { expected, actual }.log())
     }
 }
 
@@ -238,7 +266,7 @@ impl LieGroup for Rn {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        assert_eq!(
+        debug_assert_eq!(
             self.data.len(),
             other.data.len(),
             "Rn elements must have the same dimension for composition"
@@ -252,7 +280,7 @@ impl LieGroup for Rn {
             *jac_other = DMatrix::identity(dim, dim);
         }
 
-        Rn::new(&self.data + &other.data)
+        Rn::new(combine_prefix(&self.data, &other.data, |a, b| a + b))
     }
 
     /// Logarithmic map from manifold to tangent space.
@@ -290,7 +318,9 @@ impl LieGroup for Rn {
     ///
     /// # Notes
     /// For Euclidean space, the action is translation: v + x
-    /// This only works if this Rⁿ element is 3-dimensional.
+    /// This is only defined for a 3-dimensional element. On any other dimension
+    /// a missing component counts as zero, an extra one is ignored, and the
+    /// self Jacobian is the 3×n identity block; [`Rn::try_act`] refuses instead.
     fn act(
         &self,
         vector: &Vector3<f64>,
@@ -303,16 +333,17 @@ impl LieGroup for Rn {
             "Rn::act is the translation action on R³ and is only defined for Rn(3)"
         );
         if let Some(jac_self) = jacobian_self {
-            *jac_self = DMatrix::identity(3, 3);
+            *jac_self = DMatrix::identity(3, self.data.len());
         }
         if let Some(jac_vector) = jacobian_vector {
             *jac_vector = Matrix3::identity();
         }
 
+        let component = |i: usize| self.data.get(i).copied().unwrap_or(0.0);
         Vector3::new(
-            self.data[0] + vector.x,
-            self.data[1] + vector.y,
-            self.data[2] + vector.z,
+            component(0) + vector.x,
+            component(1) + vector.y,
+            component(2) + vector.z,
         )
     }
 
@@ -380,6 +411,14 @@ impl LieGroup for Rn {
         Rn::from_slice(s)
     }
 
+    /// Any length is a valid `Rn`; only NaN and infinite values are rejected.
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        if s.iter().any(|value| !value.is_finite()) {
+            return Err(ElementError::NonFinite { group: Self::NAME });
+        }
+        Ok(())
+    }
+
     /// Check if the element is approximately equal to another element.
     ///
     /// # Arguments
@@ -415,7 +454,7 @@ impl LieGroup for Rn {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_tangent: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        assert_eq!(
+        debug_assert_eq!(
             self.data.len(),
             tangent.data.len(),
             "Rn element and tangent must have the same dimension"
@@ -431,7 +470,7 @@ impl LieGroup for Rn {
             *jac_tangent = DMatrix::identity(dim, dim);
         }
 
-        Rn::new(&self.data + &tangent.data)
+        Rn::new(combine_prefix(&self.data, &tangent.data, |a, b| a + b))
     }
 
     /// Right minus operation: v₁ ⊟ v₂ = v₁ - v₂.
@@ -452,7 +491,7 @@ impl LieGroup for Rn {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self::TangentVector {
-        assert_eq!(
+        debug_assert_eq!(
             self.data.len(),
             other.data.len(),
             "Rn elements must have the same dimension"
@@ -468,7 +507,7 @@ impl LieGroup for Rn {
             *jac_other = -DMatrix::identity(dim, dim);
         }
 
-        RnTangent::new(&self.data - &other.data)
+        RnTangent::new(combine_prefix(&self.data, &other.data, |a, b| a - b))
     }
 
     /// Left plus operation: δ ⊞ v = δ + v.
@@ -488,7 +527,7 @@ impl LieGroup for Rn {
         jacobian_tangent: Option<&mut Self::JacobianMatrix>,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        assert_eq!(
+        debug_assert_eq!(
             self.data.len(),
             tangent.data.len(),
             "Rn element and tangent must have the same dimension"
@@ -505,7 +544,7 @@ impl LieGroup for Rn {
         }
 
         // For abelian groups, left plus is the same as right plus
-        Rn::new(&tangent.data + &self.data)
+        Rn::new(combine_prefix(&self.data, &tangent.data, |a, b| a + b))
     }
 
     /// Left minus operation: v₁ ⊟ v₂ = v₁ - v₂.
@@ -692,7 +731,9 @@ impl Tangent<Rn> for RnTangent {
     fn generator(&self, i: usize) -> <Rn as LieGroup>::LieAlgebra {
         let dim = self.data.len();
         let mut generator_matrix = DMatrix::zeros(dim, dim);
-        generator_matrix[(i, i)] = 1.0;
+        if i < dim {
+            generator_matrix[(i, i)] = 1.0;
+        }
         generator_matrix
     }
 
@@ -748,19 +789,61 @@ impl Interpolatable for Rn {
     /// * `other` - Target element for interpolation
     /// * `t` - Interpolation parameter in `[0,1]`
     fn interp(&self, other: &Self, t: f64) -> Self {
-        assert_eq!(
+        debug_assert_eq!(
             self.data.len(),
             other.data.len(),
             "Rn elements must have the same dimension for interpolation"
         );
 
-        let interpolated = &self.data * (1.0 - t) + &other.data * t;
-        Rn::new(interpolated)
+        Rn::new(combine_prefix(&self.data, &other.data, |a, b| {
+            a * (1.0 - t) + b * t
+        }))
     }
 
     /// Spherical linear interpolation (same as linear for Euclidean space).
     fn slerp(&self, other: &Self, t: f64) -> Self {
         self.interp(other, t)
+    }
+}
+
+impl Rn {
+    /// Checked [`LieGroup::compose`]: refuses operands of different dimension.
+    #[track_caller]
+    pub fn try_compose(&self, other: &Rn) -> RnResult<Rn> {
+        check_dim(self.dim(), other.dim())?;
+        Ok(Rn::new(&self.data + &other.data))
+    }
+
+    /// Checked [`LieGroup::right_plus`]: refuses a tangent of different dimension.
+    #[track_caller]
+    pub fn try_right_plus(&self, tangent: &RnTangent) -> RnResult<Rn> {
+        check_dim(self.dim(), tangent.dim())?;
+        Ok(Rn::new(&self.data + &tangent.data))
+    }
+
+    /// Checked [`LieGroup::right_minus`]: refuses operands of different dimension.
+    #[track_caller]
+    pub fn try_right_minus(&self, other: &Rn) -> RnResult<RnTangent> {
+        check_dim(self.dim(), other.dim())?;
+        Ok(RnTangent::new(&self.data - &other.data))
+    }
+
+    /// Checked [`Interpolatable::interp`]: refuses operands of different dimension.
+    #[track_caller]
+    pub fn try_interp(&self, other: &Rn, t: f64) -> RnResult<Rn> {
+        check_dim(self.dim(), other.dim())?;
+        Ok(Rn::new(&self.data * (1.0 - t) + &other.data * t))
+    }
+
+    /// Checked [`LieGroup::act`]: the translation action is defined for `Rn(3)` only.
+    #[track_caller]
+    pub fn try_act(&self, vector: &Vector3<f64>) -> RnResult<Vector3<f64>> {
+        check_dim(3, self.dim())?;
+        Ok(Vector3::new(
+            self.data[0] + vector.x,
+            self.data[1] + vector.y,
+            self.data[2] + vector.z,
+        ))
     }
 }
 
@@ -1129,13 +1212,119 @@ mod tests {
         assert!((accumulated.to_vector() - expected.to_vector()).norm() < 1e-10);
     }
 
-    #[test]
-    #[should_panic(expected = "Rn elements must have the same dimension")]
-    fn test_rn_dimension_mismatch_compose() {
-        let rn_2d = Rn::new(DVector::from_vec(vec![1.0, 2.0]));
-        let rn_3d = Rn::new(DVector::from_vec(vec![3.0, 4.0, 5.0]));
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-        let _ = rn_2d.compose(&rn_3d, None, None); // Should panic
+    fn rn(values: &[f64]) -> Rn {
+        Rn::from_slice(values)
+    }
+
+    #[test]
+    fn try_variants_refuse_mismatched_dimensions() {
+        let two = rn(&[1.0, 2.0]);
+        let three = rn(&[3.0, 4.0, 5.0]);
+        let tangent = RnTangent::from_slice(&[1.0, 1.0, 1.0]);
+        let mismatch = |expected, actual| Some(RnError::DimensionMismatch { expected, actual });
+
+        assert_eq!(two.try_compose(&three).err(), mismatch(2, 3));
+        assert_eq!(two.try_right_plus(&tangent).err(), mismatch(2, 3));
+        assert_eq!(two.try_right_minus(&three).err(), mismatch(2, 3));
+        assert_eq!(two.try_interp(&three, 0.5).err(), mismatch(2, 3));
+        assert_eq!(two.try_act(&Vector3::zeros()).err(), mismatch(3, 2));
+    }
+
+    #[test]
+    fn try_variants_match_the_trait_methods_on_equal_dimensions() -> TestResult {
+        let a = rn(&[1.0, 2.0, 3.0]);
+        let b = rn(&[4.0, 5.0, 6.0]);
+        let tangent = RnTangent::from_slice(&[0.5, 0.5, 0.5]);
+        let point = Vector3::new(1.0, 1.0, 1.0);
+
+        assert_eq!(
+            a.try_compose(&b)?.as_param_slice(),
+            a.compose(&b, None, None).as_param_slice()
+        );
+        assert_eq!(
+            a.try_right_plus(&tangent)?.as_param_slice(),
+            a.right_plus(&tangent, None, None).as_param_slice()
+        );
+        assert_eq!(
+            a.try_right_minus(&b)?.as_slice(),
+            a.right_minus(&b, None, None).as_slice()
+        );
+        assert_eq!(
+            a.try_interp(&b, 0.25)?.as_param_slice(),
+            a.interp(&b, 0.25).as_param_slice()
+        );
+        assert_eq!(a.try_act(&point)?, a.act(&point, None, None));
+        Ok(())
+    }
+
+    /// Mismatched dimensions trip the debug assertion, so the no-panic
+    /// behaviour is only observable in a release build (the test profile).
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn mismatched_dimensions_do_not_panic_and_keep_the_tail_of_self() {
+        let two = rn(&[1.0, 2.0]);
+        let three = rn(&[10.0, 20.0, 30.0]);
+        let tangent = RnTangent::from_slice(&[1.0, 1.0, 1.0]);
+
+        assert_eq!(
+            two.compose(&three, None, None).as_param_slice(),
+            &[11.0, 22.0]
+        );
+        assert_eq!(
+            three.compose(&two, None, None).as_param_slice(),
+            &[11.0, 22.0, 30.0]
+        );
+        assert_eq!(
+            two.right_plus(&tangent, None, None).as_param_slice(),
+            &[2.0, 3.0]
+        );
+        assert_eq!(
+            three
+                .left_plus(&RnTangent::from_slice(&[1.0]), None, None)
+                .as_param_slice(),
+            &[11.0, 20.0, 30.0]
+        );
+        assert_eq!(
+            two.right_minus(&three, None, None).as_slice(),
+            &[-9.0, -18.0]
+        );
+        assert_eq!(three.interp(&two, 0.5).as_param_slice(), &[5.5, 11.0, 30.0]);
+        assert_eq!(three.between(&two, None, None).dim(), 3);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn act_on_a_short_element_does_not_panic() {
+        let point = Vector3::new(1.0, 2.0, 3.0);
+        let mut jacobian = DMatrix::zeros(0, 0);
+        let moved = rn(&[10.0]).act(&point, Some(&mut jacobian), None);
+        assert_eq!(moved, Vector3::new(11.0, 2.0, 3.0));
+        assert_eq!((jacobian.nrows(), jacobian.ncols()), (3, 1));
+
+        assert_eq!(Rn::zeros(0).act(&point, None, None), point);
+        assert_eq!(
+            rn(&[1.0, 1.0, 1.0, 9.0]).act(&point, None, None),
+            Vector3::new(2.0, 3.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn generator_out_of_range_is_zero_and_checked_form_errors() {
+        let tangent = RnTangent::from_slice(&[1.0, 2.0]);
+        assert_eq!(tangent.generator(1)[(1, 1)], 1.0);
+        assert_eq!(tangent.generator(2), DMatrix::zeros(2, 2));
+        assert_eq!(tangent.generator(usize::MAX), DMatrix::zeros(2, 2));
+        assert_eq!(
+            tangent.try_generator(2).err(),
+            Some(crate::TangentError::GeneratorIndex {
+                group: "Rn",
+                index: 2,
+                dim: 2
+            })
+        );
+        assert!(tangent.try_generator(1).is_ok());
     }
 
     #[test]

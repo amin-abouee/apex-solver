@@ -14,9 +14,9 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::Factor;
+use crate::error::ErrorLogging;
 use crate::factors::common::group_point::act_point;
+use crate::factors::{Factor, FactorError, FactorResult};
 
 /// Attitude constraint from a measured reference direction (gravity via
 /// accelerometer, or magnetic field via magnetometer).
@@ -46,13 +46,22 @@ pub struct AttitudeFactor<G: ActsOnPoints3> {
 impl<G: ActsOnPoints3> AttitudeFactor<G> {
     /// Create the factor; both directions are normalized, and near-zero
     /// directions are rejected.
-    pub fn new(direction_world: Vector3<f64>, direction_body: Vector3<f64>) -> CoreResult<Self> {
+    pub fn new(direction_world: Vector3<f64>, direction_body: Vector3<f64>) -> FactorResult<Self> {
+        let usable = |norm: f64| norm.is_finite() && norm > 1e-12;
+        let degenerate = |what| {
+            FactorError::Degenerate {
+                factor: "AttitudeFactor",
+                what,
+            }
+            .log()
+        };
         let nw = direction_world.norm();
+        if !usable(nw) {
+            return Err(degenerate("world direction"));
+        }
         let nb = direction_body.norm();
-        if !(nw.is_finite() && nw > 1e-12 && nb.is_finite() && nb > 1e-12) {
-            return Err(CoreError::InvalidInput(
-                "AttitudeFactor requires non-zero, finite directions".into(),
-            ));
+        if !usable(nb) {
+            return Err(degenerate("body direction"));
         }
         Ok(Self {
             direction_world: direction_world / nw,
@@ -103,14 +112,8 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for AttitudeFactor<G> {
         (3, G::DOF)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        match variables {
-            [state] if state.manifold_type_name() == G::NAME => Ok(()),
-            _ => Err(format!(
-                "AttitudeFactor expects a single {} variable",
-                G::NAME
-            )),
-        }
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_manifolds(variables, &[G::NAME], "AttitudeFactor")
     }
 }
 #[cfg(test)]

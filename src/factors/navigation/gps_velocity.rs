@@ -10,6 +10,7 @@ use nalgebra::Vector3;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 
 /// GNSS velocity factor over a single R³ velocity variable.
 #[derive(Clone)]
@@ -55,11 +56,8 @@ impl Factor for GpsVelocityFactor {
         (3, 3)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 1 || variables[0].as_param_slice().len() != 3 {
-            return Err("GpsVelocityFactor expects a single R³ velocity variable".into());
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_block_sizes(variables, &[3], "GpsVelocityFactor")
     }
 }
 

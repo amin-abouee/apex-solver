@@ -8,6 +8,7 @@ use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::group_point::act_point;
 
 /// A vehicle confined to a horizontal plane: fixed height, no roll, no pitch.
@@ -107,10 +108,11 @@ impl<G: ActsOnPoints3 + Send + Sync + 'static> Factor for PlanarMotionFactor<G> 
         (3, G::DOF)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        match variables {
-            [state] if state.manifold_type_name() == G::NAME => Ok(()),
-            _ => Err(format!("PlanarMotionFactor expects [{} state]", G::NAME)),
-        }
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_manifolds(
+            variables,
+            &[G::NAME],
+            "PlanarMotionFactor",
+        )
     }
 }

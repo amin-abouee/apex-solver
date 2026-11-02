@@ -8,52 +8,62 @@
 //!   cargo test -p apex-io --features rosbag,vrs --release --test bag_pull_real
 //! ```
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-#![allow(clippy::print_stdout, clippy::print_stderr)]
-
 use apex_io::rosbag::{BagReader, Selection, SensorConfig};
+use std::io::Write as _;
 
-fn pulled(r: &mut BagReader, sel: &Selection) -> Vec<(u32, u64, Vec<u8>)> {
-    let mut it = r.iter(sel).unwrap();
+type Triples = Vec<(u32, u64, Vec<u8>)>;
+
+type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+fn pulled(
+    r: &mut BagReader,
+    sel: &Selection,
+) -> std::result::Result<Triples, Box<dyn std::error::Error>> {
+    let mut it = r.iter(sel)?;
     let mut buf = Vec::new();
     let mut out = Vec::new();
-    while let Some((id, ts)) = it.next_into(&mut buf).unwrap() {
+    while let Some((id, ts)) = it.next_into(&mut buf)? {
         out.push((id, ts, buf.clone()));
     }
-    out
+    Ok(out)
 }
 
-fn callback(r: &mut BagReader, sel: &Selection) -> Vec<(u32, u64, Vec<u8>)> {
+fn callback(
+    r: &mut BagReader,
+    sel: &Selection,
+) -> std::result::Result<Triples, Box<dyn std::error::Error>> {
     let conns = r.selected_connections(sel);
     let mut out = Vec::new();
     r.for_each(&conns, sel, |c, ts, d| {
         out.push((c.id, ts, d.to_vec()));
         Ok(())
-    })
-    .unwrap();
-    out
+    })?;
+    Ok(out)
 }
 
 #[test]
-fn aria_vrs_params_and_pull_match_the_callback_api() {
+fn aria_vrs_params_and_pull_match_the_callback_api() -> TestResult {
     let Ok(path) = std::env::var("APEX_VRS_SAMPLE") else {
-        eprintln!("APEX_VRS_SAMPLE not set; skipping");
-        return;
+        writeln!(
+            std::io::stderr().lock(),
+            "APEX_VRS_SAMPLE not set; skipping"
+        )?;
+        return Ok(());
     };
-    let mut bag = BagReader::open(&path).unwrap();
+    let mut bag = BagReader::open(&path)?;
 
-    let params = bag.params().unwrap();
+    let params = bag.params()?;
     assert_eq!(
         params.file_tags.get("device_type").map(String::as_str),
         Some("Ariane")
     );
-    let calib = params.calibration.as_ref().expect("factory calibration");
+    let calib = params.calibration.as_ref().ok_or("missing value")?;
     assert!(calib.get("CameraCalibrations").is_some());
     let slam = params
         .sensors
         .iter()
         .find(|s| s.topic == "/aria/camera_slam_left/compressed")
-        .expect("left SLAM camera");
+        .ok_or("missing value")?;
     assert!(matches!(
         slam.config,
         SensorConfig::Camera {
@@ -66,7 +76,7 @@ fn aria_vrs_params_and_pull_match_the_callback_api() {
         .sensors
         .iter()
         .find(|s| s.topic == "/aria/imu_right")
-        .unwrap();
+        .ok_or("missing value")?;
     assert!(matches!(
         imu.config,
         SensorConfig::Imu {
@@ -87,8 +97,8 @@ fn aria_vrs_params_and_pull_match_the_callback_api() {
         end_ns: Some(start + 5_000_000_000),
         ..Selection::default()
     };
-    let a = callback(&mut bag, &sel);
-    let b = pulled(&mut bag, &sel);
+    let a = callback(&mut bag, &sel)?;
+    let b = pulled(&mut bag, &sel)?;
     assert_eq!(a, b);
     assert!(
         (4_900..5_200).contains(&a.len()),
@@ -98,31 +108,36 @@ fn aria_vrs_params_and_pull_match_the_callback_api() {
     // Emitted stamps are capture times; ordering follows record times, so
     // sub-millisecond inversions are the most that can happen.
     assert!(b.windows(2).all(|w| w[1].1 + 2_000_000 >= w[0].1));
+    Ok(())
 }
 
 #[test]
-fn real_mcap_pull_matches_the_callback_api() {
+fn real_mcap_pull_matches_the_callback_api() -> TestResult {
     let Ok(path) = std::env::var("APEX_BENCH_MCAP") else {
-        eprintln!("APEX_BENCH_MCAP not set; skipping");
-        return;
+        writeln!(
+            std::io::stderr().lock(),
+            "APEX_BENCH_MCAP not set; skipping"
+        )?;
+        return Ok(());
     };
-    let mut bag = BagReader::open(&path).unwrap();
+    let mut bag = BagReader::open(&path)?;
     let topic = bag
         .connections()
         .iter()
         .max_by_key(|c| c.message_count)
         .map(|c| c.topic.clone())
-        .unwrap();
+        .ok_or("missing value")?;
     let sel = Selection {
         include: vec![topic],
         ..Selection::default()
     };
-    let a = callback(&mut bag, &sel);
-    let b = pulled(&mut bag, &sel);
+    let a = callback(&mut bag, &sel)?;
+    let b = pulled(&mut bag, &sel)?;
     assert!(!a.is_empty());
     assert_eq!(a, b);
     assert!(
         b.windows(2).all(|w| w[1].1 >= w[0].1),
         "pull must be time ordered"
     );
+    Ok(())
 }

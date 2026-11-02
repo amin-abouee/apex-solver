@@ -62,7 +62,8 @@ $$
 $$
 
 **Validity.** A singular step Jacobian ($|\det| < \epsilon_g$) or failure to
-converge within 100 iterations raises `NumericalError`. Real solutions exist
+converge within 100 iterations raises `UnprojectionError::SingularJacobian` or
+`NotConverged`. Real solutions exist
 only for moderate distortion.
 
 <a id="jacobians"></a>

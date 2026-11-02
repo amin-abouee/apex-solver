@@ -168,11 +168,11 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
             &[pose_keys[cam_idx], landmarks_key, intrinsics_key],
             Box::new(factor),
             None,
-        );
+        )?;
     }
 
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
 
     // ============================================================================
@@ -331,11 +331,11 @@ fn test_pinhole_3_cameras_calibration() -> TestResult {
             &[pose_keys[cam_idx], landmarks_key, intrinsics_key],
             Box::new(factor),
             None,
-        );
+        )?;
     }
 
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
 
     // 300 iterations, not 100: self-calibration mixes focal lengths (~500),

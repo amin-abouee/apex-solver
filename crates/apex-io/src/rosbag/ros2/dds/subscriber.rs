@@ -1,6 +1,7 @@
 use super::error::{DdsError, Result};
 use super::qos_mapping::{to_dds_durability, to_dds_history, to_dds_reliability};
 use super::raw_bytes::{RawBytes, RawBytesAdapter};
+use crate::error::{ErrorChainExt, ErrorLogging};
 use crate::rosbag::types::{
     Connection, MessageDefinition, QosDurability, QosReliability, RawMessage,
 };
@@ -43,8 +44,9 @@ impl DdsSubscriber {
         if config.topic.is_empty() {
             return Err(DdsError::InvalidTopicName {
                 name: config.topic.clone(),
-                reason: "topic name must not be empty".to_string(),
-            });
+                reason: "topic name must not be empty",
+            }
+            .log());
         }
         Ok(Self { config })
     }
@@ -80,15 +82,19 @@ impl DdsSubscriber {
         let (tx, rx) = mpsc::channel::<RawMessage>(self.config.channel_capacity);
         let config = self.config;
         let dds_topic_name = Self::ros2_to_dds_topic(&config.topic);
+        let topic = config.topic.clone();
 
         std::thread::Builder::new()
             .name(format!("dds-{}", config.topic))
             .spawn(move || {
-                if let Err(e) = run_reader_loop(config, dds_topic_name, tx) {
-                    tracing::error!("DDS reader loop exited with error: {e}");
+                let topic = config.topic.clone();
+                // The thread has no caller to return to: the error is logged
+                // here, once, and the receiver sees the channel close.
+                if let Err(error) = run_reader_loop(config, dds_topic_name, tx) {
+                    tracing::error!(%topic, error = %error.chain_compact(), "DDS reader loop stopped");
                 }
             })
-            .map_err(|e| DdsError::ThreadSpawn(e.to_string()))?;
+            .map_err(|source| DdsError::ThreadSpawn { topic, source }.log())?;
 
         Ok(rx)
     }
@@ -109,8 +115,12 @@ fn run_reader_loop(
         .history(history)
         .build();
 
-    let participant = DomainParticipant::new(config.domain_id)
-        .map_err(|e| DdsError::ParticipantCreation(e.to_string()))?;
+    let participant = DomainParticipant::new(config.domain_id).map_err(|source| {
+        DdsError::ParticipantCreation {
+            domain_id: config.domain_id,
+            source,
+        }
+    })?;
 
     let dds_type_name = DdsSubscriber::ros2_type_to_dds_type(&config.message_type);
 
@@ -128,18 +138,21 @@ fn run_reader_loop(
             &qos,
             TopicKind::NoKey,
         )
-        .map_err(|e| DdsError::TopicCreation {
+        .map_err(|source| DdsError::TopicCreation {
             topic: dds_topic_name.clone(),
-            reason: e.to_string(),
+            source,
         })?;
 
     let subscriber = participant
         .create_subscriber(&qos)
-        .map_err(|e| DdsError::SubscriberCreation(e.to_string()))?;
+        .map_err(DdsError::SubscriberCreation)?;
 
     let reader = subscriber
         .create_datareader_no_key::<RawBytes, RawBytesAdapter>(&topic, Some(qos))
-        .map_err(|e| DdsError::DataReaderCreation(e.to_string()))?;
+        .map_err(|source| DdsError::DataReaderCreation {
+            topic: dds_topic_name.clone(),
+            source,
+        })?;
 
     let connection = Connection {
         id: 1,
@@ -158,7 +171,7 @@ fn run_reader_loop(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| DdsError::RuntimeCreation(e.to_string()))?;
+        .map_err(DdsError::RuntimeCreation)?;
 
     rt.block_on(async move {
         use tokio::sync::mpsc::error::TrySendError;

@@ -41,6 +41,7 @@ use faer::Mat;
 
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
+use crate::error::ErrorLogging;
 use crate::linalg::dense::cholesky::solve_spd;
 use crate::linalg::dense::schur::gather::{gather_dense, verify_block_diagonal_dense};
 use crate::linalg::schur::{
@@ -86,9 +87,10 @@ impl ExplicitDenseSchur {
 
     fn require_partition(&self) -> LinAlgResult<&SchurPartition> {
         self.partition.as_ref().ok_or_else(|| {
-            LinAlgError::InvalidInput(
-                "Block structure not built. Call initialize_structure() first.".to_string(),
-            )
+            LinAlgError::NotInitialized {
+                component: "Schur solver partition",
+            }
+            .log()
         })
     }
 
@@ -191,11 +193,7 @@ impl ExplicitDenseSchur {
         let s = &h_kk - &coupling * h_ke.transpose();
         let g_reduced = &g_k - &coupling * &g_e;
 
-        let delta_k = solve_spd(
-            &s,
-            &g_reduced,
-            "Dense Schur complement factorization failed",
-        )?;
+        let delta_k = solve_spd(&s, &g_reduced, "the dense Schur complement")?;
 
         // δ_e = H_ee⁻¹·(g_e − H_keᵀ·δ_k)
         let hke_t_delta = h_ke.transpose() * &delta_k;
@@ -244,9 +242,9 @@ impl StructureAware for ExplicitDenseSchur {
         let mut kept = Vec::new();
         let mut eliminated = Vec::new();
         for (key, variable) in variables {
-            let col_start = *variable_index_map.get(key).ok_or_else(|| {
-                LinAlgError::InvalidInput(format!("VarKey {:?} not found in index map", key))
-            })?;
+            let col_start = *variable_index_map
+                .get(key)
+                .ok_or_else(|| LinAlgError::UnknownVariable { key }.log())?;
             let span = BlockSpan {
                 key,
                 col_start,

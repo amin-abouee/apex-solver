@@ -12,7 +12,7 @@
 //! `DataPieceVector<string>` stores `u32 count` followed by
 //! `count x { u32 len, bytes }`; other vectors are packed elements.
 
-use super::error::{Result, VrsError};
+use super::error::{LayoutError, LayoutResult, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -179,17 +179,19 @@ impl DataLayout {
                 index: p.index,
             });
         }
-        Self::from_pieces(pieces)
+        Ok(Self::from_pieces(pieces)?)
     }
 
     /// Build from pieces (used by the writer).
-    pub fn from_pieces(pieces: Vec<Piece>) -> Result<Self> {
+    pub fn from_pieces(pieces: Vec<Piece>) -> LayoutResult<Self> {
         let mut by_name = HashMap::new();
         let mut fixed_size = 0usize;
         let mut var_count = 0usize;
         for (i, p) in pieces.iter().enumerate() {
             if by_name.insert(p.name.clone(), i).is_some() {
-                return Err(VrsError::Layout(format!("duplicate piece '{}'", p.name)));
+                return Err(LayoutError::DuplicatePiece {
+                    name: p.name.clone(),
+                });
             }
             match (&p.kind, p.offset, p.index) {
                 (PieceKind::Value(s), Some(o), _) => fixed_size = fixed_size.max(o + s.size()),
@@ -199,10 +201,9 @@ impl DataLayout {
                 (PieceKind::Unknown(_), Some(_), _) => {}
                 (_, None, Some(ix)) => var_count = var_count.max(ix + 1),
                 _ => {
-                    return Err(VrsError::Layout(format!(
-                        "piece '{}' has neither a valid offset nor an index",
-                        p.name
-                    )));
+                    return Err(LayoutError::PiecePlacement {
+                        name: p.name.clone(),
+                    });
                 }
             }
         }
@@ -268,12 +269,19 @@ impl DataLayout {
 
     /// Bind the layout to the start of `data`, validating that the fixed
     /// section, var index and var data all lie inside it.
-    pub fn bind<'a>(&'a self, data: &'a [u8]) -> Result<LayoutView<'a>> {
-        let index_end = self
-            .fixed_size
-            .checked_add(self.var_count * 8)
-            .filter(|&e| e <= data.len())
-            .ok_or_else(|| VrsError::Layout("record shorter than its DataLayout".into()))?;
+    pub fn bind<'a>(&'a self, data: &'a [u8]) -> LayoutResult<LayoutView<'a>> {
+        let need = self
+            .var_count
+            .checked_mul(8)
+            .and_then(|index| index.checked_add(self.fixed_size))
+            .unwrap_or(usize::MAX);
+        if need > data.len() {
+            return Err(LayoutError::RecordTooShort {
+                len: data.len(),
+                need,
+            });
+        }
+        let index_end = need;
         let mut var_end = 0usize;
         for k in 0..self.var_count {
             let at = self.fixed_size + k * 8;
@@ -285,7 +293,10 @@ impl DataLayout {
                 .checked_add(len)
                 .and_then(|e| e.checked_add(index_end))
                 .filter(|&e| e <= data.len())
-                .ok_or_else(|| VrsError::Layout("variable-size data out of bounds".into()))?;
+                .ok_or(LayoutError::VarOutOfBounds {
+                    index: k,
+                    len: data.len(),
+                })?;
             var_end = var_end.max(end);
         }
         Ok(LayoutView {
@@ -294,6 +305,24 @@ impl DataLayout {
             index_end,
             total_len: var_end.max(index_end),
         })
+    }
+}
+
+impl DataLayout {
+    fn piece(&self, name: &str) -> LayoutResult<&Piece> {
+        self.by_name
+            .get(name)
+            .and_then(|&i| self.pieces.get(i))
+            .ok_or_else(|| LayoutError::NoField {
+                name: name.to_string(),
+            })
+    }
+}
+
+fn wrong_kind(name: &str, expected: &'static str) -> LayoutError {
+    LayoutError::WrongKind {
+        name: name.to_string(),
+        expected,
     }
 }
 
@@ -310,7 +339,7 @@ pub struct LayoutWriter<'a> {
 macro_rules! scalar_setter {
     ($(#[$m:meta])* $fn:ident, $ty:ty, $scalar:ident) => {
         $(#[$m])*
-        pub fn $fn(&mut self, name: &str, value: $ty) -> Result<&mut Self> {
+        pub fn $fn(&mut self, name: &str, value: $ty) -> LayoutResult<&mut Self> {
             let o = self.fixed_offset(name, Scalar::$scalar)?;
             self.fixed[o..o + Scalar::$scalar.size()].copy_from_slice(&value.to_le_bytes());
             Ok(self)
@@ -328,22 +357,15 @@ impl<'a> LayoutWriter<'a> {
         }
     }
 
-    fn piece(&self, name: &str) -> Result<&'a Piece> {
-        let layout: &'a DataLayout = self.layout;
-        layout
-            .by_name
-            .get(name)
-            .map(|&i| &layout.pieces[i])
-            .ok_or_else(|| VrsError::Layout(format!("no field '{name}' in this DataLayout")))
+    fn piece(&self, name: &str) -> LayoutResult<&'a Piece> {
+        self.layout.piece(name)
     }
 
-    fn fixed_offset(&self, name: &str, want: Scalar) -> Result<usize> {
-        match (&self.piece(name)?.kind, self.piece(name)?.offset) {
+    fn fixed_offset(&self, name: &str, want: Scalar) -> LayoutResult<usize> {
+        let piece = self.piece(name)?;
+        match (&piece.kind, piece.offset) {
             (PieceKind::Value(s), Some(o)) if *s == want => Ok(o),
-            _ => Err(VrsError::Layout(format!(
-                "field '{name}' is not a {} value",
-                want.name()
-            ))),
+            _ => Err(wrong_kind(name, want.name())),
         }
     }
 
@@ -377,14 +399,14 @@ impl<'a> LayoutWriter<'a> {
     );
 
     /// Set a `Bool` field.
-    pub fn set_bool(&mut self, name: &str, value: bool) -> Result<&mut Self> {
+    pub fn set_bool(&mut self, name: &str, value: bool) -> LayoutResult<&mut Self> {
         let o = self.fixed_offset(name, Scalar::Bool)?;
         self.fixed[o] = u8::from(value);
         Ok(self)
     }
 
     /// Set a `float[N]` array field.
-    pub fn set_f32_array(&mut self, name: &str, values: &[f32]) -> Result<&mut Self> {
+    pub fn set_f32_array(&mut self, name: &str, values: &[f32]) -> LayoutResult<&mut Self> {
         let p = self.piece(name)?;
         match (&p.kind, p.offset) {
             (PieceKind::Array(Scalar::F32, n), Some(o)) if *n == values.len() => {
@@ -393,30 +415,36 @@ impl<'a> LayoutWriter<'a> {
                 }
                 Ok(self)
             }
-            _ => Err(VrsError::Layout(format!(
-                "field '{name}' is not a float[{}] array",
-                values.len()
-            ))),
+            _ => Err(LayoutError::WrongArray {
+                name: name.to_string(),
+                scalar: "float",
+                len: values.len(),
+            }),
         }
     }
 
-    fn var_slot(&self, name: &str, ok: impl Fn(&PieceKind) -> bool, what: &str) -> Result<usize> {
+    fn var_slot(
+        &self,
+        name: &str,
+        ok: impl Fn(&PieceKind) -> bool,
+        what: &'static str,
+    ) -> LayoutResult<usize> {
         let p = self.piece(name)?;
         match p.index {
             Some(ix) if ok(&p.kind) => Ok(ix),
-            _ => Err(VrsError::Layout(format!("field '{name}' is not a {what}"))),
+            _ => Err(wrong_kind(name, what)),
         }
     }
 
     /// Set a string field.
-    pub fn set_string(&mut self, name: &str, value: &str) -> Result<&mut Self> {
+    pub fn set_string(&mut self, name: &str, value: &str) -> LayoutResult<&mut Self> {
         let ix = self.var_slot(name, |k| *k == PieceKind::String, "string")?;
         self.var[ix] = value.as_bytes().to_vec();
         Ok(self)
     }
 
     /// Set a vector-of-`float` field.
-    pub fn set_f32_vector(&mut self, name: &str, values: &[f32]) -> Result<&mut Self> {
+    pub fn set_f32_vector(&mut self, name: &str, values: &[f32]) -> LayoutResult<&mut Self> {
         let ix = self.var_slot(
             name,
             |k| *k == PieceKind::Vector(Scalar::F32),
@@ -427,7 +455,7 @@ impl<'a> LayoutWriter<'a> {
     }
 
     /// Set a vector-of-string field.
-    pub fn set_string_vector(&mut self, name: &str, values: &[String]) -> Result<&mut Self> {
+    pub fn set_string_vector(&mut self, name: &str, values: &[String]) -> LayoutResult<&mut Self> {
         let ix = self.var_slot(name, |k| *k == PieceKind::StringVector, "string vector")?;
         let mut bytes = Vec::new();
         if !values.is_empty() {
@@ -469,7 +497,7 @@ pub struct LayoutView<'a> {
 macro_rules! scalar_getter {
     ($(#[$m:meta])* $fn:ident, $ret:ty, $scalar:ident, $n:expr) => {
         $(#[$m])*
-        pub fn $fn(&self, name: &str) -> Result<$ret> {
+        pub fn $fn(&self, name: &str) -> LayoutResult<$ret> {
             let b = self.scalar_bytes(name, Scalar::$scalar)?;
             let mut a = [0u8; $n];
             a.copy_from_slice(b);
@@ -485,23 +513,15 @@ impl<'a> LayoutView<'a> {
         self.total_len
     }
 
-    fn piece(&self, name: &str) -> Result<&'a Piece> {
-        let layout: &'a DataLayout = self.layout;
-        layout
-            .by_name
-            .get(name)
-            .map(|&i| &layout.pieces[i])
-            .ok_or_else(|| VrsError::Layout(format!("no field '{name}' in this DataLayout")))
+    fn piece(&self, name: &str) -> LayoutResult<&'a Piece> {
+        self.layout.piece(name)
     }
 
-    fn scalar_bytes(&self, name: &str, want: Scalar) -> Result<&'a [u8]> {
+    fn scalar_bytes(&self, name: &str, want: Scalar) -> LayoutResult<&'a [u8]> {
         let p = self.piece(name)?;
         match (&p.kind, p.offset) {
             (PieceKind::Value(s), Some(o)) if *s == want => Ok(&self.data[o..o + s.size()]),
-            _ => Err(VrsError::Layout(format!(
-                "field '{name}' is not a {} value",
-                want.name()
-            ))),
+            _ => Err(wrong_kind(name, want.name())),
         }
     }
 
@@ -535,12 +555,12 @@ impl<'a> LayoutView<'a> {
     );
 
     /// Read a `Bool` field.
-    pub fn get_bool(&self, name: &str) -> Result<bool> {
+    pub fn get_bool(&self, name: &str) -> LayoutResult<bool> {
         Ok(self.scalar_bytes(name, Scalar::Bool)?[0] != 0)
     }
 
     /// Read a `Point3Df` field.
-    pub fn get_point3f(&self, name: &str) -> Result<[f32; 3]> {
+    pub fn get_point3f(&self, name: &str) -> LayoutResult<[f32; 3]> {
         let b = self.scalar_bytes(name, Scalar::Point3F)?;
         Ok(std::array::from_fn(|i| {
             f32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]])
@@ -548,7 +568,7 @@ impl<'a> LayoutView<'a> {
     }
 
     /// Read a fixed-size `float` array of exactly `N` elements.
-    pub fn get_f32_array<const N: usize>(&self, name: &str) -> Result<[f32; N]> {
+    pub fn get_f32_array<const N: usize>(&self, name: &str) -> LayoutResult<[f32; N]> {
         let p = self.piece(name)?;
         match (&p.kind, p.offset) {
             (PieceKind::Array(Scalar::F32, n), Some(o)) if *n == N => {
@@ -562,14 +582,16 @@ impl<'a> LayoutView<'a> {
                     ])
                 }))
             }
-            _ => Err(VrsError::Layout(format!(
-                "field '{name}' is not a float[{N}] array"
-            ))),
+            _ => Err(LayoutError::WrongArray {
+                name: name.to_string(),
+                scalar: "float",
+                len: N,
+            }),
         }
     }
 
     /// Read a fixed-size `double` array of exactly `N` elements.
-    pub fn get_f64_array<const N: usize>(&self, name: &str) -> Result<[f64; N]> {
+    pub fn get_f64_array<const N: usize>(&self, name: &str) -> LayoutResult<[f64; N]> {
         let p = self.piece(name)?;
         match (&p.kind, p.offset) {
             (PieceKind::Array(Scalar::F64, n), Some(o)) if *n == N => {
@@ -580,16 +602,18 @@ impl<'a> LayoutView<'a> {
                     f64::from_le_bytes(a)
                 }))
             }
-            _ => Err(VrsError::Layout(format!(
-                "field '{name}' is not a double[{N}] array"
-            ))),
+            _ => Err(LayoutError::WrongArray {
+                name: name.to_string(),
+                scalar: "double",
+                len: N,
+            }),
         }
     }
 
-    fn var_bytes(&self, p: &Piece) -> Result<&'a [u8]> {
+    fn var_bytes(&self, p: &Piece) -> LayoutResult<&'a [u8]> {
         let k = p
             .index
-            .ok_or_else(|| VrsError::Layout(format!("field '{}' is not variable-size", p.name)))?;
+            .ok_or_else(|| wrong_kind(&p.name, "variable-size field"))?;
         let at = self.layout.fixed_size + k * 8;
         let off = u32::from_le_bytes([
             self.data[at],
@@ -608,42 +632,41 @@ impl<'a> LayoutView<'a> {
     }
 
     /// Read a string field.
-    pub fn get_string(&self, name: &str) -> Result<String> {
+    pub fn get_string(&self, name: &str) -> LayoutResult<String> {
         let p = self.piece(name)?;
         if p.kind != PieceKind::String {
-            return Err(VrsError::Layout(format!("field '{name}' is not a string")));
+            return Err(wrong_kind(name, "string"));
         }
         Ok(String::from_utf8_lossy(self.var_bytes(p)?).into_owned())
     }
 
     /// Read a vector-of-`float` field.
-    pub fn get_f32_vector(&self, name: &str) -> Result<Vec<f32>> {
+    pub fn get_f32_vector(&self, name: &str) -> LayoutResult<Vec<f32>> {
         let p = self.piece(name)?;
         if p.kind != PieceKind::Vector(Scalar::F32) {
-            return Err(VrsError::Layout(format!(
-                "field '{name}' is not a float vector"
-            )));
+            return Err(wrong_kind(name, "float vector"));
         }
         let (chunks, _) = self.var_bytes(p)?.as_chunks::<4>();
         Ok(chunks.iter().map(|c| f32::from_le_bytes(*c)).collect())
     }
 
     /// Read a vector-of-string field.
-    pub fn get_string_vector(&self, name: &str) -> Result<Vec<String>> {
+    pub fn get_string_vector(&self, name: &str) -> LayoutResult<Vec<String>> {
         let p = self.piece(name)?;
         if p.kind != PieceKind::StringVector {
-            return Err(VrsError::Layout(format!(
-                "field '{name}' is not a string vector"
-            )));
+            return Err(wrong_kind(name, "string vector"));
         }
         let b = self.var_bytes(p)?;
         if b.is_empty() {
             return Ok(Vec::new());
         }
-        let read_u32 = |at: usize| -> Result<usize> {
-            b.get(at..at + 4)
+        let truncated = || LayoutError::StringVectorTruncated {
+            name: name.to_string(),
+        };
+        let read_u32 = |at: usize| -> LayoutResult<usize> {
+            b.get(at..at.saturating_add(4))
                 .map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]) as usize)
-                .ok_or_else(|| VrsError::Layout("string vector truncated".into()))
+                .ok_or_else(truncated)
         };
         let count = read_u32(0)?;
         let mut pos = 4usize;
@@ -651,9 +674,7 @@ impl<'a> LayoutView<'a> {
         for _ in 0..count {
             let len = read_u32(pos)?;
             pos += 4;
-            let s = b
-                .get(pos..pos.saturating_add(len))
-                .ok_or_else(|| VrsError::Layout("string vector truncated".into()))?;
+            let s = b.get(pos..pos.saturating_add(len)).ok_or_else(truncated)?;
             out.push(String::from_utf8_lossy(s).into_owned());
             pos += len;
         }
@@ -662,8 +683,9 @@ impl<'a> LayoutView<'a> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
 
     /// The IMU data layout of real Aria files (79 bytes).
@@ -676,8 +698,8 @@ mod tests {
         {"name":"accelerometer","type":"DataPieceArray<float>","offset":43,"size":3}]}"#;
 
     #[test]
-    fn imu_layout_has_the_documented_size_and_values() {
-        let l = DataLayout::from_json(IMU_JSON).unwrap();
+    fn imu_layout_has_the_documented_size_and_values() -> TestResult {
+        let l = DataLayout::from_json(IMU_JSON)?;
         assert_eq!(l.fixed_size(), 55);
         assert_eq!(l.var_count(), 0);
 
@@ -688,43 +710,43 @@ mod tests {
         for (i, v) in [1.0f32, -2.0, 9.81].iter().enumerate() {
             d[43 + 4 * i..47 + 4 * i].copy_from_slice(&v.to_le_bytes());
         }
-        let v = l.bind(&d).unwrap();
-        assert!(v.get_bool("accelerometer_valid").unwrap());
-        assert!(!v.get_bool("gyroscope_valid").unwrap());
-        assert_eq!(v.get_f64("temperature_deg_c").unwrap(), 36.5);
-        assert_eq!(v.get_i64("capture_timestamp_ns").unwrap(), -7);
-        assert_eq!(
-            v.get_f32_array::<3>("accelerometer").unwrap(),
-            [1.0, -2.0, 9.81]
-        );
+        let v = l.bind(&d)?;
+        assert!(v.get_bool("accelerometer_valid")?);
+        assert!(!v.get_bool("gyroscope_valid")?);
+        assert_eq!(v.get_f64("temperature_deg_c")?, 36.5);
+        assert_eq!(v.get_i64("capture_timestamp_ns")?, -7);
+        assert_eq!(v.get_f32_array::<3>("accelerometer")?, [1.0, -2.0, 9.81]);
         assert_eq!(v.total_len(), 55);
+        Ok(())
     }
 
     #[test]
-    fn wrong_type_or_name_is_an_error() {
-        let l = DataLayout::from_json(IMU_JSON).unwrap();
+    fn wrong_type_or_name_is_an_error() -> TestResult {
+        let l = DataLayout::from_json(IMU_JSON)?;
         let d = vec![0u8; 55];
-        let v = l.bind(&d).unwrap();
+        let v = l.bind(&d)?;
         assert!(v.get_f64("capture_timestamp_ns").is_err());
         assert!(v.get_i64("nope").is_err());
         assert!(v.get_f32_array::<4>("accelerometer").is_err());
         assert!(v.get_string("accelerometer").is_err());
+        Ok(())
     }
 
     #[test]
-    fn short_record_is_rejected() {
-        let l = DataLayout::from_json(IMU_JSON).unwrap();
+    fn short_record_is_rejected() -> TestResult {
+        let l = DataLayout::from_json(IMU_JSON)?;
         assert!(l.bind(&[0u8; 54]).is_err());
+        Ok(())
     }
 
     #[test]
-    fn var_size_pieces_decode_like_a_real_wifi_record() {
+    fn var_size_pieces_decode_like_a_real_wifi_record() -> TestResult {
         let json = r#"{"data_layout":[
             {"name":"rssi","type":"DataPieceValue<float>","offset":0},
             {"name":"ssid","type":"DataPieceString","index":0},
             {"name":"antennas","type":"DataPieceVector<float>","index":1},
             {"name":"raw","type":"DataPieceVector<string>","index":2}]}"#;
-        let l = DataLayout::from_json(json).unwrap();
+        let l = DataLayout::from_json(json)?;
         assert_eq!((l.fixed_size(), l.var_count()), (4, 3));
 
         let mut vardata = Vec::new();
@@ -752,17 +774,18 @@ mod tests {
         d.extend_from_slice(&vardata);
         d.extend_from_slice(b"TRAILING-CONTENT-BLOCK");
 
-        let v = l.bind(&d).unwrap();
-        assert_eq!(v.get_f32("rssi").unwrap(), -60.0);
-        assert_eq!(v.get_string("ssid").unwrap(), "eth-visitors");
-        assert_eq!(v.get_f32_vector("antennas").unwrap(), [1.5, -2.5]);
-        assert_eq!(v.get_string_vector("raw").unwrap(), ["ab", "cde"]);
+        let v = l.bind(&d)?;
+        assert_eq!(v.get_f32("rssi")?, -60.0);
+        assert_eq!(v.get_string("ssid")?, "eth-visitors");
+        assert_eq!(v.get_f32_vector("antennas")?, [1.5, -2.5]);
+        assert_eq!(v.get_string_vector("raw")?, ["ab", "cde"]);
         // Content blocks begin right after the var data.
         assert_eq!(&d[v.total_len()..], b"TRAILING-CONTENT-BLOCK");
+        Ok(())
     }
 
     #[test]
-    fn layout_writer_output_reads_back_through_the_view() {
+    fn layout_writer_output_reads_back_through_the_view() -> TestResult {
         let json = r#"{"data_layout":[
             {"name":"ts","type":"DataPieceValue<int64_t>","offset":0},
             {"name":"ok","type":"DataPieceValue<Bool>","offset":8},
@@ -770,55 +793,56 @@ mod tests {
             {"name":"name","type":"DataPieceString","index":0},
             {"name":"v","type":"DataPieceVector<float>","index":1},
             {"name":"lines","type":"DataPieceVector<string>","index":2}]}"#;
-        let l = DataLayout::from_json(json).unwrap();
+        let l = DataLayout::from_json(json)?;
         let mut w = LayoutWriter::new(&l);
-        w.set_i64("ts", -42).unwrap();
-        w.set_bool("ok", true).unwrap();
-        w.set_f32_array("acc", &[1.0, 2.0, 3.0]).unwrap();
-        w.set_string("name", "héllo").unwrap();
-        w.set_f32_vector("v", &[0.5, 1.5]).unwrap();
-        w.set_string_vector("lines", &["a".into(), "bc".into()])
-            .unwrap();
+        w.set_i64("ts", -42)?;
+        w.set_bool("ok", true)?;
+        w.set_f32_array("acc", &[1.0, 2.0, 3.0])?;
+        w.set_string("name", "héllo")?;
+        w.set_f32_vector("v", &[0.5, 1.5])?;
+        w.set_string_vector("lines", &["a".into(), "bc".into()])?;
         assert!(w.set_i64("name", 1).is_err());
         assert!(w.set_f32_array("acc", &[1.0]).is_err());
         let mut bytes = w.finish();
         bytes.extend_from_slice(b"TAIL");
 
-        let v = l.bind(&bytes).unwrap();
-        assert_eq!(v.get_i64("ts").unwrap(), -42);
-        assert!(v.get_bool("ok").unwrap());
-        assert_eq!(v.get_f32_array::<3>("acc").unwrap(), [1.0, 2.0, 3.0]);
-        assert_eq!(v.get_string("name").unwrap(), "héllo");
-        assert_eq!(v.get_f32_vector("v").unwrap(), [0.5, 1.5]);
-        assert_eq!(v.get_string_vector("lines").unwrap(), ["a", "bc"]);
+        let v = l.bind(&bytes)?;
+        assert_eq!(v.get_i64("ts")?, -42);
+        assert!(v.get_bool("ok")?);
+        assert_eq!(v.get_f32_array::<3>("acc")?, [1.0, 2.0, 3.0]);
+        assert_eq!(v.get_string("name")?, "héllo");
+        assert_eq!(v.get_f32_vector("v")?, [0.5, 1.5]);
+        assert_eq!(v.get_string_vector("lines")?, ["a", "bc"]);
         assert_eq!(&bytes[v.total_len()..], b"TAIL");
+        Ok(())
     }
 
     #[test]
-    fn hostile_var_index_is_rejected() {
+    fn hostile_var_index_is_rejected() -> TestResult {
         let l = DataLayout::from_json(
             r#"{"data_layout":[{"name":"s","type":"DataPieceString","index":0}]}"#,
-        )
-        .unwrap();
+        )?;
         let mut d = Vec::new();
         d.extend_from_slice(&u32::MAX.to_le_bytes());
         d.extend_from_slice(&u32::MAX.to_le_bytes());
         assert!(l.bind(&d).is_err());
+        Ok(())
     }
 
     #[test]
-    fn json_round_trips_and_unknown_types_survive() {
+    fn json_round_trips_and_unknown_types_survive() -> TestResult {
         let json = r#"{"data_layout":[
             {"name":"a","type":"DataPieceValue<double>","offset":0},
             {"name":"w","type":"DataPieceWeird<x>","offset":8}]}"#;
-        let l = DataLayout::from_json(json).unwrap();
+        let l = DataLayout::from_json(json)?;
         assert!(matches!(l.pieces()[1].kind, PieceKind::Unknown(_)));
-        let again = DataLayout::from_json(&l.to_json()).unwrap();
+        let again = DataLayout::from_json(&l.to_json())?;
         assert_eq!(again, l);
+        Ok(())
     }
 
     #[test]
-    fn duplicate_or_malformed_pieces_are_rejected() {
+    fn duplicate_or_malformed_pieces_are_rejected() -> TestResult {
         assert!(DataLayout::from_json(
             r#"{"data_layout":[{"name":"a","type":"DataPieceValue<double>","offset":0},{"name":"a","type":"DataPieceValue<double>","offset":8}]}"#
         )
@@ -830,5 +854,6 @@ mod tests {
             .is_err()
         );
         assert!(DataLayout::from_json("not json").is_err());
+        Ok(())
     }
 }

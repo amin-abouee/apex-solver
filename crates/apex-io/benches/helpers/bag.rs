@@ -1,7 +1,7 @@
 //! A VIO-like ROS recording: two cameras, one IMU, one lidar — the same
 //! messages encoded both ROS1 and CDR so every bench reads real payloads.
 
-use super::Rng;
+use crate::helpers::Rng;
 use apex_io::rosbag::bag::{BagKind, BagWriter, NewConnection, OutputCompression};
 use apex_io::rosbag::ros1::deserialize::Ros1Serializer;
 use apex_io::rosbag::ros1::messages as r1;
@@ -103,11 +103,11 @@ impl Scenario {
         }
 
         // One transcoder per type, reused across every message of that type.
-        let reg = catalog().expect("standard message catalog");
+        let reg = catalog().unwrap_or_else(|e| panic!("standard message catalog: {e}"));
         let mut scratch = Vec::new();
         for spec in &topics {
             let t = Transcoder::compile(reg, spec.ros1_type, Dialect::Ros1, Dialect::Ros2)
-                .expect("compile transcoder");
+                .unwrap_or_else(|e| panic!("compile transcoder: {e}"));
             for m in &mut messages {
                 if topics[m.topic_idx].ros1_type != spec.ros1_type {
                     continue;
@@ -135,7 +135,9 @@ impl Scenario {
 
 /// `pkg/Type` -> `pkg/msg/Type`.
 pub fn ros2_type(ros1_type: &str) -> String {
-    let (pkg, ty) = ros1_type.split_once('/').expect("pkg/Type");
+    let (pkg, ty) = ros1_type
+        .split_once('/')
+        .unwrap_or_else(|| panic!("pkg/Type"));
     format!("{pkg}/msg/{ty}")
 }
 
@@ -152,7 +154,8 @@ pub fn write_bag(scenario: &Scenario, kind: BagKind, path: &Path) {
     } else {
         Dialect::Ros2
     };
-    let mut w = BagWriter::create(path, kind, OutputCompression::None).expect("create output bag");
+    let mut w = BagWriter::create(path, kind, OutputCompression::None)
+        .unwrap_or_else(|e| panic!("create output bag: {e}"));
     let handles: Vec<_> = scenario
         .topics
         .iter()
@@ -164,20 +167,24 @@ pub fn write_bag(scenario: &Scenario, kind: BagKind, path: &Path) {
                 } else {
                     ros2_type(t.ros1_type)
                 },
-                definition: catalog_definition(t.ros1_type, dialect).unwrap_or_default(),
+                definition: catalog_definition(t.ros1_type, dialect)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
                 type_hash: String::new(),
                 serialization_format: fmt.to_string(),
                 qos: Vec::new(),
             })
-            .expect("add connection")
+            .unwrap_or_else(|e| panic!("add connection: {e}"))
         })
         .collect();
     for m in &scenario.messages {
         let data = if fmt == "ros1" { &m.ros1 } else { &m.cdr };
         w.write(handles[m.topic_idx], m.timestamp_ns, data)
-            .expect("write message");
+            .unwrap_or_else(|e| panic!("write message: {e}"));
     }
-    w.close().expect("close output bag");
+    w.close()
+        .unwrap_or_else(|e| panic!("close output bag: {e}"));
 }
 
 fn header(seq: u32, ts_ns: u64, frame_id: &str) -> r1::Header {
@@ -236,8 +243,8 @@ fn point_cloud2_ros1(seq: u32, ts_ns: u64, n: u32, rng: &mut Rng) -> Vec<u8> {
     const POINT_STEP: u32 = 16;
     let mut s = Ros1Serializer::new();
     s.write_u32(seq);
-    s.write_u32(u32::try_from(ts_ns / NS_PER_S).expect("stamp sec"));
-    s.write_u32(u32::try_from(ts_ns % NS_PER_S).expect("stamp nsec"));
+    s.write_u32(u32::try_from(ts_ns / NS_PER_S).unwrap_or_else(|e| panic!("stamp sec: {e}")));
+    s.write_u32(u32::try_from(ts_ns % NS_PER_S).unwrap_or_else(|e| panic!("stamp nsec: {e}")));
     s.write_string("lidar");
     s.write_u32(1); // height (unstructured)
     s.write_u32(n); // width

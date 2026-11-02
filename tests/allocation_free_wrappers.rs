@@ -128,21 +128,30 @@ fn aggregate_of(parts: usize) -> Result<AggregateFactor, Box<dyn std::error::Err
     Ok(AggregateFactor::new(parts, vec![9, 6])?)
 }
 
-/// A part adds nothing to the heap traffic of an aggregate: the buffers its
-/// accumulation needs are sized once per chunk.
+/// A part adds (almost) nothing to the heap traffic of an aggregate: the
+/// buffers its accumulation needs are sized once per chunk.
+///
+/// The counter is process-wide, so it also sees rayon's own bookkeeping when
+/// the chunk job is handed to a worker, which varies with thread timing by a
+/// few blocks per run. An allocation per part would add one block per extra
+/// part per call, so the check allows a tenth of that.
 fn aggregate_allocations_do_not_grow_with_the_part_count() -> TestResult {
+    const FEW: usize = 4;
+    const MANY: usize = 60;
+    const CALLS: u64 = 50;
     let s = state().as_param_slice().to_vec();
     let e = extrinsic().as_param_slice().to_vec();
     let mut residual = vec![0.0; 16];
 
-    let few = aggregate_of(4)?;
-    let many = aggregate_of(60)?;
+    let few = aggregate_of(FEW)?;
+    let many = aggregate_of(MANY)?;
     let blocks_few = blocks_per_call(|| few.linearize(&[&s, &e], &mut residual, None));
     let blocks_many = blocks_per_call(|| many.linearize(&[&s, &e], &mut residual, None));
 
-    assert_eq!(
-        blocks_few, blocks_many,
-        "4 parts took {blocks_few} heap blocks, 60 parts {blocks_many}"
+    let allowed = (MANY - FEW) as u64 * CALLS / 10;
+    assert!(
+        blocks_many.abs_diff(blocks_few) <= allowed,
+        "4 parts took {blocks_few} heap blocks, 60 parts {blocks_many} (allowed difference {allowed})"
     );
     Ok(())
 }

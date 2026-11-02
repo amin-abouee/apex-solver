@@ -115,13 +115,13 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
             &[pose_key, pt_key, intr_key],
             Box::new(factor),
             Some(Box::new(loss)),
-        );
+        )?;
     }
 
     // Fix first camera pose for gauge freedom
     let first_pose_key = pose_keys[0];
     for dof in 0..6 {
-        problem.fix_variable(first_pose_key, dof);
+        problem.fix_variable(first_pose_key, dof)?;
     }
 
     // Iterative Schur is required for SelfCalibration because intrinsics (RN, 3 DOF) and

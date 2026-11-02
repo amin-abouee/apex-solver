@@ -143,7 +143,6 @@
 //! - Nielsen, H. B. (1999). "Damping Parameter in Marquardt's Method". Technical Report IMM-REP-1999-05.
 
 use crate::core::problem::Problem;
-use crate::error;
 use crate::error::ErrorLogging;
 use crate::linalg::{
     CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, ExplicitDenseSchur,
@@ -1017,14 +1016,17 @@ impl LevenbergMarquardt {
             self.config.min_diagonal,
             self.config.max_diagonal,
         )?;
+        // Not logged here: a numerical failure is cured by a larger λ, which
+        // the main loop applies. It is logged once, where the loop gives up.
         let scaled_step = linear_solver
             .solve_augmented_equation(residuals, scaled_jacobian, &damping)
-            .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
+            .map_err(OptimizerError::LinAlg)?;
+        crate::optimizer::ensure_finite_step(&scaled_step, "Levenberg-Marquardt")?;
 
         // Get the cached gradient (Jᵀr) and un-damped Hessian (JᵀJ) from the solver
-        let gradient = linear_solver.get_gradient().ok_or_else(|| {
-            OptimizerError::NumericalInstability("Gradient not available".into()).log()
-        })?;
+        let gradient = linear_solver
+            .get_gradient()
+            .ok_or_else(|| OptimizerError::MissingSolverState { what: "gradient" }.log())?;
         // `gradient` is the (possibly Jacobi-scaled) gradient against
         // `scaled_jacobian`; report `gradient_tolerance`'s convergence check
         // against the un-scaled one (GitHub #57). `predicted_reduction`
@@ -1041,9 +1043,7 @@ impl LevenbergMarquardt {
         };
         let hessian_step = linear_solver
             .hessian_vec_product(&scaled_step)
-            .ok_or_else(|| {
-                OptimizerError::NumericalInstability("Hessian not available".into()).log()
-            })?;
+            .ok_or_else(|| OptimizerError::MissingSolverState { what: "Hessian" }.log())?;
 
         // Compute the predicted reduction BEFORE un-scaling the step: the
         // solver's cached gradient and Hessian are the *scaled* ones, and all
@@ -1078,13 +1078,13 @@ impl LevenbergMarquardt {
         step_result: &StepResult,
         state: &mut InitializedState,
         problem: &Problem,
-    ) -> error::ApexSolverResult<StepEvaluation> {
+    ) -> crate::optimizer::OptimizerResult<StepEvaluation> {
         // Apply parameter updates using manifold operations
         let _step_norm = apply_parameter_step(
             &mut state.variables,
             step_result.step.as_ref(),
             &state.sorted_vars,
-        );
+        )?;
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
         let (_new_residual, new_cost) = problem.compute_residual_and_cost_sparse_with_workspace(
@@ -1117,7 +1117,7 @@ impl LevenbergMarquardt {
                 &mut state.variables,
                 step_result.step.as_ref(),
                 &state.sorted_vars,
-            );
+            )?;
             0.0
         };
 
@@ -1163,8 +1163,8 @@ impl LevenbergMarquardt {
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
         let mut total_cost_reduction = 0.0;
-        let mut final_gradient_norm;
-        let mut final_parameter_update_norm;
+        let mut final_gradient_norm = 0.0;
+        let mut final_parameter_update_norm = 0.0;
 
         // Initialize iteration statistics tracking
         let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
@@ -1202,10 +1202,12 @@ impl LevenbergMarquardt {
                         iteration,
                         state,
                         elapsed,
-                        0.0,
-                        0.0,
-                        cost_evaluations,
-                        jacobian_evaluations,
+                        crate::optimizer::ConvergenceInfo {
+                            final_gradient_norm: 0.0,
+                            final_parameter_update_norm: 0.0,
+                            cost_evaluations,
+                            jacobian_evaluations,
+                        },
                         None,
                     ));
                 }
@@ -1213,7 +1215,50 @@ impl LevenbergMarquardt {
 
             // Compute optimization step
             let step_result =
-                self.compute_step_generic::<M>(&residuals, &scaled_jacobian, linear_solver)?;
+                match self.compute_step_generic::<M>(&residuals, &scaled_jacobian, linear_solver) {
+                    Ok(step_result) => step_result,
+                    // A system that will not factorize at this λ is a rejected
+                    // trial, not the end of the run: raise λ and try again, as
+                    // for a step that did not reduce the cost. Only once λ is
+                    // at its ceiling is there nothing left to try.
+                    Err(OptimizerError::LinAlg(error))
+                        if error.is_numerical() && self.damping < self.config.damping_max =>
+                    {
+                        self.update_damping(f64::NEG_INFINITY, false);
+                        unsuccessful_steps += 1;
+                        consecutive_rejected += 1;
+                        iteration += 1;
+                        let elapsed = start_time.elapsed();
+                        let exhausted = if iteration >= self.config.max_iterations {
+                            Some(crate::optimizer::OptimizationStatus::MaxIterationsReached)
+                        } else if self.config.timeout.is_some_and(|limit| elapsed >= limit) {
+                            Some(crate::optimizer::OptimizationStatus::Timeout)
+                        } else {
+                            None
+                        };
+                        if let Some(status) = exhausted {
+                            self.observers.notify_complete(&state.variables, iteration);
+                            return Ok(crate::optimizer::build_solver_result(
+                                status,
+                                iteration,
+                                state,
+                                elapsed,
+                                crate::optimizer::ConvergenceInfo {
+                                    final_gradient_norm,
+                                    final_parameter_update_norm,
+                                    cost_evaluations,
+                                    jacobian_evaluations,
+                                },
+                                None,
+                            ));
+                        }
+                        continue;
+                    }
+                    Err(OptimizerError::LinAlg(error)) => {
+                        return Err(crate::optimizer::linear_solve_failed(error));
+                    }
+                    Err(error) => return Err(error),
+                };
 
             // Update tracking variables
             max_gradient_norm = max_gradient_norm.max(step_result.gradient_norm);
@@ -1265,12 +1310,14 @@ impl LevenbergMarquardt {
             crate::optimizer::notify_observers_generic::<M>(
                 &mut self.observers,
                 &state.variables,
-                iteration,
-                state.current_cost,
-                step_result.gradient_norm,
-                Some(self.damping),
-                step_norm,
-                Some(step_eval.rho),
+                crate::optimizer::IterationReport {
+                    iteration,
+                    cost: state.current_cost,
+                    gradient_norm: step_result.gradient_norm,
+                    damping: Some(self.damping),
+                    step_norm,
+                    step_quality: Some(step_eval.rho),
+                },
                 linear_solver,
             );
 
@@ -1320,23 +1367,25 @@ impl LevenbergMarquardt {
             if let Some(status) = convergence_status {
                 if tracing::enabled!(tracing::Level::DEBUG) {
                     let summary = crate::optimizer::create_optimizer_summary(
-                        "Levenberg-Marquardt",
-                        state.initial_cost,
-                        state.current_cost,
-                        iteration + 1,
-                        Some(successful_steps),
-                        Some(unsuccessful_steps),
-                        max_gradient_norm,
-                        final_gradient_norm,
-                        max_parameter_update_norm,
-                        final_parameter_update_norm,
-                        total_cost_reduction,
-                        elapsed,
-                        iteration_stats.clone(),
-                        status.clone(),
-                        Some(self.damping),
-                        None,
-                        Some(step_eval.rho),
+                        crate::optimizer::SummaryTotals {
+                            optimizer_name: "Levenberg-Marquardt",
+                            initial_cost: state.initial_cost,
+                            final_cost: state.current_cost,
+                            iterations: iteration + 1,
+                            successful_steps: Some(successful_steps),
+                            unsuccessful_steps: Some(unsuccessful_steps),
+                            max_gradient_norm,
+                            final_gradient_norm,
+                            max_parameter_update_norm,
+                            final_parameter_update_norm,
+                            total_cost_reduction,
+                            total_time: elapsed,
+                            iteration_history: iteration_stats.clone(),
+                            convergence_status: status.clone(),
+                            final_damping: Some(self.damping),
+                            final_trust_region_radius: None,
+                            rho: Some(step_eval.rho),
+                        },
                     );
                     debug!("{}", summary);
                 }
@@ -1360,10 +1409,12 @@ impl LevenbergMarquardt {
                     iteration + 1,
                     state,
                     elapsed,
-                    final_gradient_norm,
-                    final_parameter_update_norm,
-                    cost_evaluations,
-                    jacobian_evaluations,
+                    crate::optimizer::ConvergenceInfo {
+                        final_gradient_norm,
+                        final_parameter_update_norm,
+                        cost_evaluations,
+                        jacobian_evaluations,
+                    },
                     covariances,
                 ));
             }
@@ -1412,27 +1463,22 @@ impl LevenbergMarquardt {
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ExplicitDenseSchur => {
-                    let init = |e: crate::linalg::LinAlgError| {
-                        OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ExplicitDenseSchur::new();
                     solver
                         .initialize_structure(
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
-                other => Err(OptimizerError::InvalidParameters(format!(
-                    "Levenberg-Marquardt in dense Jacobian mode supports DenseCholesky, \
-                     DenseQR and ExplicitDenseSchur only; requested {other}"
-                ))
-                .into()),
+                other => Err(OptimizerError::UnsupportedSolver {
+ optimizer: "Levenberg-Marquardt",
+ mode: "dense",
+ supported: "DenseCholesky, DenseQR and ExplicitDenseSchur",
+ requested: other,
+ }
+ .log()),
             },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 LinearSolverType::SparseQR => {
@@ -1440,12 +1486,6 @@ impl LevenbergMarquardt {
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ExplicitSparseSchur => {
-                    let init = |e: crate::linalg::LinAlgError| {
-                        OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ExplicitSparseSchur::new()
                         .with_variant(self.config.schur_variant)
                         .with_preconditioner(self.config.schur_preconditioner)
@@ -1459,8 +1499,7 @@ impl LevenbergMarquardt {
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::ImplicitSparseSchur => {
@@ -1468,12 +1507,6 @@ impl LevenbergMarquardt {
                     // than a mode of the explicit one — this is what keeps
                     // both the O(kept_dof²) buffer and `JᵀJ` itself out of
                     // the picture entirely.
-                    let init = |e: crate::linalg::LinAlgError| {
-                        OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {e}"
-                        ))
-                        .log()
-                    };
                     let mut solver = ImplicitSparseSchur::with_config(
                         self.config.schur_cg_max_iterations,
                         self.config.schur_cg_tolerance,
@@ -1485,19 +1518,20 @@ impl LevenbergMarquardt {
                             &state.variables,
                             &state.variable_index_map,
                             &problem.schur_landmark_keys,
-                        )
-                        .map_err(init)?;
+                        )?;
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::SparseCholesky => {
                     let mut solver = SparseCholeskySolver::new();
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
-                other => Err(OptimizerError::InvalidParameters(format!(
-                    "Levenberg-Marquardt in sparse Jacobian mode supports SparseCholesky, \
-                     SparseQR, ExplicitSparseSchur and ImplicitSparseSchur only; requested {other}"
-                ))
-                .into()),
+                other => Err(OptimizerError::UnsupportedSolver {
+ optimizer: "Levenberg-Marquardt",
+ mode: "sparse",
+ supported: "SparseCholesky, SparseQR, ExplicitSparseSchur and ImplicitSparseSchur",
+ requested: other,
+ }
+ .log()),
             },
         }
     }
@@ -1586,7 +1620,7 @@ mod tests {
     /// all: before it was wired up, both configurations produced identical runs.
     #[test]
     fn min_relative_decrease_gates_acceptance() -> TestResult {
-        let mut permissive_problem = rosenbrock_problem();
+        let mut permissive_problem = rosenbrock_problem()?;
         let permissive = LevenbergMarquardt::with_config(
             LevenbergMarquardtConfig::new()
                 .with_max_iterations(100)
@@ -1594,7 +1628,7 @@ mod tests {
         )
         .optimize(&mut permissive_problem)?;
 
-        let mut strict_problem = rosenbrock_problem();
+        let mut strict_problem = rosenbrock_problem()?;
         let strict = LevenbergMarquardt::with_config(
             LevenbergMarquardtConfig::new()
                 .with_max_iterations(100)
@@ -1619,13 +1653,13 @@ mod tests {
     /// columns have unequal norms, which Rosenbrock's do.
     #[test]
     fn diagonal_bounds_select_between_marquardt_and_identity_damping() -> TestResult {
-        let mut marquardt_problem = rosenbrock_problem();
+        let mut marquardt_problem = rosenbrock_problem()?;
         let marquardt = LevenbergMarquardt::with_config(
             LevenbergMarquardtConfig::new().with_max_iterations(100),
         )
         .optimize(&mut marquardt_problem)?;
 
-        let mut identity_problem = rosenbrock_problem();
+        let mut identity_problem = rosenbrock_problem()?;
         let identity = LevenbergMarquardt::with_config(
             LevenbergMarquardtConfig::new()
                 .with_max_iterations(100)
@@ -1727,10 +1761,10 @@ mod tests {
             LevenbergMarquardtConfig::new().with_max_iterations(100),
         );
 
-        let mut first_problem = rosenbrock_problem();
+        let mut first_problem = rosenbrock_problem()?;
         let first = solver.optimize(&mut first_problem)?;
 
-        let mut second_problem = rosenbrock_problem();
+        let mut second_problem = rosenbrock_problem()?;
         let second = solver.optimize(&mut second_problem)?;
 
         assert_eq!(
@@ -1753,7 +1787,7 @@ mod tests {
     /// the condition-number lower bound is infinite and the check fires.
     #[test]
     fn max_condition_number_detects_an_unconstrained_variable() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         // Nothing references this variable, so its column of J is empty.
         let _orphan = problem.add_variable(ManifoldType::RN, dvector![0.0]);
 
@@ -1783,7 +1817,7 @@ mod tests {
     /// thing that reports the rank deficiency.
     #[test]
     fn without_the_check_an_unconstrained_variable_is_absorbed_silently() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let _orphan = problem.add_variable(ManifoldType::RN, dvector![0.0]);
 
         let result = LevenbergMarquardt::with_config(
@@ -1802,7 +1836,7 @@ mod tests {
     /// The check stays out of the way on a well-conditioned problem.
     #[test]
     fn max_condition_number_does_not_fire_on_a_healthy_problem() -> TestResult {
-        let mut healthy_problem = rosenbrock_problem();
+        let mut healthy_problem = rosenbrock_problem()?;
         let healthy = LevenbergMarquardt::with_config(
             LevenbergMarquardtConfig::new()
                 .with_max_iterations(100)
@@ -1831,8 +1865,8 @@ mod tests {
         let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
 
         // Add custom factors (demonstrates extensibility!)
-        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None)?;
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None)?;
 
         // Configure Levenberg-Marquardt optimizer
         let config = LevenbergMarquardtConfig::new()
@@ -1902,20 +1936,20 @@ mod tests {
         }
     }
 
-    fn rosenbrock_problem() -> Problem {
+    fn rosenbrock_problem() -> Result<Problem, Box<dyn std::error::Error>> {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
         let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
-        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
-        problem
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None)?;
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None)?;
+        Ok(problem)
     }
 
-    fn linear_problem(start: f64) -> Problem {
+    fn linear_problem(start: f64) -> Result<Problem, Box<dyn std::error::Error>> {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x = problem.add_variable(ManifoldType::RN, dvector![start]);
-        problem.add_residual_block(&[x], Box::new(LinearFactor { target: 0.0 }), None);
-        problem
+        problem.add_residual_block(&[x], Box::new(LinearFactor { target: 0.0 }), None)?;
+        Ok(problem)
     }
 
     // -------------------------------------------------------------------------
@@ -1967,7 +2001,7 @@ mod tests {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x1 = problem.add_variable(ManifoldType::RN, dvector![0.0]);
         let x2 = problem.add_variable(ManifoldType::RN, dvector![0.0]);
-        problem.add_residual_block(&[x1, x2], Box::new(IllScaledFactor { a: 100.0 }), None);
+        problem.add_residual_block(&[x1, x2], Box::new(IllScaledFactor { a: 100.0 }), None)?;
 
         let config = LevenbergMarquardtConfig::new()
             .with_damping(1e-1)
@@ -2038,7 +2072,7 @@ mod tests {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x1 = problem.add_variable(ManifoldType::RN, dvector![0.0]);
         let x2 = problem.add_variable(ManifoldType::RN, dvector![0.0]);
-        problem.add_residual_block(&[x1, x2], Box::new(IllScaledFactor { a: 100.0 }), None);
+        problem.add_residual_block(&[x1, x2], Box::new(IllScaledFactor { a: 100.0 }), None)?;
 
         let mut state = crate::optimizer::initialize_optimization_state(&mut problem)?;
         let (residuals, jacobian) = SparseMode::assemble(
@@ -2188,7 +2222,7 @@ mod tests {
 
     #[test]
     fn test_lm_max_iterations_termination() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = LevenbergMarquardtConfig::new().with_max_iterations(2);
         let mut solver = LevenbergMarquardt::with_config(cfg);
         let result = solver.optimize(&mut problem)?;
@@ -2199,7 +2233,7 @@ mod tests {
 
     #[test]
     fn test_lm_gradient_tolerance_convergence() -> TestResult {
-        let mut problem = linear_problem(1.0);
+        let mut problem = linear_problem(1.0)?;
         // Very loose gradient tolerance → triggers after first accepted step
         let cfg = LevenbergMarquardtConfig::new()
             .with_gradient_tolerance(1e3)
@@ -2213,7 +2247,7 @@ mod tests {
 
     #[test]
     fn test_lm_min_cost_threshold() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         // Set threshold very high so even initial cost triggers it
         let cfg = LevenbergMarquardtConfig::new()
             .with_min_cost_threshold(1e10)
@@ -2228,7 +2262,7 @@ mod tests {
 
     #[test]
     fn test_lm_qr_solver() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = LevenbergMarquardtConfig::new()
             .with_linear_solver_type(LinearSolverType::SparseQR)
             .with_max_iterations(100);
@@ -2240,7 +2274,7 @@ mod tests {
 
     #[test]
     fn test_lm_jacobi_scaling_enabled() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = LevenbergMarquardtConfig::new()
             .with_jacobi_scaling(true)
             .with_max_iterations(100);
@@ -2252,7 +2286,7 @@ mod tests {
 
     #[test]
     fn test_lm_result_initial_cost_greater_than_final() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let mut solver = LevenbergMarquardt::new();
         let result = solver.optimize(&mut problem)?;
         assert!(
@@ -2266,7 +2300,7 @@ mod tests {
 
     #[test]
     fn test_lm_convergence_info_populated() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let mut solver = LevenbergMarquardt::new();
         let result = solver.optimize(&mut problem)?;
         assert!(result.convergence_info.is_some());
@@ -2275,7 +2309,7 @@ mod tests {
 
     #[test]
     fn test_lm_iterations_positive() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let mut solver = LevenbergMarquardt::new();
         let result = solver.optimize(&mut problem)?;
         assert!(result.iterations > 0);
@@ -2312,8 +2346,8 @@ mod tests {
         let mut problem = Problem::new(JacobianMode::Dense);
         let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
         let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
-        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None)?;
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None)?;
 
         // The solver must match the problem's mode; a mismatch is now an error
         // rather than a silent substitution, so ask for DenseCholesky by name.
@@ -2336,8 +2370,8 @@ mod tests {
         let mut problem = Problem::new(JacobianMode::Dense);
         let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
         let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
-        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None)?;
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None)?;
 
         let cfg = LevenbergMarquardtConfig::new()
             .with_linear_solver_type(LinearSolverType::DenseQR)
@@ -2360,7 +2394,7 @@ mod tests {
     /// This block was completely unreachable in prior tests.
     #[test]
     fn test_lm_compute_covariances_enabled() -> TestResult {
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let cfg = LevenbergMarquardtConfig::new()
             .with_max_iterations(100)
             .with_compute_covariances(true);
@@ -2484,7 +2518,7 @@ mod tests {
             complete_calls: Arc::clone(&call_count),
         };
 
-        let mut problem = rosenbrock_problem();
+        let mut problem = rosenbrock_problem()?;
         let mut solver = LevenbergMarquardt::new();
         solver.add_observer(observer);
         let _ = solver.optimize(&mut problem)?;
@@ -2505,14 +2539,14 @@ mod tests {
     /// Regression for the `_ =>` arms that made LM the only optimizer to
     /// coerce a mismatch in silence.
     #[test]
-    fn test_lm_rejects_solver_mode_mismatch() {
-        fn rosenbrock(mode: JacobianMode) -> Problem {
+    fn test_lm_rejects_solver_mode_mismatch() -> TestResult {
+        fn rosenbrock(mode: JacobianMode) -> Result<Problem, Box<dyn std::error::Error>> {
             let mut problem = Problem::new(mode);
             let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
             let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
-            problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
-            problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
-            problem
+            problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None)?;
+            problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None)?;
+            Ok(problem)
         }
 
         // Dense problem, sparse solvers requested.
@@ -2522,7 +2556,7 @@ mod tests {
             LinearSolverType::ExplicitSparseSchur,
             LinearSolverType::ImplicitSparseSchur,
         ] {
-            let mut problem = rosenbrock(JacobianMode::Dense);
+            let mut problem = rosenbrock(JacobianMode::Dense)?;
             let config = LevenbergMarquardtConfig::new().with_linear_solver_type(solver_type);
             let Err(err) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {
                 panic!("dense problem must reject sparse solver {solver_type}");
@@ -2539,7 +2573,7 @@ mod tests {
             LinearSolverType::DenseQR,
             LinearSolverType::ExplicitDenseSchur,
         ] {
-            let mut problem = rosenbrock(JacobianMode::Sparse);
+            let mut problem = rosenbrock(JacobianMode::Sparse)?;
             let config = LevenbergMarquardtConfig::new().with_linear_solver_type(solver_type);
             let Err(err) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {
                 panic!("sparse problem must reject dense solver {solver_type}");
@@ -2549,6 +2583,7 @@ mod tests {
                 "unexpected error for {solver_type}: {err}"
             );
         }
+        Ok(())
     }
 
     /// Every matching mode/solver pair must still run.
@@ -2563,8 +2598,8 @@ mod tests {
             let mut problem = Problem::new(mode);
             let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
             let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
-            problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
-            problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
+            problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None)?;
+            problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None)?;
 
             let config = LevenbergMarquardtConfig::new()
                 .with_max_iterations(50)

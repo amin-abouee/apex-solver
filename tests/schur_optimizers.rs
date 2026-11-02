@@ -25,7 +25,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// Poses 1 and 3 are marked for elimination: each touches only kept
 /// neighbours, never each other. Initial guesses are perturbed so the
 /// optimizers actually iterate.
-fn chain_problem() -> (Problem, Vec<VarKey>) {
+fn chain_problem() -> Result<(Problem, Vec<VarKey>), Box<dyn std::error::Error>> {
     let mut problem = Problem::new(JacobianMode::Sparse);
     let mut keys = Vec::new();
     for i in 0..5 {
@@ -38,16 +38,16 @@ fn chain_problem() -> (Problem, Vec<VarKey>) {
             &[w[0], w[1]],
             Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0))),
             None,
-        );
+        )?;
     }
     problem.add_residual_block(
         &[keys[0]],
         Box::new(PriorFactor::new(SE2::from_xy_angle(0.0, 0.0, 0.0))),
         None,
-    );
+    )?;
     problem.mark_for_elimination(keys[1]);
     problem.mark_for_elimination(keys[3]);
-    (problem, keys)
+    Ok((problem, keys))
 }
 
 fn assert_costs_agree(cholesky: f64, schur: f64, initial: f64, what: &str) {
@@ -65,11 +65,11 @@ fn assert_costs_agree(cholesky: f64, schur: f64, initial: f64, what: &str) {
 /// Gauss-Newton with an explicit Schur solve must land where Cholesky lands.
 #[test]
 fn gauss_newton_schur_matches_cholesky() -> TestResult {
-    let (mut reference_problem, _) = chain_problem();
+    let (mut reference_problem, _) = chain_problem()?;
     let mut reference = GaussNewton::with_config(GaussNewtonConfig::new().with_max_iterations(50));
     let reference = reference.optimize(&mut reference_problem)?;
 
-    let (mut schur_problem, _) = chain_problem();
+    let (mut schur_problem, _) = chain_problem()?;
     let mut schur = GaussNewton::with_config(
         GaussNewtonConfig::new()
             .with_max_iterations(50)
@@ -90,11 +90,11 @@ fn gauss_newton_schur_matches_cholesky() -> TestResult {
 /// Same, through the chunked J-direct variant (exercises row grouping).
 #[test]
 fn gauss_newton_chunked_schur_matches_cholesky() -> TestResult {
-    let (mut reference_problem, _) = chain_problem();
+    let (mut reference_problem, _) = chain_problem()?;
     let mut reference = GaussNewton::with_config(GaussNewtonConfig::new().with_max_iterations(50));
     let reference = reference.optimize(&mut reference_problem)?;
 
-    let (mut schur_problem, _) = chain_problem();
+    let (mut schur_problem, _) = chain_problem()?;
     let mut schur = GaussNewton::with_config(
         GaussNewtonConfig::new()
             .with_max_iterations(50)
@@ -122,11 +122,11 @@ fn gauss_newton_schur_matches_cholesky_undiagonalized() -> TestResult {
             .with_max_iterations(50)
             .with_min_diagonal(0.0)
     };
-    let (mut reference_problem, _) = chain_problem();
+    let (mut reference_problem, _) = chain_problem()?;
     let mut reference = GaussNewton::with_config(base());
     let reference = reference.optimize(&mut reference_problem)?;
 
-    let (mut schur_problem, _) = chain_problem();
+    let (mut schur_problem, _) = chain_problem()?;
     let mut schur = GaussNewton::with_config(
         base().with_linear_solver_type(LinearSolverType::ExplicitSparseSchur),
     );
@@ -147,11 +147,11 @@ fn gauss_newton_schur_matches_cholesky_undiagonalized() -> TestResult {
 /// reads the gradient and Hessian-vector products off the Schur solver.
 #[test]
 fn dog_leg_schur_matches_cholesky() -> TestResult {
-    let (mut reference_problem, _) = chain_problem();
+    let (mut reference_problem, _) = chain_problem()?;
     let mut reference = DogLeg::with_config(DogLegConfig::new().with_max_iterations(50));
     let reference = reference.optimize(&mut reference_problem)?;
 
-    let (mut schur_problem, _) = chain_problem();
+    let (mut schur_problem, _) = chain_problem()?;
     let mut schur = DogLeg::with_config(
         DogLegConfig::new()
             .with_max_iterations(50)
@@ -174,7 +174,7 @@ fn dog_leg_schur_matches_cholesky() -> TestResult {
 /// All leaves occupy one contiguous column range and share no factor with
 /// each other — a realistic visibility graph for exercising the matrix-free
 /// (`ImplicitSparseSchur`) path.
-fn star_problem() -> (Problem, Vec<VarKey>) {
+fn star_problem() -> Result<(Problem, Vec<VarKey>), Box<dyn std::error::Error>> {
     let mut problem = Problem::new(JacobianMode::Sparse);
     let mut keys = Vec::new();
     for i in 0..5 {
@@ -193,15 +193,15 @@ fn star_problem() -> (Problem, Vec<VarKey>) {
                 0.0,
             ))),
             None,
-        );
+        )?;
         problem.mark_for_elimination(keys[leaf]);
     }
     problem.add_residual_block(
         &[keys[0]],
         Box::new(PriorFactor::new(SE2::from_xy_angle(0.0, 0.0, 0.0))),
         None,
-    );
-    (problem, keys)
+    )?;
+    Ok((problem, keys))
 }
 
 /// Gauss-Newton through the matrix-free (`ImplicitSparseSchur`) dispatch arm.
@@ -211,7 +211,7 @@ fn star_problem() -> (Problem, Vec<VarKey>) {
 /// construction path inside the optimizer, not PCG accuracy itself.
 #[test]
 fn gauss_newton_iterative_schur_matches_cholesky() -> TestResult {
-    let (mut reference_problem, _) = star_problem();
+    let (mut reference_problem, _) = star_problem()?;
     let mut reference = GaussNewton::with_config(
         GaussNewtonConfig::new()
             .with_max_iterations(100)
@@ -219,7 +219,7 @@ fn gauss_newton_iterative_schur_matches_cholesky() -> TestResult {
     );
     let reference = reference.optimize(&mut reference_problem)?;
 
-    let (mut schur_problem, _) = star_problem();
+    let (mut schur_problem, _) = star_problem()?;
     let mut schur = GaussNewton::with_config(
         GaussNewtonConfig::new()
             .with_max_iterations(100)

@@ -142,40 +142,34 @@ use faer::sparse;
 use slotmap::SlotMap;
 use thiserror::Error;
 
-/// Observer-specific error types for apex-solver
-#[derive(Debug, Clone, Error)]
+/// Errors of the observers (Rerun visualization).
+///
+/// Logged once where they are built. Observers are notified from inside the
+/// optimizer loop, which never stops because a visualization failed.
+#[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ObserverError {
-    /// Failed to initialize Rerun recording stream
-    #[error("Failed to initialize Rerun recording stream: {0}")]
-    RerunInitialization(String),
+    /// Data logged before the recording stream exists.
+    #[error("the Rerun recording stream is not initialized")]
+    NotInitialized,
 
-    /// Failed to spawn Rerun viewer process
-    #[error("Failed to spawn Rerun viewer: {0}")]
-    ViewerSpawnFailed(String),
+    /// The recording file could not be created.
+    #[cfg(feature = "visualization")]
+    #[error("failed to save the Rerun recording to {path}")]
+    RecordingSave {
+        path: String,
+        #[source]
+        source: rerun::RecordingStreamError,
+    },
 
-    /// Failed to save recording to file
-    #[error("Failed to save recording to file '{path}': {reason}")]
-    RecordingSaveFailed { path: String, reason: String },
-
-    /// Failed to log data to Rerun
-    #[error("Failed to log data to Rerun at '{entity_path}': {reason}")]
-    LoggingFailed { entity_path: String, reason: String },
-
-    /// Failed to convert matrix to visualization format
-    #[error("Failed to convert matrix to image: {0}")]
-    MatrixVisualizationFailed(String),
-
-    /// Failed to convert tensor data
-    #[error("Failed to create tensor data: {0}")]
-    TensorConversionFailed(String),
-
-    /// Recording stream is in invalid state
-    #[error("Recording stream is in invalid state: {0}")]
-    InvalidState(String),
-
-    /// Mutex was poisoned (thread panicked while holding lock)
-    #[error("Mutex poisoned in {context}: {reason}")]
-    MutexPoisoned { context: String, reason: String },
+    /// An entity could not be logged to the recording.
+    #[cfg(feature = "visualization")]
+    #[error("failed to log {entity_path} to Rerun")]
+    Logging {
+        entity_path: String,
+        #[source]
+        source: rerun::RecordingStreamError,
+    },
 }
 
 /// Result type for observer operations
@@ -529,7 +523,6 @@ impl OptObserverVec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ErrorLogging;
     use std::sync::{Arc, Mutex};
 
     fn empty_vars() -> SlotMap<VarKey, Box<dyn ManifoldVariable>> {
@@ -543,14 +536,9 @@ mod tests {
 
     impl OptObserver for TestObserver {
         fn on_step(&self, _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, iteration: usize) {
-            // In test code, we log and ignore mutex poisoning errors since they indicate test bugs
-            if let Ok(mut guard) = self.calls.lock().map_err(|e| {
-                ObserverError::MutexPoisoned {
-                    context: "TestObserver::on_step".to_string(),
-                    reason: e.to_string(),
-                }
-                .log()
-            }) {
+            // A poisoned lock means another test thread panicked; that test
+            // fails on its own, so the push is simply skipped here.
+            if let Ok(mut guard) = self.calls.lock() {
                 guard.push(iteration);
             }
         }
@@ -567,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_observer() -> Result<(), ObserverError> {
+    fn test_single_observer() -> Result<(), Box<dyn std::error::Error>> {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let observer = TestObserver {
             calls: calls.clone(),
@@ -582,19 +570,13 @@ mod tests {
         observers.notify(&empty_vars(), 1);
         observers.notify(&empty_vars(), 2);
 
-        let guard = calls.lock().map_err(|e| {
-            ObserverError::MutexPoisoned {
-                context: "test_single_observer".to_string(),
-                reason: e.to_string(),
-            }
-            .log()
-        })?;
+        let guard = calls.lock().map_err(|e| e.to_string())?;
         assert_eq!(*guard, vec![0, 1, 2]);
         Ok(())
     }
 
     #[test]
-    fn test_multiple_observers() -> Result<(), ObserverError> {
+    fn test_multiple_observers() -> Result<(), Box<dyn std::error::Error>> {
         let calls1 = Arc::new(Mutex::new(Vec::new()));
         let calls2 = Arc::new(Mutex::new(Vec::new()));
 
@@ -613,110 +595,20 @@ mod tests {
 
         observers.notify(&empty_vars(), 5);
 
-        let guard1 = calls1.lock().map_err(|e| {
-            ObserverError::MutexPoisoned {
-                context: "test_multiple_observers (calls1)".to_string(),
-                reason: e.to_string(),
-            }
-            .log()
-        })?;
+        let guard1 = calls1.lock().map_err(|e| e.to_string())?;
         assert_eq!(*guard1, vec![5]);
 
-        let guard2 = calls2.lock().map_err(|e| {
-            ObserverError::MutexPoisoned {
-                context: "test_multiple_observers (calls2)".to_string(),
-                reason: e.to_string(),
-            }
-            .log()
-        })?;
+        let guard2 = calls2.lock().map_err(|e| e.to_string())?;
         assert_eq!(*guard2, vec![5]);
         Ok(())
     }
 
-    // -------------------------------------------------------------------------
-    // ObserverError Display — one per variant
-    // -------------------------------------------------------------------------
-
     #[test]
-    fn test_observer_error_rerun_initialization_display() {
-        let e = ObserverError::RerunInitialization("init fail".into());
-        assert!(e.to_string().contains("init fail"));
-    }
-
-    #[test]
-    fn test_observer_error_viewer_spawn_failed_display() {
-        let e = ObserverError::ViewerSpawnFailed("spawn fail".into());
-        assert!(e.to_string().contains("spawn fail"));
-    }
-
-    #[test]
-    fn test_observer_error_recording_save_failed_display() {
-        let e = ObserverError::RecordingSaveFailed {
-            path: "/tmp/out.rrd".into(),
-            reason: "disk full".into(),
-        };
-        let s = e.to_string();
-        assert!(s.contains("/tmp/out.rrd"), "{s}");
-        assert!(s.contains("disk full"), "{s}");
-    }
-
-    #[test]
-    fn test_observer_error_logging_failed_display() {
-        let e = ObserverError::LoggingFailed {
-            entity_path: "world/points".into(),
-            reason: "timeout".into(),
-        };
-        let s = e.to_string();
-        assert!(s.contains("world/points"), "{s}");
-        assert!(s.contains("timeout"), "{s}");
-    }
-
-    #[test]
-    fn test_observer_error_matrix_visualization_failed_display() {
-        let e = ObserverError::MatrixVisualizationFailed("bad dims".into());
-        assert!(e.to_string().contains("bad dims"));
-    }
-
-    #[test]
-    fn test_observer_error_tensor_conversion_failed_display() {
-        let e = ObserverError::TensorConversionFailed("nan values".into());
-        assert!(e.to_string().contains("nan values"));
-    }
-
-    #[test]
-    fn test_observer_error_invalid_state_display() {
-        let e = ObserverError::InvalidState("stream closed".into());
-        assert!(e.to_string().contains("stream closed"));
-    }
-
-    #[test]
-    fn test_observer_error_mutex_poisoned_display() {
-        let e = ObserverError::MutexPoisoned {
-            context: "on_step".into(),
-            reason: "thread panicked".into(),
-        };
-        let s = e.to_string();
-        assert!(s.contains("on_step"), "{s}");
-        assert!(s.contains("thread panicked"), "{s}");
-    }
-
-    // -------------------------------------------------------------------------
-    // log() / log_with_source() return self
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_observer_error_log_returns_self() {
-        let e = ObserverError::InvalidState("log_test".into());
-        let returned = e.log();
-        assert!(returned.to_string().contains("log_test"));
-    }
-
-    #[test]
-    fn test_observer_error_log_with_source_returns_self() {
-        let e = ObserverError::MatrixVisualizationFailed("src_test".into());
-        let source = std::io::Error::other("src");
-        let returned = e.log_with_source(source);
-        assert!(returned.to_string().contains("src_test"));
+    fn an_uninitialized_stream_names_the_problem() {
+        assert_eq!(
+            ObserverError::NotInitialized.to_string(),
+            "the Rerun recording stream is not initialized"
+        );
     }
 
     // -------------------------------------------------------------------------

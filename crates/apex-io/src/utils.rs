@@ -6,21 +6,27 @@
 //! # Usage in tests
 //!
 //! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use apex_io::ensure_odometry_dataset;
 //!
-//! let path = ensure_odometry_dataset("sphere2500").expect("failed to fetch dataset");
+//! let path = ensure_odometry_dataset("sphere2500")?;
 //! // path == "data/odometry/3d/sphere2500.g2o"
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Usage in the download binary
 //!
 //! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use apex_io::utils::DatasetRegistry;
 //!
-//! let registry = DatasetRegistry::load().unwrap();
+//! let registry = DatasetRegistry::load()?;
 //! for (name, entry) in registry.odometry_by_category("3d") {
 //!     println!("{name}: {}", entry.url);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::collections::HashMap;
@@ -33,9 +39,10 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::error::ErrorLogging;
 use serde::Deserialize;
 #[cfg(feature = "download")]
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{BUNDLE_ADJUSTMENT_DATA_DIR, ODOMETRY_DATA_DIR, SENSOR_DATA_DIR};
 
@@ -114,8 +121,8 @@ impl DatasetRegistry {
     /// # Errors
     /// Returns an error only if `datasets.toml` is malformed TOML — a
     /// developer error that should never occur with the bundled file.
-    pub fn load() -> io::Result<Self> {
-        toml::from_str(DATASETS_TOML).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    pub fn load() -> DatasetResult<Self> {
+        toml::from_str(DATASETS_TOML).map_err(|e| DatasetError::Registry(e).log())
     }
 
     /// Returns the on-disk path for an odometry dataset, including its category subdirectory.
@@ -125,7 +132,7 @@ impl DatasetRegistry {
     /// # Example
     /// ```
     /// use apex_io::DatasetRegistry;
-    /// # fn main() -> std::io::Result<()> {
+    /// # fn main() -> Result<(), apex_io::utils::DatasetError> {
     /// let reg = DatasetRegistry::load()?;
     /// assert_eq!(
     ///     reg.odometry_path("intel"),
@@ -182,6 +189,101 @@ impl DatasetRegistry {
 }
 
 // ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Result of a dataset registry lookup or download.
+pub type DatasetResult<T> = Result<T, DatasetError>;
+
+/// A dataset that cannot be found, downloaded or unpacked.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DatasetError {
+    #[error("the embedded dataset registry is not valid TOML")]
+    Registry(#[source] toml::de::Error),
+
+    #[error("{kind} dataset {name} is not in the registry, available: {}", available.join(", "))]
+    UnknownDataset {
+        kind: &'static str,
+        name: String,
+        available: Vec<String>,
+    },
+
+    #[error(
+        "dataset {name} is not present locally and apex-io was built without the download feature"
+    )]
+    DownloadDisabled { name: String },
+
+    #[cfg(feature = "download")]
+    #[error("HTTP request for {url} failed")]
+    Request {
+        url: String,
+        #[source]
+        source: Box<ureq::Error>,
+    },
+
+    #[error("failed to read the response body of {url}")]
+    ResponseBody {
+        url: String,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("failed to write {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("failed to decompress {}", path.display())]
+    Decompress {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("failed to extract {}", path.display())]
+    Extract {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+impl DatasetError {
+    fn unknown<'a>(
+        kind: &'static str,
+        name: &str,
+        available: impl Iterator<Item = &'a String>,
+    ) -> Self {
+        let mut available: Vec<String> = available.cloned().collect();
+        available.sort();
+        Self::UnknownDataset {
+            kind,
+            name: name.to_string(),
+            available,
+        }
+    }
+
+    #[cfg(feature = "download")]
+    fn write(path: &Path, source: io::Error) -> Self {
+        Self::Write {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+/// Remove a downloaded archive once unpacked; a leftover file is only clutter.
+#[cfg(feature = "download")]
+fn remove_archive(path: &Path) {
+    if let Err(error) = fs::remove_file(path) {
+        warn!(path = %path.display(), %error, "could not remove a downloaded archive");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public ensure API (used by tests and binaries)
 // ---------------------------------------------------------------------------
 
@@ -193,20 +295,13 @@ impl DatasetRegistry {
 /// # Errors
 /// Returns an error if the dataset name is not in the registry, the download
 /// fails, or the file cannot be written.
-pub fn ensure_odometry_dataset(name: &str) -> io::Result<PathBuf> {
+pub fn ensure_odometry_dataset(name: &str) -> DatasetResult<PathBuf> {
     let registry = DatasetRegistry::load()?;
 
-    let entry = registry.odometry.get(name).ok_or_else(|| {
-        io::Error::other(format!(
-            "Dataset '{name}' not found in registry. \
-             Available: {}",
-            {
-                let mut names: Vec<_> = registry.odometry.keys().map(String::as_str).collect();
-                names.sort();
-                names.join(", ")
-            }
-        ))
-    })?;
+    let entry = registry
+        .odometry
+        .get(name)
+        .ok_or_else(|| DatasetError::unknown("odometry", name, registry.odometry.keys()).log())?;
 
     let path = PathBuf::from(ODOMETRY_DATA_DIR)
         .join(&entry.category)
@@ -218,16 +313,16 @@ pub fn ensure_odometry_dataset(name: &str) -> io::Result<PathBuf> {
     #[cfg(feature = "download")]
     {
         info!("Downloading {name} ({}) ...", entry.filename);
-        download_file(&entry.url, &path)
-            .map_err(|e| io::Error::other(format!("Failed to download {name}: {e}")))?;
+        download_file(&entry.url, &path)?;
         info!("Saved to {}", path.display());
         Ok(path)
     }
     #[cfg(not(feature = "download"))]
     {
-        Err(io::Error::other(format!(
-            "Dataset '{name}' not found locally; rebuild apex-io with the `download` feature to fetch it"
-        )))
+        Err(DatasetError::DownloadDisabled {
+            name: name.to_string(),
+        }
+        .log())
     }
 }
 
@@ -239,7 +334,7 @@ pub fn ensure_odometry_dataset(name: &str) -> io::Result<PathBuf> {
 ///
 /// # Errors
 /// Returns an error if the download, decompression, or disk write fails.
-pub fn ensure_ba_dataset(name: &str, cameras: u32, points: u32) -> io::Result<PathBuf> {
+pub fn ensure_ba_dataset(name: &str, cameras: u32, points: u32) -> DatasetResult<PathBuf> {
     let txt_path = PathBuf::from(BUNDLE_ADJUSTMENT_DATA_DIR)
         .join(name)
         .join(format!("problem-{cameras}-{points}-pre.txt"));
@@ -250,43 +345,27 @@ pub fn ensure_ba_dataset(name: &str, cameras: u32, points: u32) -> io::Result<Pa
 
     let registry = DatasetRegistry::load()?;
     let entry = registry.bundle_adjustment.get(name).ok_or_else(|| {
-        io::Error::other(format!(
-            "BA dataset '{name}' not found in registry. \
-             Available: {}",
-            {
-                let mut names: Vec<_> = registry
-                    .bundle_adjustment
-                    .keys()
-                    .map(String::as_str)
-                    .collect();
-                names.sort();
-                names.join(", ")
-            }
-        ))
+        DatasetError::unknown("bundle adjustment", name, registry.bundle_adjustment.keys()).log()
     })?;
-
-    let url = entry.problem_url(cameras, points);
-    let bz2_path = txt_path.with_extension("txt.bz2");
 
     #[cfg(feature = "download")]
     {
+        let url = entry.problem_url(cameras, points);
+        let bz2_path = txt_path.with_extension("txt.bz2");
         info!("Downloading {name}/problem-{cameras}-{points} ...");
-        download_file(&url, &bz2_path)
-            .map_err(|e| io::Error::other(format!("Failed to download {name}: {e}")))?;
-
-        decompress_bzip2(&bz2_path, &txt_path)
-            .map_err(|e| io::Error::other(format!("Failed to decompress: {e}")))?;
-
-        let _ = fs::remove_file(&bz2_path); // clean up; ignore errors
+        download_file(&url, &bz2_path)?;
+        decompress_bzip2(&bz2_path, &txt_path)?;
+        remove_archive(&bz2_path);
         info!("Saved to {}", txt_path.display());
         Ok(txt_path)
     }
     #[cfg(not(feature = "download"))]
     {
-        let _ = (url, bz2_path);
-        Err(io::Error::other(format!(
-            "Dataset '{name}/problem-{cameras}-{points}' not found locally; rebuild apex-io with the `download` feature to fetch it"
-        )))
+        let _ = entry;
+        Err(DatasetError::DownloadDisabled {
+            name: format!("{name}/problem-{cameras}-{points}"),
+        }
+        .log())
     }
 }
 
@@ -302,18 +381,12 @@ pub fn ensure_ba_dataset(name: &str, cameras: u32, points: u32) -> io::Result<Pa
 /// # Errors
 /// Returns an error if the name is not in the registry, or if a download or
 /// extraction fails.
-pub fn ensure_sensor_dataset(name: &str) -> io::Result<PathBuf> {
+pub fn ensure_sensor_dataset(name: &str) -> DatasetResult<PathBuf> {
     let registry = DatasetRegistry::load()?;
-    let entry = registry.sensor.get(name).ok_or_else(|| {
-        io::Error::other(format!(
-            "Sensor dataset '{name}' not found in registry. Available: {}",
-            {
-                let mut names: Vec<_> = registry.sensor.keys().map(String::as_str).collect();
-                names.sort();
-                names.join(", ")
-            }
-        ))
-    })?;
+    let entry = registry
+        .sensor
+        .get(name)
+        .ok_or_else(|| DatasetError::unknown("sensor", name, registry.sensor.keys()).log())?;
 
     let dir = PathBuf::from(SENSOR_DATA_DIR).join(name);
     // The extraction marker: present only after every archive has been unpacked.
@@ -324,7 +397,7 @@ pub fn ensure_sensor_dataset(name: &str) -> io::Result<PathBuf> {
 
     #[cfg(feature = "download")]
     {
-        fs::create_dir_all(&dir)?;
+        fs::create_dir_all(&dir).map_err(|e| DatasetError::write(&dir, e).log())?;
 
         for (url, filename) in &entry.files {
             let dest = dir.join(filename);
@@ -332,30 +405,28 @@ pub fn ensure_sensor_dataset(name: &str) -> io::Result<PathBuf> {
                 continue;
             }
             info!("Downloading {name}/{filename} ...");
-            download_file(url, &dest)
-                .map_err(|e| io::Error::other(format!("Failed to download {url}: {e}")))?;
+            download_file(url, &dest)?;
         }
 
         for (url, filename) in &entry.archives {
             let archive = dir.join(filename);
             info!("Downloading {name}/{filename} ...");
-            download_file(url, &archive)
-                .map_err(|e| io::Error::other(format!("Failed to download {url}: {e}")))?;
-            extract_tar_gz(&archive, &dir)
-                .map_err(|e| io::Error::other(format!("Failed to extract {filename}: {e}")))?;
-            let _ = fs::remove_file(&archive); // clean up; ignore errors
+            download_file(url, &archive)?;
+            extract_tar_gz(&archive, &dir)?;
+            remove_archive(&archive);
         }
 
-        fs::write(&marker, b"")?;
+        fs::write(&marker, b"").map_err(|e| DatasetError::write(&marker, e).log())?;
         info!("Sensor dataset ready at {}", dir.display());
         Ok(dir)
     }
     #[cfg(not(feature = "download"))]
     {
         let _ = entry;
-        Err(io::Error::other(format!(
-            "Sensor dataset '{name}' not found locally; rebuild apex-io with the `download` feature to fetch it"
-        )))
+        Err(DatasetError::DownloadDisabled {
+            name: name.to_string(),
+        }
+        .log())
     }
 }
 
@@ -370,24 +441,53 @@ pub fn ensure_sensor_dataset(name: &str) -> io::Result<PathBuf> {
 /// # Errors
 /// Returns an error if the HTTP request fails or the file cannot be written.
 #[cfg(feature = "download")]
-pub fn download_file(url: &str, dest: &Path) -> io::Result<()> {
+pub fn download_file(url: &str, dest: &Path) -> DatasetResult<()> {
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).map_err(|e| DatasetError::write(parent, e).log())?;
     }
 
-    let response = ureq::get(url)
-        .call()
-        .map_err(|e| io::Error::other(format!("HTTP request failed for {url}: {e}")))?;
+    let response = ureq::get(url).call().map_err(|e| {
+        DatasetError::Request {
+            url: url.to_string(),
+            source: Box::new(e),
+        }
+        .log()
+    })?;
 
     let mut buf = Vec::new();
     response
         .into_reader()
         .read_to_end(&mut buf)
-        .map_err(|e| io::Error::other(format!("Failed to read response body: {e}")))?;
+        .map_err(|source| {
+            DatasetError::ResponseBody {
+                url: url.to_string(),
+                source,
+            }
+            .log()
+        })?;
 
-    let mut file = fs::File::create(dest)?;
-    file.write_all(&buf)?;
-    Ok(())
+    fs::File::create(dest)
+        .and_then(|mut file| file.write_all(&buf))
+        .map_err(|e| DatasetError::write(dest, e).log())
+}
+
+/// Unpack a `.tar.gz` archive into `dest_dir`.
+///
+/// Requires the `download` feature.
+///
+/// # Errors
+/// Returns an error if the archive cannot be read or an entry cannot be written.
+#[cfg(feature = "download")]
+pub fn extract_tar_gz(src: &Path, dest_dir: &Path) -> DatasetResult<()> {
+    fs::File::open(src)
+        .and_then(|file| tar::Archive::new(flate2::read::GzDecoder::new(file)).unpack(dest_dir))
+        .map_err(|source| {
+            DatasetError::Extract {
+                path: src.to_path_buf(),
+                source,
+            }
+            .log()
+        })
 }
 
 /// Decompress a `.bz2` file to `dest`.
@@ -397,43 +497,35 @@ pub fn download_file(url: &str, dest: &Path) -> io::Result<()> {
 /// # Errors
 /// Returns an error if the file cannot be read or the decompressed data
 /// cannot be written.
-/// Unpack a `.tar.gz` archive into `dest_dir`.
-///
-/// Requires the `download` feature.
-///
-/// # Errors
-/// Returns an error if the archive cannot be read or an entry cannot be written.
 #[cfg(feature = "download")]
-pub fn extract_tar_gz(src: &Path, dest_dir: &Path) -> io::Result<()> {
-    let file = fs::File::open(src)?;
-    let decoder = flate2::read::GzDecoder::new(file);
-    tar::Archive::new(decoder).unpack(dest_dir)
-}
-
-#[cfg(feature = "download")]
-pub fn decompress_bzip2(src: &Path, dest: &Path) -> io::Result<()> {
+pub fn decompress_bzip2(src: &Path, dest: &Path) -> DatasetResult<()> {
     use bzip2::read::BzDecoder;
 
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).map_err(|e| DatasetError::write(parent, e).log())?;
     }
 
-    let compressed = fs::File::open(src)?;
-    let mut decoder = BzDecoder::new(compressed);
     let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed)?;
+    fs::File::open(src)
+        .and_then(|compressed| BzDecoder::new(compressed).read_to_end(&mut decompressed))
+        .map_err(|source| {
+            DatasetError::Decompress {
+                path: src.to_path_buf(),
+                source,
+            }
+            .log()
+        })?;
 
-    let mut out = fs::File::create(dest)?;
-    out.write_all(&decompressed)?;
-    Ok(())
+    fs::File::create(dest)
+        .and_then(|mut out| out.write_all(&decompressed))
+        .map_err(|e| DatasetError::write(dest, e).log())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn registry_parses_without_panic() -> io::Result<()> {
+    fn registry_parses_without_panic() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         assert!(
             !registry.odometry.is_empty(),
@@ -447,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_expected_odometry_datasets() -> io::Result<()> {
+    fn registry_contains_expected_odometry_datasets() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         for name in &["sphere2500", "parking-garage", "intel", "M3500"] {
             assert!(
@@ -459,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_expected_ba_datasets() -> io::Result<()> {
+    fn registry_contains_expected_ba_datasets() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         for name in &["ladybug", "trafalgar", "dubrovnik", "venice", "final"] {
             assert!(
@@ -471,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn odometry_entries_have_valid_categories() -> io::Result<()> {
+    fn odometry_entries_have_valid_categories() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         for (name, entry) in &registry.odometry {
             assert!(
@@ -484,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn ba_entries_have_at_least_one_problem() -> io::Result<()> {
+    fn ba_entries_have_at_least_one_problem() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         for (name, entry) in &registry.bundle_adjustment {
             assert!(
@@ -496,12 +588,12 @@ mod tests {
     }
 
     #[test]
-    fn ba_problem_url_format_is_correct() -> io::Result<()> {
+    fn ba_problem_url_format_is_correct() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let ladybug = registry
             .bundle_adjustment
             .get("ladybug")
-            .ok_or_else(|| io::Error::other("ladybug dataset not found"))?;
+            .ok_or_else(|| std::io::Error::other("ladybug dataset not found"))?;
         let url = ladybug.problem_url(49, 7776);
         assert_eq!(
             url,
@@ -511,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn odometry_by_category_returns_only_3d() -> io::Result<()> {
+    fn odometry_by_category_returns_only_3d() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let entries = registry.odometry_by_category("3d");
         for (_, entry) in &entries {
@@ -522,12 +614,12 @@ mod tests {
     }
 
     #[test]
-    fn sphere2500_uses_github_url() -> io::Result<()> {
+    fn sphere2500_uses_github_url() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let entry = registry
             .odometry
             .get("sphere2500")
-            .ok_or_else(|| io::Error::other("sphere2500 must exist"))?;
+            .ok_or_else(|| std::io::Error::other("sphere2500 must exist"))?;
         assert!(
             entry.url.contains("github"),
             "sphere2500 should use the GitHub URL, got: {}",
@@ -537,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_new_vertigo_datasets() -> io::Result<()> {
+    fn registry_contains_new_vertigo_datasets() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         for name in &["manhattanOlson3500", "ring", "ring_city", "city10000"] {
             assert!(
@@ -549,14 +641,14 @@ mod tests {
     }
 
     #[test]
-    fn odometry_path_includes_category_subdir() -> io::Result<()> {
+    fn odometry_path_includes_category_subdir() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let path_3d = registry
             .odometry_path("sphere2500")
-            .ok_or_else(|| io::Error::other("sphere2500 path not found"))?;
+            .ok_or_else(|| std::io::Error::other("sphere2500 path not found"))?;
         let path_2d = registry
             .odometry_path("intel")
-            .ok_or_else(|| io::Error::other("intel path not found"))?;
+            .ok_or_else(|| std::io::Error::other("intel path not found"))?;
         assert!(
             path_3d.components().any(|c| c.as_os_str() == "3d"),
             "3D path should contain '3d' component, got: {}",
@@ -571,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn sphere_bignoise_removed_from_registry() -> io::Result<()> {
+    fn sphere_bignoise_removed_from_registry() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         assert!(
             !registry.odometry.contains_key("sphere_bignoise"),
@@ -581,11 +673,11 @@ mod tests {
     }
 
     #[test]
-    fn ba_path_returns_correct_structure() -> io::Result<()> {
+    fn ba_path_returns_correct_structure() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let path = registry
             .ba_path("ladybug", 49, 7776)
-            .ok_or_else(|| io::Error::other("ladybug ba_path not found"))?;
+            .ok_or_else(|| std::io::Error::other("ladybug ba_path not found"))?;
         assert!(
             path.components()
                 .any(|c| c.as_os_str() == "bundle_adjustment"),
@@ -607,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn ba_path_returns_none_for_unknown() -> io::Result<()> {
+    fn ba_path_returns_none_for_unknown() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         assert!(
             registry.ba_path("nonexistent_ba_xyz", 1, 1).is_none(),
@@ -617,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn ba_sorted_returns_alphabetical_order() -> io::Result<()> {
+    fn ba_sorted_returns_alphabetical_order() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let entries = registry.ba_sorted();
         assert!(!entries.is_empty(), "ba_sorted should not be empty");
@@ -633,12 +725,12 @@ mod tests {
     }
 
     #[test]
-    fn ba_entry_largest_returns_last_problem() -> io::Result<()> {
+    fn ba_entry_largest_returns_last_problem() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let ladybug = registry
             .bundle_adjustment
             .get("ladybug")
-            .ok_or_else(|| io::Error::other("ladybug not found"))?;
+            .ok_or_else(|| std::io::Error::other("ladybug not found"))?;
         let largest = ladybug.largest();
         assert!(largest.is_some(), "ladybug should have a largest problem");
         assert_eq!(
@@ -662,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn odometry_by_category_returns_only_2d() -> io::Result<()> {
+    fn odometry_by_category_returns_only_2d() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let entries = registry.odometry_by_category("2d");
         assert!(!entries.is_empty(), "should have at least one 2d dataset");
@@ -673,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn odometry_by_category_is_sorted() -> io::Result<()> {
+    fn odometry_by_category_is_sorted() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let entries = registry.odometry_by_category("3d");
         for window in entries.windows(2) {
@@ -688,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn odometry_entries_have_nonempty_url_and_filename() -> io::Result<()> {
+    fn odometry_entries_have_nonempty_url_and_filename() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         for (name, entry) in &registry.odometry {
             assert!(!entry.url.is_empty(), "dataset '{name}' has empty url");
@@ -702,7 +794,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "download")]
-    fn decompress_bzip2_roundtrip() -> io::Result<()> {
+    fn decompress_bzip2_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         use bzip2::Compression;
         use bzip2::write::BzEncoder;
         use std::io::Write as _;
@@ -732,38 +824,46 @@ mod tests {
     }
 
     #[test]
-    fn ensure_odometry_dataset_unknown_name_errors() -> io::Result<()> {
+    fn ensure_odometry_dataset_unknown_name_errors() -> Result<(), Box<dyn std::error::Error>> {
         let err = ensure_odometry_dataset("nonexistent_dataset_xyz_abc")
             .err()
-            .ok_or_else(|| io::Error::other("expected Err but got Ok"))?;
+            .ok_or_else(|| std::io::Error::other("expected Err but got Ok"))?;
         assert!(
-            err.to_string().contains("not found in registry"),
+            matches!(err, DatasetError::UnknownDataset { .. }),
+            "an unknown name must be reported as such, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("is not in the registry"),
             "error message should mention registry, got: {err}"
         );
         Ok(())
     }
 
     #[test]
-    fn ensure_ba_dataset_unknown_name_errors() -> io::Result<()> {
+    fn ensure_ba_dataset_unknown_name_errors() -> Result<(), Box<dyn std::error::Error>> {
         let err = ensure_ba_dataset("nonexistent_ba_xyz_abc", 1, 1)
             .err()
-            .ok_or_else(|| io::Error::other("expected Err but got Ok"))?;
+            .ok_or_else(|| std::io::Error::other("expected Err but got Ok"))?;
         assert!(
-            err.to_string().contains("not found in registry"),
+            matches!(err, DatasetError::UnknownDataset { .. }),
+            "an unknown name must be reported as such, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("is not in the registry"),
             "error message should mention registry, got: {err}"
         );
         Ok(())
     }
 
     #[test]
-    fn odometry_path_returns_none_for_unknown() -> io::Result<()> {
+    fn odometry_path_returns_none_for_unknown() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         assert!(registry.odometry_path("nonexistent_xyz").is_none());
         Ok(())
     }
 
     #[test]
-    fn odometry_by_category_empty_for_unknown() -> io::Result<()> {
+    fn odometry_by_category_empty_for_unknown() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let entries = registry.odometry_by_category("4d");
         assert!(entries.is_empty());
@@ -771,12 +871,12 @@ mod tests {
     }
 
     #[test]
-    fn ba_problem_url_format_for_trafalgar() -> io::Result<()> {
+    fn ba_problem_url_format_for_trafalgar() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let trafalgar = registry
             .bundle_adjustment
             .get("trafalgar")
-            .ok_or_else(|| io::Error::other("trafalgar dataset not found"))?;
+            .ok_or_else(|| std::io::Error::other("trafalgar dataset not found"))?;
         let url = trafalgar.problem_url(21, 100);
         assert!(url.contains("trafalgar"));
         assert!(url.contains("problem-21-100-pre.txt.bz2"));
@@ -793,12 +893,12 @@ mod tests {
     }
 
     #[test]
-    fn odometry_entry_fields_accessible() -> io::Result<()> {
+    fn odometry_entry_fields_accessible() -> Result<(), Box<dyn std::error::Error>> {
         let registry = DatasetRegistry::load()?;
         let entry = registry
             .odometry
             .get("sphere2500")
-            .ok_or_else(|| io::Error::other("sphere2500 must exist"))?;
+            .ok_or_else(|| std::io::Error::other("sphere2500 must exist"))?;
         assert!(!entry.filename.is_empty());
         assert!(!entry.category.is_empty());
         Ok(())

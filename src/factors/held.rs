@@ -11,7 +11,9 @@ use faer::Mat;
 use faer::prelude::ReborrowMut;
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
+use crate::error::ErrorLogging;
+use crate::factors::common::validate::expect_count;
+use crate::factors::{FactorError, FactorResult};
 use std::sync::Mutex;
 
 use smallvec::SmallVec;
@@ -39,27 +41,36 @@ impl<F: Factor> HeldBlocks<F> {
     /// # Errors
     ///
     /// `dofs` and `held` of different lengths, column counts that do not add
-    /// up to the inner Jacobian's ([`CoreError::DimensionMismatch`]), or no
-    /// free block left ([`CoreError::InvalidInput`]).
-    pub fn new(inner: F, dofs: Vec<usize>, held: Vec<Option<Vec<f64>>>) -> CoreResult<Self> {
+    /// up to the inner Jacobian's, or no free block left.
+    pub fn new(inner: F, dofs: Vec<usize>, held: Vec<Option<Vec<f64>>>) -> FactorResult<Self> {
+        const FACTOR: &str = "HeldBlocks";
         if dofs.len() != held.len() {
-            return Err(CoreError::DimensionMismatch(format!(
-                "HeldBlocks: {} block dimensions for {} blocks",
-                dofs.len(),
-                held.len()
-            )));
+            return Err(FactorError::DimensionMismatch {
+                factor: FACTOR,
+                what: "block dimensions",
+                expected: held.len(),
+                actual: dofs.len(),
+            }
+            .log());
         }
-        if dofs.iter().sum::<usize>() != inner.jacobian_shape().1 {
-            return Err(CoreError::DimensionMismatch(format!(
-                "HeldBlocks: block dimensions sum to {}, the factor has {} columns",
-                dofs.iter().sum::<usize>(),
-                inner.jacobian_shape().1
-            )));
+        let columns = inner.jacobian_shape().1;
+        if dofs.iter().sum::<usize>() != columns {
+            return Err(FactorError::DimensionMismatch {
+                factor: FACTOR,
+                what: "sum of block dimensions",
+                expected: columns,
+                actual: dofs.iter().sum::<usize>(),
+            }
+            .log());
         }
         if held.iter().all(Option::is_some) {
-            return Err(CoreError::InvalidInput(
-                "HeldBlocks: every block is held; nothing to estimate".to_string(),
-            ));
+            return Err(FactorError::TooFew {
+                factor: FACTOR,
+                what: "free block count",
+                min: 1,
+                actual: 0,
+            }
+            .log());
         }
         let (rows, cols) = inner.jacobian_shape();
         Ok(Self {
@@ -106,6 +117,8 @@ impl<F: Factor> Factor for HeldBlocks<F> {
             return;
         };
         let (rows, cols) = self.inner.jacobian_shape();
+        // The scratch matrix is zeroed and resized below before every use, so
+        // a poisoned lock holds nothing that could leak into this result.
         let mut guard = self
             .scratch
             .lock()
@@ -177,15 +190,9 @@ impl<F: Factor> Factor for HeldBlocks<F> {
         self.inner.whitens_internally()
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         let free = self.blocks.iter().filter(|block| block.is_none()).count();
-        if variables.len() != free {
-            return Err(format!(
-                "HeldBlocks: {} variables for {free} free blocks",
-                variables.len()
-            ));
-        }
-        Ok(())
+        expect_count(variables, free, "HeldBlocks")
     }
 }
 
@@ -197,6 +204,8 @@ mod tests {
     use apex_manifolds::se3::SE3;
     use apex_manifolds::se23::SE23;
     use nalgebra::{UnitQuaternion, Vector3};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn state() -> SE23 {
         SE23::new(
@@ -213,7 +222,7 @@ mod tests {
         )
     }
 
-    fn factor() -> Result<LidarMapPlaneFactor<SE23>, CoreError> {
+    fn factor() -> FactorResult<LidarMapPlaneFactor<SE23>> {
         LidarMapPlaneFactor::new(
             Vector3::new(4.0, -1.5, 0.8),
             Plane::new(Vector3::new(0.3, -0.5, 0.8), 1.7)?,
@@ -224,7 +233,7 @@ mod tests {
     /// Holding the extrinsic reproduces the full factor's residual and its
     /// state columns exactly.
     #[test]
-    fn a_held_block_drops_its_columns_and_keeps_the_rest() -> Result<(), CoreError> {
+    fn a_held_block_drops_its_columns_and_keeps_the_rest() -> TestResult {
         let full = factor()?;
         let s = state().as_param_slice().to_vec();
         let e = extrinsic().as_param_slice().to_vec();
@@ -260,7 +269,7 @@ mod tests {
 
     /// Without inner normal equations there are none: use the Jacobian.
     #[test]
-    fn no_inner_normal_equations_means_none() -> Result<(), CoreError> {
+    fn no_inner_normal_equations_means_none() -> TestResult {
         let e = extrinsic().as_param_slice().to_vec();
         let held = HeldBlocks::new(factor()?, vec![9, 6], vec![None, Some(e)])?;
         assert_eq!(
@@ -271,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn inconsistent_wrappings_are_rejected() -> Result<(), CoreError> {
+    fn inconsistent_wrappings_are_rejected() -> TestResult {
         let e = extrinsic().as_param_slice().to_vec();
         assert!(HeldBlocks::new(factor()?, vec![9], vec![None, Some(e.clone())]).is_err());
         assert!(HeldBlocks::new(factor()?, vec![9, 5], vec![None, Some(e.clone())]).is_err());

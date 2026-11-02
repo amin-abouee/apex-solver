@@ -1,4 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Console output is this CLI's user interface (stream tables).
 
 //! Inspect a VRS file (Project Aria recording).
@@ -10,6 +9,7 @@
 
 use apex_io::vrs::{IndexSource, RecordType, VrsReader};
 use clap::Parser;
+use std::io::Write as _;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -44,19 +44,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let mut vrs = VrsReader::open(&args.file)?;
 
-    println!("File:      {}", args.file.display());
-    println!(
+    writeln!(
+        std::io::stdout().lock(),
+        "File:      {}",
+        args.file.display()
+    )?;
+    writeln!(
+        std::io::stdout().lock(),
         "Size:      {:.2} GiB",
         vrs.file_len() as f64 / (1u64 << 30) as f64
-    );
-    println!(
+    )?;
+    writeln!(
+        std::io::stdout().lock(),
         "Index:     {} ({} records)",
         match vrs.index_source() {
             IndexSource::File => "from file",
             IndexSource::Rebuilt => "REBUILT (file has no usable index)",
         },
         vrs.records().len()
-    );
+    )?;
     for key in [
         "device_type",
         "device_serial",
@@ -64,16 +70,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "capture_time_epoch",
     ] {
         if let Some(v) = vrs.file_tags().get(key) {
-            println!("{key:<10} {v}");
+            writeln!(std::io::stdout().lock(), "{key:<10} {v}")?;
         }
     }
 
     let streams = vrs.streams();
-    println!("\nStreams ({}):", streams.len());
-    println!(
+    writeln!(std::io::stdout().lock(), "\nStreams ({}):", streams.len())?;
+    writeln!(
+        std::io::stdout().lock(),
         "  {:<9} {:<26} {:>9} {:>9} {:>9}  {:>10} {:>9}  data format",
-        "id", "name", "config", "state", "data", "duration_s", "rate_hz"
-    );
+        "id",
+        "name",
+        "config",
+        "state",
+        "data",
+        "duration_s",
+        "rate_hz"
+    )?;
     for id in &streams {
         let tags = vrs.stream_tags(*id);
         let name = tags
@@ -93,7 +106,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some((a, b)) if b > a && data > 1 => (b - a, (data - 1) as f64 / (b - a)),
             _ => (0.0, 0.0),
         };
-        println!(
+        writeln!(
+            std::io::stdout().lock(),
             "  {:<9} {:<26} {:>9} {:>9} {:>9}  {:>10.3} {:>9.2}  {}",
             id.to_string(),
             name,
@@ -103,22 +117,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dur,
             rate,
             format
-        );
+        )?;
     }
 
     if args.tags {
-        println!("\nFile tags:");
+        writeln!(std::io::stdout().lock(), "\nFile tags:")?;
         for (k, v) in vrs.file_tags() {
-            println!("  {k} = {}", shorten(v));
+            writeln!(std::io::stdout().lock(), "  {k} = {}", shorten(v))?;
         }
         for id in &streams {
             if let Some(t) = vrs.stream_tags(*id) {
-                println!("\nStream {id} tags:");
+                writeln!(std::io::stdout().lock(), "\nStream {id} tags:")?;
                 for (k, v) in &t.user {
-                    println!("  user {k} = {}", shorten(v));
+                    writeln!(std::io::stdout().lock(), "  user {k} = {}", shorten(v))?;
                 }
                 for (k, v) in &t.vrs {
-                    println!("  vrs  {k} = {}", shorten(v));
+                    writeln!(std::io::stdout().lock(), "  vrs  {k} = {}", shorten(v))?;
                 }
             }
         }
@@ -127,18 +141,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.verify_index {
         let t0 = std::time::Instant::now();
         let ok = vrs.index_matches_scan()?;
-        println!(
+        writeln!(
+            std::io::stdout().lock(),
             "\nIndex vs full scan: {} ({:.1}s)",
             if ok { "IDENTICAL" } else { "MISMATCH" },
             t0.elapsed().as_secs_f64()
-        );
+        )?;
         let chain = vrs.verify_record_chain()?;
         match chain {
-            None => println!("Record chain:       INTACT (sizes, streams, previous_record_size)"),
-            Some(b) => println!(
+            None => writeln!(
+                std::io::stdout().lock(),
+                "Record chain:       INTACT (sizes, streams, previous_record_size)"
+            )?,
+            Some(b) => writeln!(
+                std::io::stdout().lock(),
                 "Record chain:       BROKEN at record {} (offset {}): {} expected {}, found {}",
-                b.record_index, b.offset, b.field, b.expected, b.found
-            ),
+                b.record_index,
+                b.offset,
+                b.field,
+                b.expected,
+                b.found
+            )?,
         }
         if !ok || chain.is_some() {
             std::process::exit(1);

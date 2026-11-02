@@ -19,10 +19,9 @@ use apex_manifolds::so3::{SO3, SO3Tangent};
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, Vector3};
 
-use crate::core::CoreError;
-use crate::core::CoreResult;
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
+use crate::error::ErrorLogging;
+use crate::factors::{Factor, FactorError, FactorResult};
 
 /// Scalar epipolar residual per 2D–2D point pair, over the relative pose.
 ///
@@ -41,14 +40,17 @@ impl EssentialMatrixFactor {
     /// Create the factor from matched normalized point pairs.
     ///
     /// Returns an error when the pair lists disagree or are empty.
-    pub fn new(points_1: Vec<Vector3<f64>>, points_2: Vec<Vector3<f64>>) -> CoreResult<Self> {
-        if points_1.is_empty() || points_1.len() != points_2.len() {
-            return Err(CoreError::InvalidInput(format!(
-                "EssentialMatrixFactor needs non-empty, equal-length point lists \
-                 (got {} and {})",
-                points_1.len(),
-                points_2.len()
-            )));
+    pub fn new(points_1: Vec<Vector3<f64>>, points_2: Vec<Vector3<f64>>) -> FactorResult<Self> {
+        const FACTOR: &str = "EssentialMatrixFactor";
+        crate::factors::common::validate::expect_at_least(FACTOR, "point list", points_1.len(), 1)?;
+        if points_1.len() != points_2.len() {
+            return Err(FactorError::DimensionMismatch {
+                factor: FACTOR,
+                what: "second point list",
+                expected: points_1.len(),
+                actual: points_2.len(),
+            }
+            .log());
         }
         Ok(Self { points_1, points_2 })
     }
@@ -120,11 +122,12 @@ impl Factor for EssentialMatrixFactor {
         (self.points_1.len(), 6)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 1 || variables[0].as_param_slice().len() != SE3::REP_SIZE {
-            return Err("EssentialMatrixFactor requires exactly one SE3 pose variable".into());
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE],
+            "EssentialMatrixFactor",
+        )
     }
 }
 
@@ -144,12 +147,14 @@ impl EssentialMatrixConstraint {
     /// Create the constraint from a measured rotation and translation
     /// direction. The direction is normalized; a near-zero direction is
     /// rejected.
-    pub fn new(rotation_e: SO3, direction_e: Vector3<f64>) -> CoreResult<Self> {
+    pub fn new(rotation_e: SO3, direction_e: Vector3<f64>) -> FactorResult<Self> {
         let norm = direction_e.norm();
         if !(norm.is_finite() && norm > 1e-12) {
-            return Err(CoreError::InvalidInput(
-                "EssentialMatrixConstraint requires a non-zero translation direction".into(),
-            ));
+            return Err(FactorError::Degenerate {
+                factor: "EssentialMatrixConstraint",
+                what: "translation direction",
+            }
+            .log());
         }
         Ok(Self {
             rotation_e,
@@ -230,11 +235,12 @@ impl Factor for EssentialMatrixConstraint {
         (6, 6)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 1 || variables[0].as_param_slice().len() != SE3::REP_SIZE {
-            return Err("EssentialMatrixConstraint requires exactly one SE3 pose variable".into());
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE],
+            "EssentialMatrixConstraint",
+        )
     }
 }
 

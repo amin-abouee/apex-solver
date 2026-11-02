@@ -106,27 +106,20 @@ pub fn relative_point<G: ActsOnPoints3>(a: &G, b: &G, point_b: &Vector3<f64>) ->
 /// Registration check for a `[state, 3-D point]` factor.
 pub(crate) fn expect_state_and_point<G: ActsOnPoints3>(
     variables: &[&dyn crate::core::variable::ManifoldVariable],
-    name: &str,
-) -> Result<(), String> {
-    match variables {
-        [state, point]
-            if state.manifold_type_name() == G::NAME && point.as_param_slice().len() == 3 =>
-        {
-            Ok(())
-        }
-        _ => Err(format!("{name} expects [{} state, 3D point]", G::NAME)),
-    }
+    factor: &'static str,
+) -> crate::factors::FactorResult<()> {
+    use crate::factors::common::validate::{expect_count, expect_manifold, expect_size};
+    expect_count(variables, 2, factor)?;
+    expect_manifold(variables[0], 0, G::NAME, factor)?;
+    expect_size(variables[1], 1, 3, factor)
 }
 
 /// Registration check for a `[state, state]` factor.
 pub(crate) fn expect_two_states<G: ActsOnPoints3>(
     variables: &[&dyn crate::core::variable::ManifoldVariable],
-    name: &str,
-) -> Result<(), String> {
-    match variables {
-        [a, b] if a.manifold_type_name() == G::NAME && b.manifold_type_name() == G::NAME => Ok(()),
-        _ => Err(format!("{name} expects [{0} state, {0} state]", G::NAME)),
-    }
+    factor: &'static str,
+) -> crate::factors::FactorResult<()> {
+    crate::factors::common::validate::expect_manifolds(variables, &[G::NAME, G::NAME], factor)
 }
 
 #[cfg(test)]

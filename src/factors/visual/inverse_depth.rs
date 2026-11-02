@@ -25,6 +25,7 @@ use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 
 /// Inverse-depth landmark reprojection factor over `[pose_i, anchor, pose_j]`.
@@ -63,6 +64,8 @@ impl<CAM: CameraModel> InverseDepthFactor<CAM> {
         if !(d.is_finite() && d > 0.0) {
             return None;
         }
+        // An anchor pixel outside the model's domain is an expected outcome
+        // here, reported to the caller as `None`, never logged.
         let ray = self.camera.unproject(&Vector2::new(u, v)).ok()?;
         Some(ray / d)
     }
@@ -75,6 +78,9 @@ impl<CAM: CameraModel> InverseDepthFactor<CAM> {
             (0usize, (NUMERICAL_DERIVATIVE_EPS, 0.0)),
             (1, (0.0, NUMERICAL_DERIVATIVE_EPS)),
         ] {
+            // A pixel nudged past the model's field of view has no ray; its
+            // difference column falls back to zero, a deliberate, unlogged
+            // per-residual fallback.
             let plus = self
                 .camera
                 .unproject(&Vector2::new(u + du, v + dv))
@@ -130,7 +136,7 @@ impl<CAM: CameraModel> Factor for InverseDepthFactor<CAM> {
 
         let uv_j = match self.camera.project(&p_cj) {
             Ok(uv) => uv,
-            Err(apex_camera_models::CameraModelError::PointBehindCamera { z, min_z }) => {
+            Err(apex_camera_models::ProjectionError::PointBehindCamera { z, min_z }) => {
                 if self.verbose_cheirality {
                     warn!("InverseDepthFactor: point behind camera j (z={z})");
                 }
@@ -259,21 +265,12 @@ impl<CAM: CameraModel> Factor for InverseDepthFactor<CAM> {
         (2, 15)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        if variables.len() != 3 {
-            return Err(format!(
-                "InverseDepthFactor expects 3 variables, got {}",
-                variables.len()
-            ));
-        }
-        for (idx, expected) in [(0usize, SE3::REP_SIZE), (1, 3), (2, SE3::REP_SIZE)] {
-            if variables[idx].as_param_slice().len() != expected {
-                return Err(format!(
-                    "InverseDepthFactor block {idx} requires {expected} parameters"
-                ));
-            }
-        }
-        Ok(())
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
+        crate::factors::common::validate::expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE, 3, SE3::REP_SIZE],
+            "InverseDepthFactor",
+        )
     }
 }
 

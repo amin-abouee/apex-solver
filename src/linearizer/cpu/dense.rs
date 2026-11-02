@@ -96,13 +96,9 @@ fn scatter_dense_block(
     jacobian_dense: &mut Mat<f64>,
 ) -> LinearizerResult<()> {
     for (i, &var_key) in residual_block.variable_keys.iter().enumerate() {
-        let &global_col = variable_index_map.get(var_key).ok_or_else(|| {
-            LinearizerError::Variable(format!(
-                "VarKey {:?} missing in variable-to-column-index mapping",
-                var_key
-            ))
-            .log()
-        })?;
+        let &global_col = variable_index_map
+            .get(var_key)
+            .ok_or_else(|| LinearizerError::UnindexedVariable { key: var_key }.log())?;
         let var = &variables[var_key];
         let (local_col, var_size) = bl.variable_local_idx_size_list[i];
         for col in 0..var_size {
@@ -154,11 +150,11 @@ mod tests {
         }
     }
 
-    fn one_var_problem() -> (Problem, VarKey) {
+    fn one_var_problem() -> Result<(Problem, VarKey), Box<dyn std::error::Error>> {
         let mut problem = Problem::new(JacobianMode::Dense);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
-        (problem, k)
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
+        Ok((problem, k))
     }
 
     fn build_index_map(problem: &Problem) -> (SecondaryMap<VarKey, usize>, usize) {
@@ -173,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_assemble_dense_basic() -> TestResult {
-        let (problem, _) = one_var_problem();
+        let (problem, _) = one_var_problem()?;
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, jacobian) = assemble_dense(
             &problem,
@@ -189,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_assemble_dense_jacobian_dimensions() -> TestResult {
-        let (problem, _) = one_var_problem();
+        let (problem, _) = one_var_problem()?;
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, jacobian) = assemble_dense(
             &problem,
@@ -208,7 +204,7 @@ mod tests {
     fn test_assemble_dense_zero_residual() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
         let k = problem.add_variable(ManifoldType::RN, dvector![3.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 3.0 }), None);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 3.0 }), None)?;
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, _) = assemble_dense(
             &problem,
@@ -226,8 +222,8 @@ mod tests {
         let mut problem = Problem::new(JacobianMode::Dense);
         let kx = problem.add_variable(ManifoldType::RN, dvector![2.0]);
         let ky = problem.add_variable(ManifoldType::RN, dvector![7.0]);
-        problem.add_residual_block(&[kx], Box::new(LinearFactor { target: 0.0 }), None);
-        problem.add_residual_block(&[ky], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&[kx], Box::new(LinearFactor { target: 0.0 }), None)?;
+        problem.add_residual_block(&[ky], Box::new(LinearFactor { target: 0.0 }), None)?;
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, jacobian) = assemble_dense(
             &problem,
@@ -245,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_assemble_dense_residual_faer_shape() -> TestResult {
-        let (problem, _) = one_var_problem();
+        let (problem, _) = one_var_problem()?;
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, _) = assemble_dense(
             &problem,
@@ -298,7 +294,7 @@ mod tests {
                 target_y: 0.0,
             }),
             None,
-        );
+        )?;
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, jacobian) = assemble_dense(
             &problem,
@@ -327,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_assemble_dense_missing_variable_key_returns_error() -> TestResult {
-        let (problem, _) = one_var_problem();
+        let (problem, _) = one_var_problem()?;
         let (_, total_dof) = build_index_map(&problem);
 
         let empty: SecondaryMap<VarKey, usize> = SecondaryMap::new();
@@ -349,8 +345,8 @@ mod tests {
     fn test_assemble_dense_multi_block_residual_values() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
         let k = problem.add_variable(ManifoldType::RN, dvector![3.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 1.0 }), None);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 4.0 }), None);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 1.0 }), None)?;
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 4.0 }), None)?;
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, jacobian) = assemble_dense(
             &problem,

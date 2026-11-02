@@ -32,6 +32,7 @@ use nalgebra::{SMatrix, SVector, Vector3};
 use super::factors::CombinedImuFactor;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::validate::expect_block_sizes;
 
 /// [`CombinedImuFactor`] with gravity's direction a variable; see the module
@@ -117,7 +118,7 @@ impl Factor for GravityFrameImuFactor {
         (15, 33)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[SE23::REP_SIZE, 6, SE23::REP_SIZE, 6, SO3::REP_SIZE],
@@ -262,7 +263,7 @@ impl Factor for ScaleGravityImuFactor {
         (15, 34)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[SE23::REP_SIZE, 6, SE23::REP_SIZE, 6, SO3::REP_SIZE, 1],

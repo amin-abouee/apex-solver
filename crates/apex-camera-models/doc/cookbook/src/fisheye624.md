@@ -71,7 +71,7 @@ Two Newton iterations, as in the reference implementation.
 The unit ray is $(\sin\theta\, \boldsymbol{\xi}/\lVert\boldsymbol{\xi}\rVert,\ \cos\theta)$.
 
 A pixel whose angle would reach $\pi/2$ is **rejected** with
-`NumericalError`, never clamped: the model ends there, and `project` needs
+`UnprojectionError::RadiusOutOfDomain`, never clamped: the model ends there, and `project` needs
 $z \ge \epsilon_g$.
 
 ## Point Jacobian

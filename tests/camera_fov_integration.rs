@@ -168,11 +168,11 @@ fn test_fov_multi_camera_calibration_200_points() -> TestResult {
             &[pose_keys[cam_idx], landmarks_key, intrinsics_key],
             Box::new(factor),
             None,
-        );
+        )?;
     }
 
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
 
     // ============================================================================
@@ -323,11 +323,11 @@ fn test_fov_3_cameras_calibration() -> TestResult {
             &[pose_keys[cam_idx], landmarks_key, intrinsics_key],
             Box::new(factor),
             None,
-        );
+        )?;
     }
 
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(pose_keys[0], dof)?;
     }
 
     let config = LevenbergMarquardtConfig::new()

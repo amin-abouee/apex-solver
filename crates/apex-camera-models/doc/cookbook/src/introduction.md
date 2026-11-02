@@ -118,11 +118,12 @@ chapter states the exact inequality and the error it raises:
 
 | Error variant | Raised when |
 |---|---|
-| `PointBehindCamera { z, min_z }` | depth test $z < \epsilon_g$ fails |
-| `ProjectionOutOfBounds` | the sphere/FOV geometric condition fails |
-| `DenominatorTooSmall { denom, threshold }` | the projection denominator $< \epsilon_g$ |
-| `PointOutsideImage { x, y }` | the inverse map leaves the real domain |
-| `NumericalError { .. }` | an iterative inverse fails to converge |
+| `ProjectionError::PointBehindCamera { z, min_z }` | depth test $z < \epsilon_g$ fails |
+| `ProjectionError::OutOfDomain { model, z }` | the sphere/FOV/BAL geometric condition fails |
+| `ProjectionError::DenominatorTooSmall { denom, threshold }` | the projection denominator $< \epsilon_g$ |
+| `UnprojectionError::PointOutsideImage { x, y }` | the inverse map leaves the real domain |
+| `UnprojectionError::RadiusOutOfDomain { radius, max }` | the pixel lies beyond the fisheye's field of view |
+| `UnprojectionError::NotConverged { .. }` / `Diverged { .. }` | an iterative inverse fails to converge |
 
 ## Number of Parameters
 

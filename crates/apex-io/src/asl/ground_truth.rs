@@ -18,6 +18,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::error::ErrorLogging;
 use nalgebra::Vector3;
 
 use super::super::trajectory::{
@@ -64,7 +65,7 @@ impl TrajectoryLoader for AslTrajectoryLoader {
     fn load<P: AsRef<Path>>(path: P) -> Result<Trajectory> {
         let path = path.as_ref();
         let content = read_file(path)?;
-        Self::parse(&content, path)
+        Self::parse(&content, path).map_err(ErrorLogging::log)
     }
 
     /// Writes 17 columns when the trajectory carries inertial state, 8
@@ -244,7 +245,6 @@ impl AslTrajectoryLoader {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use apex_manifolds::so3::SO3;

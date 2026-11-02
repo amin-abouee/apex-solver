@@ -304,21 +304,25 @@ fn build_ba_problem(dataset: &BalDataset) -> Result<Problem, String> {
             .ok_or_else(|| format!("no variable for point {}", obs.point_index))?;
 
         let loss = HuberLoss::new(1.0).map_err(|e| format!("Invalid Huber loss: {e}"))?;
-        problem.add_residual_block(
-            &[
-                pose_keys[obs.camera_index],
-                *pt_key,
-                intr_keys[obs.camera_index],
-            ],
-            Box::new(factor),
-            Some(Box::new(loss)),
-        );
+        problem
+            .add_residual_block(
+                &[
+                    pose_keys[obs.camera_index],
+                    *pt_key,
+                    intr_keys[obs.camera_index],
+                ],
+                Box::new(factor),
+                Some(Box::new(loss)),
+            )
+            .map_err(|e| e.to_string())?;
     }
 
     // Fix first camera pose (gauge freedom) - all 6 DOF.
     let first_pose = *pose_keys.first().ok_or("dataset has no cameras")?;
     for dof in 0..6 {
-        problem.fix_variable(first_pose, dof);
+        problem
+            .fix_variable(first_pose, dof)
+            .map_err(|e| e.to_string())?;
     }
 
     Ok(problem)

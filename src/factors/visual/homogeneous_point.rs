@@ -29,6 +29,7 @@ use nalgebra::{Matrix3, SMatrix, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::FactorResult;
 use crate::factors::common::validate::expect_block_sizes;
 
 /// Unary factor constraining a homogeneous 4D point to a measured 3D position.
@@ -134,7 +135,7 @@ impl Factor for HomogeneousPointFactor {
         (3, 4)
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[4],

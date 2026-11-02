@@ -17,6 +17,7 @@
 //! and [`Message`](crate::rosbag::types::Message) are shared.
 
 pub mod deserialize;
+pub mod error;
 pub mod format;
 pub mod messages;
 pub mod reader;
@@ -24,6 +25,7 @@ pub mod record;
 pub mod writer;
 
 pub use deserialize::{Ros1Deserializer, Ros1Serializer};
+pub use error::{Ros1Error, Ros1Result};
 pub use format::{OpCode, Ros1Compression};
 pub use reader::{Ros1MessageIter, Ros1Reader};
 pub use writer::Ros1Writer;

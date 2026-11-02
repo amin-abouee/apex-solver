@@ -97,10 +97,7 @@ pub fn build_symbolic_structure(
         for (i, &var_key) in block.variable_keys.iter().enumerate() {
             if let Some(variable) = variables.get(var_key) {
                 let Some(&global_col) = variable_index_map.get(var_key) else {
-                    return Err(LinearizerError::Variable(format!(
-                        "VarKey {var_key:?} missing in variable-to-column-index mapping"
-                    ))
-                    .log());
+                    return Err(LinearizerError::UnindexedVariable { key: var_key }.log());
                 };
                 let Some(&(local_col, var_size)) = var_local_sizes.get(i) else {
                     continue;
@@ -162,9 +159,10 @@ fn csc_from_triples(
     let mut bucket = vec![0usize; total_dof + 1];
     for &(c, _, _) in &triples {
         let Some(count) = bucket.get_mut(c + 1) else {
-            return Err(LinearizerError::SymbolicStructure(format!(
-                "Jacobian column {c} outside the {total_dof} solve columns"
-            ))
+            return Err(LinearizerError::ColumnOutOfRange {
+                column: c,
+                total: total_dof,
+            }
             .log());
         };
         *count += 1;
@@ -346,11 +344,11 @@ mod tests {
         }
     }
 
-    fn one_var_problem() -> (Problem, VarKey) {
+    fn one_var_problem() -> Result<(Problem, VarKey), Box<dyn std::error::Error>> {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
-        (problem, k)
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
+        Ok((problem, k))
     }
 
     /// Unary factor with a configurable Jacobian gain, so a row permutation
@@ -392,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_build_symbolic_structure_nnz() -> TestResult {
-        let (problem, _) = one_var_problem();
+        let (problem, _) = one_var_problem()?;
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
         assert_eq!(sym.pattern.compute_nnz(), 1);
@@ -401,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_build_symbolic_structure_dimensions() -> TestResult {
-        let (problem, _) = one_var_problem();
+        let (problem, _) = one_var_problem()?;
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
         assert_eq!(sym.pattern.nrows(), 1);
@@ -413,8 +411,8 @@ mod tests {
     fn test_build_symbolic_structure_two_factors() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 1.0 }), None);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 1.0 }), None)?;
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
         assert_eq!(sym.pattern.compute_nnz(), 2);
@@ -440,7 +438,11 @@ mod tests {
         let a = problem.add_variable(ManifoldType::RN, dvector![1.0]);
         // Distinct gains per block so a row permutation of J is observable.
         for (key, target, gain) in [(c, 30.0, 3.0), (b, 20.0, 2.0), (a, 10.0, 1.0)] {
-            problem.add_residual_block(&[key], Box::new(ScaledLinearFactor { target, gain }), None);
+            problem.add_residual_block(
+                &[key],
+                Box::new(ScaledLinearFactor { target, gain }),
+                None,
+            )?;
         }
         problem.mark_for_elimination(c);
         assert!(
@@ -502,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_assemble_sparse_basic() -> TestResult {
-        let (problem, _) = one_var_problem();
+        let (problem, _) = one_var_problem()?;
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
         let (residual, _) = assemble_sparse(
@@ -518,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_assemble_sparse_jacobian_value() -> TestResult {
-        let (problem, _) = one_var_problem();
+        let (problem, _) = one_var_problem()?;
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
         let (_, jacobian) = assemble_sparse(
@@ -537,7 +539,7 @@ mod tests {
     fn test_assemble_sparse_zero_residual() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let k = problem.add_variable(ManifoldType::RN, dvector![3.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 3.0 }), None);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 3.0 }), None)?;
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
         let (residual, _) = assemble_sparse(
@@ -553,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_assemble_sparse_dimensions() -> TestResult {
-        let (problem, _) = one_var_problem();
+        let (problem, _) = one_var_problem()?;
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
         let (residual, jacobian) = assemble_sparse(
@@ -575,8 +577,8 @@ mod tests {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let kx = problem.add_variable(ManifoldType::RN, dvector![2.0]);
         let ky = problem.add_variable(ManifoldType::RN, dvector![7.0]);
-        problem.add_residual_block(&[kx], Box::new(LinearFactor { target: 0.0 }), None);
-        problem.add_residual_block(&[ky], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&[kx], Box::new(LinearFactor { target: 0.0 }), None)?;
+        problem.add_residual_block(&[ky], Box::new(LinearFactor { target: 0.0 }), None)?;
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
         let (residual, _) = assemble_sparse(
@@ -594,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_assemble_sparse_missing_variable_key_returns_error() -> TestResult {
-        let (problem, _) = one_var_problem();
+        let (problem, _) = one_var_problem()?;
         let (_, total_dof) = build_index_map(&problem);
         // The variable-to-column mapping is consumed at symbolic-structure
         // build time (it produces the scatter plan), so a missing entry is

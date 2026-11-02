@@ -56,7 +56,7 @@ $$
 $$
 
 **Validity.** If $r_d < \epsilon_g$ the ray is $(0, 0, 1)$. If Newton-Raphson
-returns a non-finite or negative $\theta$, the inverse raises `NumericalError`.
+returns a non-finite or negative $\theta$, the inverse raises `UnprojectionError::Diverged`.
 
 <a id="jacobians"></a>
 ## Point Jacobian

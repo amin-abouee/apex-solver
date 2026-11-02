@@ -212,7 +212,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
         let to_name = format!("x{}", edge.to);
         if let (Some(&fk), Some(&tk)) = (name_to_key.get(&from_name), name_to_key.get(&to_name)) {
             let factor = BetweenFactor::new(edge.measurement.clone());
-            problem.add_residual_block(&[fk, tk], Box::new(factor), None);
+            problem.add_residual_block(&[fk, tk], Box::new(factor), None)?;
         }
     }
 
@@ -320,7 +320,7 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
         let to_name = format!("x{}", edge.to);
         if let (Some(&fk), Some(&tk)) = (name_to_key.get(&from_name), name_to_key.get(&to_name)) {
             let factor = BetweenFactor::new(edge.measurement.clone());
-            problem.add_residual_block(&[fk, tk], Box::new(factor), None);
+            problem.add_residual_block(&[fk, tk], Box::new(factor), None)?;
         }
     }
 

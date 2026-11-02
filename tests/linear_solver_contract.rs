@@ -467,13 +467,13 @@ mod dispatch {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    fn small_problem(mode: JacobianMode) -> Problem {
+    fn small_problem(mode: JacobianMode) -> Result<Problem, Box<dyn std::error::Error>> {
         let mut problem = Problem::new(mode);
         let a = problem.add_variable(ManifoldType::RN, nalgebra::dvector![1.0]);
         let b = problem.add_variable(ManifoldType::RN, nalgebra::dvector![2.0]);
-        problem.add_residual_block(&[a], Box::new(OffsetFactor { target: 0.5 }), None);
-        problem.add_residual_block(&[b], Box::new(OffsetFactor { target: 1.5 }), None);
-        problem
+        problem.add_residual_block(&[a], Box::new(OffsetFactor { target: 0.5 }), None)?;
+        problem.add_residual_block(&[b], Box::new(OffsetFactor { target: 1.5 }), None)?;
+        Ok(problem)
     }
 
     struct OffsetFactor {
@@ -511,7 +511,7 @@ mod dispatch {
         mode: JacobianMode,
         label: &str,
     ) -> TestResult {
-        let mut problem = small_problem(mode);
+        let mut problem = small_problem(mode)?;
         let err = optimizer
             .optimize(&mut problem)
             .err()
@@ -529,7 +529,7 @@ mod dispatch {
         // a zero Jacobian so the solve fails numerically — any error other
         // than the dispatch rejection is fine here.
         let mut optimizer = gn(LinearSolverType::ExplicitSparseSchur);
-        let mut problem = small_problem(JacobianMode::Sparse);
+        let mut problem = small_problem(JacobianMode::Sparse)?;
         let result = optimizer.optimize(&mut problem);
         if let Err(e) = result {
             assert!(
@@ -571,7 +571,7 @@ mod dispatch {
     #[test]
     fn gn_accepts_implicit_schur_under_sparse_mode() -> TestResult {
         let mut optimizer = gn(LinearSolverType::ImplicitSparseSchur);
-        let mut problem = small_problem(JacobianMode::Sparse);
+        let mut problem = small_problem(JacobianMode::Sparse)?;
         let result = optimizer.optimize(&mut problem);
         if let Err(e) = result {
             assert!(
@@ -594,7 +594,7 @@ mod dispatch {
     #[test]
     fn gn_accepts_explicit_dense_schur_under_dense_mode() -> TestResult {
         let mut optimizer = gn(LinearSolverType::ExplicitDenseSchur);
-        let mut problem = small_problem(JacobianMode::Dense);
+        let mut problem = small_problem(JacobianMode::Dense)?;
         let result = optimizer.optimize(&mut problem);
         if let Err(e) = result {
             assert!(
@@ -609,7 +609,7 @@ mod dispatch {
     fn dog_leg_accepts_schur_under_sparse_mode() -> TestResult {
         // See `gn_accepts_schur_under_sparse_mode`: dispatched, not rejected.
         let mut optimizer = dl(LinearSolverType::ExplicitSparseSchur);
-        let mut problem = small_problem(JacobianMode::Sparse);
+        let mut problem = small_problem(JacobianMode::Sparse)?;
         let result = optimizer.optimize(&mut problem);
         if let Err(e) = result {
             assert!(
@@ -647,7 +647,7 @@ mod dispatch {
             ),
         ] {
             let mut optimizer = gn(solver);
-            let mut problem = small_problem(mode);
+            let mut problem = small_problem(mode)?;
             let result = optimizer.optimize(&mut problem);
             if let Err(e) = result {
                 assert!(

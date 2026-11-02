@@ -42,7 +42,7 @@
 //! use apex_solver::manifold::se2::SE2;
 //! use slotmap::SlotMap;
 //! # use apex_solver::core::CoreResult;
-//! # fn example() -> CoreResult<()> {
+//! # fn main() -> CoreResult<()> {
 //!
 //! let mut var_sm: SlotMap<VarKey, ()> = SlotMap::with_key();
 //! let k0 = var_sm.insert(());
@@ -74,7 +74,6 @@
 //! // residual and jacobian are now ready for the linear solver
 //! # Ok(())
 //! # }
-//! # example().unwrap();
 //! ```
 
 use nalgebra::{DMatrix, DVector};
@@ -166,7 +165,7 @@ impl ResidualBlock {
     /// use apex_solver::manifold::se2::SE2;
     /// use slotmap::SlotMap;
     /// # use apex_solver::core::CoreResult;
-    /// # fn example() -> CoreResult<()> {
+    /// # fn main() -> CoreResult<()> {
     ///
     /// let mut var_sm: SlotMap<VarKey, ()> = SlotMap::with_key();
     /// let k0 = var_sm.insert(());
@@ -186,7 +185,6 @@ impl ResidualBlock {
     /// );
     /// # Ok(())
     /// # }
-    /// # example().unwrap();
     /// ```
     pub fn new(
         residual_block_id: FactorKey,

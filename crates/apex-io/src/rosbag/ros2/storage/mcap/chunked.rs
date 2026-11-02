@@ -15,7 +15,7 @@
 //!
 //! Records are `op: u8, len: u64, content`; strings are `u32 len + UTF-8`.
 
-use crate::rosbag::error::{BagError, Result};
+use super::error::{McapError, McapResult as Result};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -160,16 +160,13 @@ fn compress_zstd(data: &[u8]) -> Result<Vec<u8>> {
     ZSTD.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
-            *slot = Some(
-                zstd::bulk::Compressor::new(ZSTD_LEVEL)
-                    .map_err(|e| BagError::writer(format!("zstd init: {e}")))?,
-            );
+            *slot = Some(zstd::bulk::Compressor::new(ZSTD_LEVEL).map_err(McapError::ZstdInit)?);
         }
         match slot.as_mut() {
-            Some(c) => c
-                .compress(data)
-                .map_err(|e| BagError::writer(format!("zstd: {e}"))),
-            None => Err(BagError::writer("zstd compressor unavailable")),
+            Some(c) => c.compress(data).map_err(McapError::Compress),
+            None => Err(McapError::ZstdInit(std::io::Error::other(
+                "the compressor slot is empty after initialisation",
+            ))),
         }
     })
 }
@@ -244,8 +241,8 @@ pub(super) struct ChunkedWriter {
 
     // Parallel pipeline: finished chunks come back tagged with their sequence
     // number and are written strictly in order.
-    tx: mpsc::Sender<(u64, std::result::Result<DoneChunk, String>)>,
-    rx: mpsc::Receiver<(u64, std::result::Result<DoneChunk, String>)>,
+    tx: mpsc::Sender<(u64, Result<DoneChunk>)>,
+    rx: mpsc::Receiver<(u64, Result<DoneChunk>)>,
     next_seq: u64,
     next_to_write: u64,
     ready: BTreeMap<u64, DoneChunk>,
@@ -266,14 +263,18 @@ impl ChunkedWriter {
         compression: ChunkCompression,
         chunk_size: usize,
     ) -> Result<Self> {
-        let file = File::create(path)?;
+        let open_error = |source| McapError::Open {
+            path: path.to_path_buf(),
+            source,
+        };
+        let file = File::create(path).map_err(open_error)?;
         let mut out = BufWriter::with_capacity(1 << 20, file);
-        out.write_all(MAGIC)?;
+        out.write_all(MAGIC).map_err(open_error)?;
         let mut header = Vec::new();
         put_str(&mut header, profile);
         put_str(&mut header, "apex-io");
         let header = record(OP_HEADER, &header);
-        out.write_all(&header)?;
+        out.write_all(&header).map_err(open_error)?;
 
         let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
         let (tx, rx) = mpsc::channel();
@@ -303,13 +304,13 @@ impl ChunkedWriter {
     }
 
     fn out(&mut self) -> Result<&mut BufWriter<File>> {
-        self.out
-            .as_mut()
-            .ok_or_else(|| BagError::writer("MCAP writer already finished"))
+        self.out.as_mut().ok_or(McapError::WriterFinished)
     }
 
     fn write_raw(&mut self, bytes: &[u8]) -> Result<()> {
-        self.out()?.write_all(bytes)?;
+        self.out()?
+            .write_all(bytes)
+            .map_err(McapError::io("writing a record"))?;
         self.pos += bytes.len() as u64;
         Ok(())
     }
@@ -318,7 +319,7 @@ impl ChunkedWriter {
     pub(super) fn add_schema(&mut self, name: &str, encoding: &str, data: &[u8]) -> Result<u16> {
         self.barrier()?;
         let id = u16::try_from(self.schemas.len() + 1)
-            .map_err(|_| BagError::writer("too many MCAP schemas"))?;
+            .map_err(|_| McapError::TooMany { what: "schemas" })?;
         let rec = SchemaRec {
             id,
             name: name.to_string(),
@@ -340,7 +341,7 @@ impl ChunkedWriter {
     ) -> Result<u16> {
         self.barrier()?;
         let id = u16::try_from(self.channels.len())
-            .map_err(|_| BagError::writer("too many MCAP channels"))?;
+            .map_err(|_| McapError::TooMany { what: "channels" })?;
         let rec = ChannelRec {
             id,
             schema_id,
@@ -363,7 +364,7 @@ impl ChunkedWriter {
         data: &[u8],
     ) -> Result<()> {
         if usize::from(channel) >= self.channels.len() {
-            return Err(BagError::writer(format!("unknown MCAP channel {channel}")));
+            return Err(McapError::UnknownChannel { id: channel });
         }
         let c = &mut self.current;
         let offset = c.records.len() as u64;
@@ -424,8 +425,8 @@ impl ChunkedWriter {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 build_chunk(builder, compression)
             }))
-            .map_err(|_| "chunk compression panicked".to_string())
-            .and_then(|r| r.map_err(|e| e.to_string()));
+            .unwrap_or(Err(McapError::WorkerPanicked));
+            // A failed send means the writer is gone; nobody wants the chunk.
             let _ = tx.send((seq, result));
         });
 
@@ -442,10 +443,7 @@ impl ChunkedWriter {
     /// (only when something is actually in flight, so this cannot hang).
     fn receive(&mut self, block: bool) -> Result<()> {
         if block && self.inflight > 0 {
-            let item = self
-                .rx
-                .recv()
-                .map_err(|_| BagError::writer("MCAP compression workers disconnected"))?;
+            let item = self.rx.recv().map_err(|_| McapError::WorkersDisconnected)?;
             self.accept(item)?;
         }
         while let Ok(item) = self.rx.try_recv() {
@@ -454,10 +452,10 @@ impl ChunkedWriter {
         self.write_ready()
     }
 
-    fn accept(&mut self, item: (u64, std::result::Result<DoneChunk, String>)) -> Result<()> {
+    fn accept(&mut self, item: (u64, Result<DoneChunk>)) -> Result<()> {
         let (seq, result) = item;
         self.inflight -= 1;
-        let done = result.map_err(|e| BagError::writer(format!("MCAP chunk: {e}")))?;
+        let done = result?;
         self.ready.insert(seq, done);
         Ok(())
     }
@@ -520,7 +518,9 @@ impl ChunkedWriter {
         }
         self.barrier()?;
         if self.next_to_write != self.next_seq {
-            return Err(BagError::writer("MCAP chunks missing at finish"));
+            return Err(McapError::ChunksMissing {
+                missing: self.next_seq - self.next_to_write,
+            });
         }
 
         self.write_raw(&record(OP_DATA_END, &0u32.to_le_bytes()))?;
@@ -574,12 +574,8 @@ impl ChunkedWriter {
         self.write_raw(&record(OP_FOOTER, &footer))?;
         self.write_raw(MAGIC)?;
 
-        let mut out = self
-            .out
-            .take()
-            .ok_or_else(|| BagError::writer("MCAP writer already finished"))?;
-        out.flush()?;
-        Ok(())
+        let mut out = self.out.take().ok_or(McapError::WriterFinished)?;
+        out.flush().map_err(McapError::io("flushing the file"))
     }
 
     fn statistics_record(&self) -> Vec<u8> {
@@ -657,7 +653,6 @@ fn chunk_index_record(ci: &ChunkIndexRec) -> Vec<u8> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::tempdir;

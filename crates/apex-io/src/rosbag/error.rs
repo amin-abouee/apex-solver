@@ -1,309 +1,184 @@
-//! Error types for rosbag I/O operations
+//! Errors of the rosbag module.
+//!
+//! [`BagError`] is the root of the rosbag errors and the error of the
+//! container-agnostic facade ([`BagReader`](super::BagReader),
+//! [`BagWriter`](super::BagWriter), [`detect_kind`](super::detect_kind)).
+//! Each submodule returns its own error, wrapped transparently here:
+//!
+//! - [`Ros1Error`]: ROS1 bag reader, writer and message codec.
+//! - [`Ros2BagError`]: ROS2 bag reader, writer, metadata and storage backends;
+//!   it wraps [`McapError`] (the MCAP container) and [`CdrError`].
+//! - [`CdrError`]: a CDR payload that does not decode.
+//! - [`PointCloudError`]: a point-cloud field that cannot be read.
+//! - [`TranscodeError`]: ROS1 <-> ROS2 payload conversion.
+//! - `DdsError` (feature `dds`): live DDS subscriptions.
+//! - `VrsError` (feature `vrs`): VRS containers read or written as bags.
 
 use std::path::PathBuf;
-use thiserror::Error;
+
+pub use super::point_cloud::{PointCloudError, PointCloudResult};
+pub use super::ros1::error::{Ros1Error, Ros1Result};
+pub use super::ros2::cdr::{CdrError, CdrErrorKind, CdrResult};
+#[cfg(feature = "dds")]
+pub use super::ros2::dds::DdsError;
+pub use super::ros2::error::{Ros2BagError, Ros2BagResult};
+pub use super::ros2::storage::mcap::{McapError, McapResult};
+pub use super::transcode::{TranscodeError, TranscodeResult};
 
 /// Result type alias for rosbag operations
 pub type Result<T> = std::result::Result<T, BagError>;
 
+/// Result type alias for rosbag operations, named like the other module aliases.
+pub type BagResult<T> = Result<T>;
+
 /// Result type alias for reader operations (backwards compatibility)
-pub type ReaderResult<T> = std::result::Result<T, BagError>;
+pub type ReaderResult<T> = Result<T>;
 
 /// Result type alias for writer operations
-pub type WriterResult<T> = std::result::Result<T, BagError>;
-
-/// Errors that can occur when working with ROS2 bag files
-#[derive(Error, Debug)]
-pub enum BagError {
-    /// IO error when accessing files
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    /// Error parsing YAML metadata
-    #[error("Failed to parse metadata YAML: {0}")]
-    YamlParse(#[from] serde_norway::Error),
-
-    /// Database error when reading SQLite files
-    #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
-
-    /// Compression/decompression error
-    #[error("Compression error: {0}")]
-    Compression(String),
-
-    /// Bag file not found
-    #[error("Bag file not found: {path}")]
-    BagNotFound { path: PathBuf },
-
-    /// Bag already exists
-    #[error("Bag already exists: {path}")]
-    BagAlreadyExists { path: PathBuf },
-
-    /// Metadata file not found
-    #[error("Metadata file not found: {path}")]
-    MetadataNotFound { path: PathBuf },
-
-    /// Storage file not found
-    #[error("Storage file not found: {path}")]
-    StorageFileNotFound { path: PathBuf },
-
-    /// Unsupported bag version
-    #[error("Unsupported bag version: {version}")]
-    UnsupportedVersion { version: u32 },
-
-    /// Unsupported storage format
-    #[error("Unsupported storage format: {format}")]
-    UnsupportedStorageFormat { format: String },
-
-    /// Unsupported compression format
-    #[error("Unsupported compression format: {format}")]
-    UnsupportedCompressionFormat { format: String },
-
-    /// Unsupported serialization format
-    #[error("Unsupported serialization format: {format}")]
-    UnsupportedSerializationFormat { format: String },
-
-    /// Bag is not open
-    #[error("Bag is not open - call open() first")]
-    BagNotOpen,
-
-    /// Bag is already open
-    #[error("Bag is already open")]
-    BagAlreadyOpen,
-
-    /// Invalid message data
-    #[error("Invalid message data: {reason}")]
-    InvalidMessageData { reason: String },
-
-    /// CDR deserialization error
-    #[error("CDR deserialization error at position {position}/{data_length}: {message}")]
-    CdrDeserialization {
-        message: String,
-        position: usize,
-        data_length: usize,
-    },
-
-    /// Message type not found in type registry
-    #[error("Message type not found: {message_type}")]
-    MessageTypeNotFound { message_type: String },
-
-    /// Schema validation error
-    #[error("Schema validation error: {reason}")]
-    SchemaValidation { reason: String },
-
-    /// Connection not found
-    #[error("Connection not found for topic: {topic}")]
-    ConnectionNotFound { topic: String },
-
-    /// Connection already exists
-    #[error("Connection already exists for topic: {topic}")]
-    ConnectionAlreadyExists { topic: String },
-
-    /// Invalid QoS profile
-    #[error("Invalid QoS profile: {reason}")]
-    InvalidQosProfile { reason: String },
-
-    /// Writer error with custom message
-    #[error("Writer error: {message}")]
-    Writer { message: String },
-
-    /// Generic error with custom message
-    #[error("Bag error: {message}")]
-    Generic { message: String },
-
-    /// ROS1 bag magic header missing or malformed
-    #[error("ROS1 bag magic invalid: expected `#ROSBAG V2.0`, got {found:?}")]
-    Ros1InvalidMagic { found: String },
-
-    /// ROS1 bag declares an unsupported version
-    #[error("ROS1 bag unsupported version: {found}")]
-    Ros1UnsupportedVersion { found: String },
-
-    /// Encountered an unknown ROS1 record op-code
-    #[error("ROS1 unknown record op-code: 0x{op:02x}")]
-    Ros1UnknownOpCode { op: u8 },
-
-    /// ROS1 index/chunk-info section is corrupt or inconsistent
-    #[error("ROS1 index corrupt: {reason}")]
-    Ros1IndexCorrupt { reason: String },
-
-    /// ROS1 record header is malformed (missing required field, truncated, etc.)
-    #[error("ROS1 record malformed: {reason}")]
-    Ros1MalformedRecord { reason: String },
-}
+pub type WriterResult<T> = Result<T>;
 
 /// Type alias for backwards compatibility
 pub type ReaderError = BagError;
 
-impl BagError {
-    /// Create a new generic error with a custom message
-    pub fn generic(message: impl Into<String>) -> Self {
-        Self::Generic {
-            message: message.into(),
-        }
-    }
+/// Root error of the rosbag module.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BagError {
+    #[error(transparent)]
+    Ros1(#[from] Ros1Error),
 
-    /// Create a writer error
-    pub fn writer(message: impl Into<String>) -> Self {
-        Self::Writer {
-            message: message.into(),
-        }
-    }
+    #[error(transparent)]
+    Ros2(#[from] Ros2BagError),
 
-    /// Create a compression error
-    pub fn compression(message: impl Into<String>) -> Self {
-        Self::Compression(message.into())
-    }
+    #[error(transparent)]
+    Mcap(#[from] McapError),
 
-    /// Create an invalid message data error
-    pub fn invalid_message_data(reason: impl Into<String>) -> Self {
-        Self::InvalidMessageData {
-            reason: reason.into(),
-        }
-    }
+    #[error(transparent)]
+    Cdr(#[from] CdrError),
 
-    /// Create a CDR deserialization error
-    pub fn cdr_deserialization(
-        message: impl Into<String>,
-        position: usize,
-        data_length: usize,
-    ) -> Self {
-        Self::CdrDeserialization {
-            message: message.into(),
-            position,
-            data_length,
-        }
-    }
+    #[error(transparent)]
+    PointCloud(#[from] PointCloudError),
 
-    /// Create a message type not found error
-    pub fn message_type_not_found(message_type: impl Into<String>) -> Self {
-        Self::MessageTypeNotFound {
-            message_type: message_type.into(),
-        }
-    }
+    #[error(transparent)]
+    Transcode(#[from] TranscodeError),
 
-    /// Create a schema validation error
-    pub fn schema_validation(reason: impl Into<String>) -> Self {
-        Self::SchemaValidation {
-            reason: reason.into(),
-        }
-    }
+    #[cfg(feature = "dds")]
+    #[error(transparent)]
+    Dds(#[from] DdsError),
 
-    /// Create a connection not found error
-    pub fn connection_not_found(topic: impl Into<String>) -> Self {
-        Self::ConnectionNotFound {
-            topic: topic.into(),
-        }
-    }
+    #[cfg(feature = "vrs")]
+    #[error(transparent)]
+    Vrs(#[from] crate::vrs::VrsError),
 
-    /// Create a connection already exists error
-    pub fn connection_already_exists(topic: impl Into<String>) -> Self {
-        Self::ConnectionAlreadyExists {
-            topic: topic.into(),
-        }
-    }
+    #[error("bag not found: {}", path.display())]
+    BagNotFound { path: PathBuf },
 
-    /// Create an invalid QoS profile error
-    pub fn invalid_qos_profile(reason: impl Into<String>) -> Self {
-        Self::InvalidQosProfile {
-            reason: reason.into(),
-        }
-    }
+    #[error("bag already exists: {}", path.display())]
+    BagAlreadyExists { path: PathBuf },
+
+    #[error("cannot read {}", path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("{} is not a ROS1 bag, MCAP or VRS file", path.display())]
+    NotABag { path: PathBuf },
+
+    #[error("directory {} contains no bag", path.display())]
+    NoBagInDirectory { path: PathBuf },
+
+    #[error("unsupported storage format {format:?}")]
+    UnsupportedStorageFormat { format: String },
+
+    #[error("VRS containers need apex-io built with the `vrs` feature")]
+    VrsDisabled,
+
+    #[error("{container} does not support {what}")]
+    Unsupported {
+        container: &'static str,
+        what: &'static str,
+    },
+
+    #[error("too many connections: {count}")]
+    TooManyConnections { count: usize },
+
+    #[error("no connection for handle {handle}")]
+    UnknownHandle { handle: usize },
+
+    #[error("no output connection for topic {topic}")]
+    ConnectionNotFound { topic: String },
+
+    #[error("VRS stream {type_id}-{instance} lacks its {tag} tag")]
+    VrsStreamTag {
+        type_id: i32,
+        instance: u16,
+        tag: &'static str,
+    },
+
+    #[error("VRS stream {type_id}-{instance} carries ROS messages but no data format")]
+    VrsNoDataFormat { type_id: i32, instance: u16 },
+
+    #[error("VRS record {index} is not a well-formed ROS message record")]
+    VrsMalformedRecord { index: usize },
+
+    #[error("VRS record {index} is not a data record")]
+    VrsRecordNotData { index: usize },
+
+    #[error("VRS output needs every topic declared before the first message")]
+    VrsTopicsAfterStart,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorChainExt;
 
-    #[test]
-    fn generic_factory_creates_generic_variant() {
-        let err = BagError::generic("something went wrong");
-        assert!(err.to_string().contains("something went wrong"));
-        assert!(matches!(err, BagError::Generic { .. }));
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    fn decode() -> CdrResult<()> {
+        Err(CdrError {
+            kind: CdrErrorKind::Truncated { need: 8 },
+            position: 12,
+            len: 16,
+        })
+    }
+
+    fn storage() -> Ros2BagResult<()> {
+        decode()?;
+        Ok(())
+    }
+
+    fn facade() -> Result<()> {
+        storage()?;
+        Ok(())
     }
 
     #[test]
-    fn writer_factory_creates_writer_variant() {
-        let err = BagError::writer("disk full");
-        assert!(err.to_string().contains("disk full"));
-        assert!(matches!(err, BagError::Writer { .. }));
+    fn a_leaf_error_reaches_the_root_with_bare_question_marks() -> TestResult {
+        let error = facade().err().ok_or("expected an error")?;
+        assert!(matches!(error, BagError::Ros2(Ros2BagError::Cdr(_))));
+        assert_eq!(
+            error.chain_compact(),
+            "CDR field needs 8 bytes at byte 12 of 16"
+        );
+        Ok(())
     }
 
     #[test]
-    fn compression_factory_creates_compression_variant() {
-        let err = BagError::compression("zstd failed");
-        assert!(matches!(err, BagError::Compression(_)));
-        assert!(err.to_string().contains("zstd failed"));
+    fn the_crate_root_wraps_the_rosbag_root() -> TestResult {
+        let error = crate::IoError::from(BagError::UnknownHandle { handle: 3 });
+        assert_eq!(error.chain(), "no connection for handle 3");
+        Ok(())
     }
 
     #[test]
-    fn invalid_message_data_factory() {
-        let err = BagError::invalid_message_data("truncated buffer");
-        assert!(matches!(err, BagError::InvalidMessageData { .. }));
-        assert!(err.to_string().contains("truncated buffer"));
-    }
-
-    #[test]
-    fn cdr_deserialization_factory_includes_position() {
-        let err = BagError::cdr_deserialization("bad bytes", 42, 100);
-        let s = err.to_string();
-        assert!(s.contains("42"));
-        assert!(s.contains("100"));
-        assert!(s.contains("bad bytes"));
-    }
-
-    #[test]
-    fn message_type_not_found_factory() {
-        let err = BagError::message_type_not_found("sensor_msgs/msg/Imu");
-        assert!(matches!(err, BagError::MessageTypeNotFound { .. }));
-        assert!(err.to_string().contains("sensor_msgs/msg/Imu"));
-    }
-
-    #[test]
-    fn schema_validation_factory() {
-        let err = BagError::schema_validation("missing field");
-        assert!(matches!(err, BagError::SchemaValidation { .. }));
-        assert!(err.to_string().contains("missing field"));
-    }
-
-    #[test]
-    fn connection_not_found_factory() {
-        let err = BagError::connection_not_found("/imu");
-        assert!(matches!(err, BagError::ConnectionNotFound { .. }));
-        assert!(err.to_string().contains("/imu"));
-    }
-
-    #[test]
-    fn connection_already_exists_factory() {
-        let err = BagError::connection_already_exists("/cam");
-        assert!(matches!(err, BagError::ConnectionAlreadyExists { .. }));
-        assert!(err.to_string().contains("/cam"));
-    }
-
-    #[test]
-    fn invalid_qos_profile_factory() {
-        let err = BagError::invalid_qos_profile("bad depth");
-        assert!(matches!(err, BagError::InvalidQosProfile { .. }));
-        assert!(err.to_string().contains("bad depth"));
-    }
-
-    #[test]
-    fn bag_not_open_display() {
-        let err = BagError::BagNotOpen;
-        assert!(err.to_string().contains("not open"));
-    }
-
-    #[test]
-    fn unsupported_version_display() {
-        let err = BagError::UnsupportedVersion { version: 99 };
-        assert!(err.to_string().contains("99"));
-    }
-
-    #[test]
-    fn unsupported_storage_format_display() {
-        let err = BagError::UnsupportedStorageFormat {
-            format: "hdf5".to_string(),
+    fn facade_errors_name_their_values() {
+        let error = BagError::Unsupported {
+            container: "vrs",
+            what: "bz2 compression",
         };
-        assert!(err.to_string().contains("hdf5"));
+        assert_eq!(error.to_string(), "vrs does not support bz2 compression");
     }
 }

@@ -80,9 +80,11 @@ use apex_manifolds::se3::SE3;
 use apex_manifolds::util::skew;
 
 use crate::core::variable::ManifoldVariable;
-use crate::core::{CoreError, CoreResult};
-use crate::factors::Factor;
-use crate::factors::common::validate::expect_block_sizes;
+use crate::error::ErrorLogging;
+use crate::factors::common::validate::{
+    expect_block_sizes, expect_finite, expect_image, expect_positive,
+};
+use crate::factors::{Factor, FactorError, FactorResult};
 
 /// Residuals per point: the 8-pixel pattern.
 pub const PATTERN_PIXELS: usize = 8;
@@ -113,13 +115,8 @@ impl GradientImage {
     /// # Errors
     ///
     /// A size smaller than `2 × 2` or a length other than `width · height`.
-    pub fn new(width: usize, height: usize, data: Arc<Vec<[f32; 3]>>) -> CoreResult<Self> {
-        if width < 2 || height < 2 || data.len() != width * height {
-            return Err(CoreError::InvalidInput(format!(
-                "GradientImage: {} pixels for {width}x{height}",
-                data.len()
-            )));
-        }
+    pub fn new(width: usize, height: usize, data: Arc<Vec<[f32; 3]>>) -> FactorResult<Self> {
+        expect_image("GradientImage", width, height, data.len())?;
         Ok(Self {
             width,
             height,
@@ -241,22 +238,15 @@ impl<G: RigidPose> PhotometricInverseRangeFactor<G> {
         k: [f64; 4],
         target: Arc<GradientImage>,
         weights: PhotometricWeights,
-    ) -> CoreResult<Self> {
-        let positive = |x: f64| x.is_finite() && x > 0.0;
-        if !positive(k[0]) || !positive(k[1]) || !k.iter().all(|v| v.is_finite()) {
-            return Err(CoreError::InvalidInput(format!(
-                "PhotometricInverseRangeFactor: invalid intrinsics {k:?}"
-            )));
-        }
-        if !positive(weights.huber)
-            || !positive(weights.sigma)
-            || !positive(weights.dynamic)
-            || !positive(weights.exposure_ratio)
-        {
-            return Err(CoreError::InvalidInput(format!(
-                "PhotometricInverseRangeFactor: invalid weights {weights:?}"
-            )));
-        }
+    ) -> FactorResult<Self> {
+        const FACTOR: &str = "PhotometricInverseRangeFactor";
+        expect_positive(FACTOR, "fx", k[0])?;
+        expect_positive(FACTOR, "fy", k[1])?;
+        expect_finite(FACTOR, "principal point", k[2..].iter())?;
+        expect_positive(FACTOR, "huber weight", weights.huber)?;
+        expect_positive(FACTOR, "sigma", weights.sigma)?;
+        expect_positive(FACTOR, "dynamic weight", weights.dynamic)?;
+        expect_positive(FACTOR, "exposure ratio", weights.exposure_ratio)?;
         let ray = Vector3::new(
             (point.pixel[0] - k[2]) / k[0],
             (point.pixel[1] - k[3]) / k[1],
@@ -476,7 +466,7 @@ impl<G: RigidPose + Send + Sync + 'static> Factor for PhotometricInverseRangeFac
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(
             variables,
             &[G::REP_SIZE, G::REP_SIZE, SE3::REP_SIZE, 1, 2, 2, 1],
@@ -500,12 +490,17 @@ impl AffinePriorFactor {
     /// # Errors
     ///
     /// A negative or non-finite weight.
-    pub fn new(lambda_a: f64, lambda_b: f64) -> CoreResult<Self> {
-        let ok = |x: f64| x.is_finite() && x >= 0.0;
-        if !ok(lambda_a) || !ok(lambda_b) {
-            return Err(CoreError::InvalidInput(format!(
-                "AffinePriorFactor: invalid weights ({lambda_a}, {lambda_b})"
-            )));
+    pub fn new(lambda_a: f64, lambda_b: f64) -> FactorResult<Self> {
+        for (what, value) in [("lambda_a", lambda_a), ("lambda_b", lambda_b)] {
+            if !(value.is_finite() && value >= 0.0) {
+                return Err(FactorError::InvalidValue {
+                    factor: "AffinePriorFactor",
+                    what,
+                    requirement: "finite and non-negative",
+                    value,
+                }
+                .log());
+            }
         }
         Ok(Self {
             sqrt_lambda: [lambda_a.sqrt(), lambda_b.sqrt()],
@@ -546,7 +541,7 @@ impl Factor for AffinePriorFactor {
         true
     }
 
-    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
         expect_block_sizes(variables, &[2], "AffinePriorFactor expects [Rn(2) affine]")
     }
 }
@@ -1043,19 +1038,19 @@ mod tests {
                 _ => values.len(),
             };
             for i in 0..dof {
-                problem.fix_variable(key, i);
+                problem.fix_variable(key, i)?;
             }
-            key
+            Ok::<_, crate::core::CoreError>(key)
         };
-        let host = fixed(&mut problem, ManifoldType::SE23, s.host.as_param_slice());
+        let host = fixed(&mut problem, ManifoldType::SE23, s.host.as_param_slice())?;
         let extrinsic = fixed(
             &mut problem,
             ManifoldType::SE3,
             s.extrinsic.as_param_slice(),
-        );
-        let aff_h = fixed(&mut problem, ManifoldType::RN, &[0.0, 0.0]);
-        let aff_t = fixed(&mut problem, ManifoldType::RN, &[0.0, 0.0]);
-        let scale = fixed(&mut problem, ManifoldType::RN, &[1.0]);
+        )?;
+        let aff_h = fixed(&mut problem, ManifoldType::RN, &[0.0, 0.0])?;
+        let aff_t = fixed(&mut problem, ManifoldType::RN, &[0.0, 0.0])?;
+        let scale = fixed(&mut problem, ManifoldType::RN, &[1.0])?;
 
         let start = s.target.right_plus(
             &SE23Tangent::from_slice(&[0.015, -0.01, 0.012, 0.004, -0.003, 0.005, 0.0, 0.0, 0.0]),
@@ -1067,14 +1062,14 @@ mod tests {
             DVector::from_column_slice(start.as_param_slice()),
         );
         for i in 6..9 {
-            problem.fix_variable(target, i);
+            problem.fix_variable(target, i)?;
         }
         let mut rho_keys = Vec::new();
         for (n, (point, rho)) in s.points.iter().enumerate() {
             // One depth is held at its true value: with a fixed host and free
             // depths a monocular pair fixes the translation only up to scale.
             let key = if n == 0 {
-                fixed(&mut problem, ManifoldType::RN, &[*rho])
+                fixed(&mut problem, ManifoldType::RN, &[*rho])?
             } else {
                 problem.add_variable(ManifoldType::RN, DVector::from_element(1, rho * 1.08))
             };
@@ -1093,7 +1088,7 @@ mod tests {
                 Box::new(f),
                 None,
                 NoiseModel::null(),
-            );
+            )?;
         }
         let config = LevenbergMarquardtConfig::for_bundle_adjustment().with_max_iterations(60);
         let result = LevenbergMarquardt::with_config(config).optimize(&mut problem)?;

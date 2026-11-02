@@ -37,6 +37,7 @@ use super::format::{
 };
 use super::index::{IndexSource, RecordInfo, read_index, read_special_record, rebuild_index};
 use super::recordformat::RecordLayout;
+use crate::error::ErrorLogging;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -184,18 +185,31 @@ impl VrsReader {
     /// Open a VRS file: header, description and index (rebuilt if missing).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let mut file = File::open(&path)?;
-        let file_len = file.metadata()?.len();
+        let open_error = |source| {
+            VrsError::Open {
+                path: path.clone(),
+                source,
+            }
+            .log()
+        };
+        let mut file = File::open(&path).map_err(open_error)?;
+        let file_len = file.metadata().map_err(open_error)?.len();
 
         let mut head = [0u8; FILE_HEADER_SIZE];
-        let n = file.read(&mut head)?;
-        let header = FileHeader::parse(&head[..n])?
-            .ok_or_else(|| VrsError::NotVrs { path: path.clone() })?;
+        let n = file.read(&mut head).map_err(open_error)?;
+        let header = FileHeader::parse(&head[..n])
+            .map_err(ErrorLogging::log)?
+            .ok_or_else(|| VrsError::NotVrs { path: path.clone() }.log())?;
 
-        let desc_offset = u64::try_from(header.description_record_offset)
-            .map_err(|_| VrsError::corrupt("negative description record offset"))?;
+        let desc_offset = u64::try_from(header.description_record_offset).map_err(|_| {
+            VrsError::NegativeOffset {
+                what: "description record",
+                offset: header.description_record_offset,
+            }
+            .log()
+        })?;
         let (_, desc_payload) = read_special_record(&mut file, desc_offset, file_len)?;
-        let description = Description::parse(&desc_payload)?;
+        let description = Description::parse(&desc_payload).map_err(ErrorLogging::log)?;
 
         let (records, index_source) = match read_index(&mut file, &header, file_len)? {
             Some(records) => (records, IndexSource::File),
@@ -435,7 +449,8 @@ impl VrsReader {
     /// Read record `index`, decompressing its payload into `buf` (cleared
     /// first, so one buffer can be reused for the whole file).
     pub fn read_record_into(&mut self, index: usize, buf: &mut Vec<u8>) -> Result<RecordMeta> {
-        let (info, header) = read_raw_record(&mut self.file, &self.records, index, &mut self.raw)?;
+        let (info, header) = read_raw_record(&mut self.file, &self.records, index, &mut self.raw)
+            .map_err(ErrorLogging::log)?;
         self.codec.decompress(
             header.compression,
             &self.raw[RECORD_HEADER_SIZE..],
@@ -465,7 +480,8 @@ impl VrsReader {
         index: usize,
         raw: &mut Vec<u8>,
     ) -> Result<StoredRecord> {
-        let (info, header) = read_raw_record(&mut self.file, &self.records, index, raw)?;
+        let (info, header) = read_raw_record(&mut self.file, &self.records, index, raw)
+            .map_err(ErrorLogging::log)?;
         let meta = RecordMeta {
             index,
             stream: info.stream,
@@ -566,6 +582,11 @@ impl VrsReader {
     /// Sequential and header-only (the payloads are skipped), so it costs one
     /// small read per record; the hot random-access path never pays for it.
     pub fn verify_record_chain(&mut self) -> Result<Option<ChainBreak>> {
+        self.verify_record_chain_unlogged()
+            .map_err(ErrorLogging::log)
+    }
+
+    fn verify_record_chain_unlogged(&mut self) -> Result<Option<ChainBreak>> {
         let Some(first) = self.records.first() else {
             return Ok(None);
         };
@@ -618,19 +639,20 @@ fn read_raw_record(
     index: usize,
     raw: &mut Vec<u8>,
 ) -> Result<(RecordInfo, RecordHeader)> {
-    let info = *records
-        .get(index)
-        .ok_or_else(|| VrsError::Usage(format!("record index {index} out of range")))?;
+    let info = *records.get(index).ok_or(VrsError::RecordOutOfRange {
+        index,
+        count: records.len(),
+    })?;
     file.seek(SeekFrom::Start(info.offset))?;
     raw.resize(info.size as usize, 0);
     file.read_exact(raw)?;
 
     let header = RecordHeader::parse(raw)?;
     if header.record_size != info.size || header.stream_id() != info.stream {
-        return Err(VrsError::corrupt(format!(
-            "record {index} at offset {} does not match the index",
-            info.offset
-        )));
+        return Err(VrsError::IndexMismatch {
+            index,
+            offset: info.offset,
+        });
     }
     Ok((info, header))
 }

@@ -1,4 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Console output is this CLI's user interface (bag summary tables).
 
 //! Display comprehensive bag file information
@@ -20,13 +19,17 @@ use apex_io::rosbag::transcode::{Dialect, dialect_of, plan_connections};
 use apex_io::rosbag::{BagKind, BagReader, ReaderError};
 use chrono::TimeZone;
 use std::env;
+use std::io::Write as _;
 use std::path::Path;
 
-fn main() -> Result<(), ReaderError> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
-        eprintln!("Usage: {} <bag_path>", args[0]);
-        eprintln!("Accepts a ROS1 .bag, a ROS2 bag directory (sqlite3/mcap), or a bare .mcap");
+        writeln!(std::io::stderr().lock(), "Usage: {} <bag_path>", args[0])?;
+        writeln!(
+            std::io::stderr().lock(),
+            "Accepts a ROS1 .bag, a ROS2 bag directory (sqlite3/mcap), or a bare .mcap"
+        )?;
         std::process::exit(1);
     }
 
@@ -46,15 +49,34 @@ fn main() -> Result<(), ReaderError> {
     let duration_ns = reader.end_time().saturating_sub(reader.start_time());
     let duration_s = duration_ns as f64 / 1_000_000_000.0;
 
-    println!("Bag size:          {}", format_size(total_size));
-    println!("Storage id:        {storage_label}");
-    println!("Duration:          {duration_s:.9}s");
-    println!(
+    writeln!(
+        std::io::stdout().lock(),
+        "Bag size:          {}",
+        format_size(total_size)
+    )?;
+    writeln!(
+        std::io::stdout().lock(),
+        "Storage id:        {storage_label}"
+    )?;
+    writeln!(
+        std::io::stdout().lock(),
+        "Duration:          {duration_s:.9}s"
+    )?;
+    writeln!(
+        std::io::stdout().lock(),
         "Start:             {}",
         format_timestamp(reader.start_time())
-    );
-    println!("End:               {}", format_timestamp(reader.end_time()));
-    println!("Messages:          {}", reader.message_count());
+    )?;
+    writeln!(
+        std::io::stdout().lock(),
+        "End:               {}",
+        format_timestamp(reader.end_time())
+    )?;
+    writeln!(
+        std::io::stdout().lock(),
+        "Messages:          {}",
+        reader.message_count()
+    )?;
 
     let mut connections = reader.connections().to_vec();
     connections.sort_by(|a, b| a.topic.cmp(&b.topic));
@@ -86,10 +108,14 @@ fn main() -> Result<(), ReaderError> {
         } else {
             ""
         };
-        println!(
+        writeln!(
+            std::io::stdout().lock(),
             "{label} {} ({}, {}, {} msgs, {hz}){note}",
-            c.topic, c.message_type, c.serialization_format, c.message_count
-        );
+            c.topic,
+            c.message_type,
+            c.serialization_format,
+            c.message_count
+        )?;
     }
 
     Ok(())

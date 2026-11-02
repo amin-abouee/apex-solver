@@ -10,6 +10,8 @@
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
+use crate::ElementResult;
+use crate::util::check_param_block;
 use crate::{LieGroup, Tangent};
 use nalgebra::{Matrix1, Matrix2, Matrix3, UnitComplex, Vector2, Vector3};
 use std::{
@@ -192,6 +194,10 @@ impl LieGroup for SO2 {
         debug_assert_eq!(s.len(), 1);
         SO2 { theta: s[0] }
     }
+
+    fn validate_params(s: &[f64]) -> ElementResult<()> {
+        check_param_block("SO2", s, Self::REP_SIZE, None)
+    }
 }
 
 /// SO(2) tangent space element representing elements in the Lie algebra so(2).
@@ -342,10 +348,13 @@ impl Tangent<SO2> for SO2Tangent {
     /// * `i` - Index of the generator (must be 0 for SO(2))
     ///
     /// # Returns
-    /// The generator matrix
+    /// The generator matrix, or the zero matrix when `i` is out of range
     fn generator(&self, i: usize) -> <SO2 as LieGroup>::LieAlgebra {
-        assert_eq!(i, 0, "SO(2) only has one generator (index 0)");
-        Matrix2::new(0.0, -1.0, 1.0, 0.0)
+        if i == 0 {
+            Matrix2::new(0.0, -1.0, 1.0, 0.0)
+        } else {
+            Matrix2::zeros()
+        }
     }
 }
 
@@ -489,10 +498,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_so2_generator_invalid_index() {
+    fn test_so2_generator_out_of_range_is_zero_and_checked_form_errors() {
         let tangent = SO2Tangent::new(1.0);
-        let _generator = tangent.generator(1); // Should panic for SO(2)
+        assert_eq!(tangent.generator(1), Matrix2::zeros());
+        assert_eq!(tangent.generator(usize::MAX), Matrix2::zeros());
+        assert_eq!(
+            tangent.try_generator(1).err(),
+            Some(crate::TangentError::GeneratorIndex {
+                group: "SO2",
+                index: 1,
+                dim: 1
+            })
+        );
+        assert!(tangent.try_generator(1 - 1).is_ok());
     }
 
     #[test]

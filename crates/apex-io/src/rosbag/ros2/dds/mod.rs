@@ -33,6 +33,6 @@ pub mod qos_mapping;
 pub mod raw_bytes;
 pub mod subscriber;
 
-pub use error::DdsError;
+pub use error::{DdsError, DdsResult};
 pub use listener::{DdsListener, ReceivedMessage};
 pub use subscriber::{DdsSubscriber, DdsSubscriberConfig};

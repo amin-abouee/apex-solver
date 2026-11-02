@@ -8,7 +8,7 @@
 //! Both the ROS1 concatenated form (`MSG: pkg/Type` sections) and the ROS2
 //! `ros2msg` form parse with the same code.
 
-use crate::rosbag::error::{BagError, Result};
+use super::error::{TranscodeError, TranscodeResult as Result};
 use std::collections::HashMap;
 
 /// md5sum of `std_msgs/Header` (a message type, so its sum feeds parents).
@@ -145,8 +145,10 @@ pub struct Registry {
     defs: HashMap<String, MsgDef>,
 }
 
-fn bad(reason: impl Into<String>) -> BagError {
-    BagError::schema_validation(reason.into())
+fn undefined(name: &str) -> TranscodeError {
+    TranscodeError::UndefinedType {
+        name: name.to_string(),
+    }
 }
 
 /// Fold `pkg/msg/Type` to `pkg/Type`.
@@ -206,7 +208,7 @@ impl Registry {
                     continue;
                 }
                 if trimmed.starts_with("IDL:") {
-                    return Err(bad("IDL message definitions are not supported"));
+                    return Err(TranscodeError::IdlUnsupported);
                 }
             }
             if let Some(last) = sections.last_mut() {
@@ -224,7 +226,7 @@ impl Registry {
                 {
                     continue;
                 }
-                (None, _) => return Err(bad("definition section without a `MSG:` name")),
+                (None, _) => return Err(TranscodeError::SectionWithoutName),
             };
             // First definition wins (embedded definitions override the catalog).
             if self.defs.contains_key(&name) {
@@ -321,10 +323,7 @@ impl Registry {
         if order.iter().any(|s| s == name) {
             return Ok(());
         }
-        let def = self
-            .defs
-            .get(name)
-            .ok_or_else(|| bad(format!("message type '{name}' is not defined")))?;
+        let def = self.defs.get(name).ok_or_else(|| undefined(name))?;
         order.push(name.to_string());
         for f in &def.fields {
             match &f.ty {
@@ -339,10 +338,7 @@ impl Registry {
     }
 
     fn render_body(&self, name: &str, dialect: Dialect, out: &mut String) -> Result<()> {
-        let def = self
-            .defs
-            .get(name)
-            .ok_or_else(|| bad(format!("message type '{name}' is not defined")))?;
+        let def = self.defs.get(name).ok_or_else(|| undefined(name))?;
         for c in &def.constants {
             out.push_str(&format!("{} {}={}\n", c.ty, c.name, c.value));
         }
@@ -368,10 +364,7 @@ impl Registry {
         if let Some(h) = cache.get(name) {
             return Ok(h.clone());
         }
-        let def = self
-            .defs
-            .get(name)
-            .ok_or_else(|| bad(format!("message type '{name}' is not defined")))?;
+        let def = self.defs.get(name).ok_or_else(|| undefined(name))?;
         let mut lines: Vec<String> = def
             .constants
             .iter()
@@ -453,7 +446,9 @@ fn parse_body(pkg: &str, lines: &[&str]) -> Result<MsgDef> {
         let ty_text = it.next().unwrap_or("");
         let rest = it.next().unwrap_or("").trim();
         if rest.is_empty() {
-            return Err(bad(format!("malformed definition line '{line}'")));
+            return Err(TranscodeError::MalformedLine {
+                line: line.to_string(),
+            });
         }
 
         // Constant: `TYPE NAME=value` (the `=` may be spaced).
@@ -498,14 +493,14 @@ fn split_array(ty: &str) -> Result<(&str, ArrayKind)> {
     };
     let inner = ty[open + 1..]
         .strip_suffix(']')
-        .ok_or_else(|| bad(format!("malformed array type '{ty}'")))?;
+        .ok_or_else(|| TranscodeError::MalformedArrayType { ty: ty.to_string() })?;
     let base = &ty[..open];
     if inner.is_empty() || inner.starts_with("<=") {
         return Ok((base, ArrayKind::Dynamic));
     }
     let n = inner
         .parse::<u32>()
-        .map_err(|_| bad(format!("malformed array size in '{ty}'")))?;
+        .map_err(|_| TranscodeError::MalformedArraySize { ty: ty.to_string() })?;
     Ok((base, ArrayKind::Fixed(n)))
 }
 
@@ -518,7 +513,7 @@ fn resolve_type(pkg: &str, base: &str) -> Result<FieldType> {
         return Ok(FieldType::String);
     }
     if base == "wstring" || base.starts_with("wstring<=") || base == "wchar" {
-        return Err(bad("wstring/wchar fields are not supported"));
+        return Err(TranscodeError::WideStringUnsupported);
     }
     Ok(match base {
         "time" | "builtin_interfaces/Time" | "builtin_interfaces/msg/Time" => FieldType::Time,

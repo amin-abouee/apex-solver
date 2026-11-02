@@ -1,8 +1,9 @@
 //! Main writer implementation for ROS2 bag files
 
+use super::error::{Ros2BagError, Ros2BagResult as Result};
 use super::metadata::{BagFileInformation, BagMetadata};
 use super::storage::{StorageWriter, create_storage_writer};
-use crate::rosbag::error::{BagError, Result};
+use crate::error::ErrorLogging;
 use crate::rosbag::types::{
     CompressionFormat, CompressionMode, Connection, MessageDefinition, QosProfile, StoragePlugin,
 };
@@ -59,7 +60,7 @@ impl Writer {
         let bag_path = bag_path.as_ref().to_path_buf();
 
         if bag_path.exists() {
-            return Err(BagError::BagAlreadyExists { path: bag_path });
+            return Err(Ros2BagError::BagAlreadyExists { path: bag_path }.log());
         }
 
         let version = version.unwrap_or(Self::VERSION_LATEST);
@@ -94,7 +95,7 @@ impl Writer {
         format: CompressionFormat,
     ) -> Result<()> {
         if self.is_open {
-            return Err(BagError::BagAlreadyOpen);
+            return Err(Ros2BagError::AlreadyOpen.log());
         }
 
         self.compression_mode = mode;
@@ -119,7 +120,7 @@ impl Writer {
         batch_threshold: usize,
     ) -> Result<()> {
         if self.is_open {
-            return Err(BagError::BagAlreadyOpen);
+            return Err(Ros2BagError::AlreadyOpen.log());
         }
         self.batch_threshold = batch_threshold.max(1);
         Ok(())
@@ -137,7 +138,7 @@ impl Writer {
             return Ok(());
         }
 
-        std::fs::create_dir_all(&self.bag_path)?;
+        std::fs::create_dir_all(&self.bag_path).map_err(|e| Ros2BagError::Io(e).log())?;
 
         let mut storage =
             create_storage_writer(self.storage_plugin, &self.bag_path, self.compression_mode)?;
@@ -161,7 +162,7 @@ impl Writer {
         offered_qos_profiles: Option<Vec<QosProfile>>,
     ) -> Result<Connection> {
         if !self.is_open {
-            return Err(BagError::BagNotOpen);
+            return Err(Ros2BagError::NotOpen.log());
         }
 
         let connection_id = (self.connections.len() + 1) as u32;
@@ -186,15 +187,19 @@ impl Writer {
             if existing_conn.topic == connection.topic
                 && existing_conn.message_type == connection.message_type
             {
-                return Err(BagError::ConnectionAlreadyExists {
+                return Err(Ros2BagError::ConnectionAlreadyExists {
                     topic: connection.topic,
-                });
+                }
+                .log());
             }
         }
 
         let qos_yaml = self.serialize_qos_profiles(&offered_qos_profiles)?;
 
-        let storage = self.storage.as_mut().ok_or(BagError::BagNotOpen)?;
+        let storage = self
+            .storage
+            .as_mut()
+            .ok_or_else(|| Ros2BagError::NotOpen.log())?;
 
         if !self.added_types.contains(&message_type) {
             storage.add_msgtype(&connection)?;
@@ -211,9 +216,6 @@ impl Writer {
 
     /// Write a message to the bag
     pub fn write(&mut self, connection: &Connection, timestamp: u64, data: &[u8]) -> Result<()> {
-        if !self.is_open {
-            return Err(BagError::BagNotOpen);
-        }
         self.check_connection(connection)?;
 
         if self.compression_mode == CompressionMode::Message
@@ -221,16 +223,32 @@ impl Writer {
         {
             let compressor = match &mut self.compressor {
                 Some(c) => c,
-                slot => slot.insert(zstd::bulk::Compressor::new(0)?),
+                slot => slot.insert(
+                    zstd::bulk::Compressor::new(0).map_err(|e| Ros2BagError::ZstdInit(e).log())?,
+                ),
             };
             self.compress_buf.clear();
             self.compress_buf
                 .reserve(zstd::zstd_safe::compress_bound(data.len()));
-            compressor.compress_to_buffer(data, &mut self.compress_buf)?;
-            let storage = self.storage.as_mut().ok_or(BagError::BagNotOpen)?;
+            compressor
+                .compress_to_buffer(data, &mut self.compress_buf)
+                .map_err(|source| {
+                    Ros2BagError::Zstd {
+                        what: "message compression",
+                        source,
+                    }
+                    .log()
+                })?;
+            let storage = self
+                .storage
+                .as_mut()
+                .ok_or_else(|| Ros2BagError::NotOpen.log())?;
             storage.write(connection, timestamp, &self.compress_buf)?;
         } else {
-            let storage = self.storage.as_mut().ok_or(BagError::BagNotOpen)?;
+            let storage = self
+                .storage
+                .as_mut()
+                .ok_or_else(|| Ros2BagError::NotOpen.log())?;
             storage.write(connection, timestamp, data)?;
         }
         self.record_message(connection.id, timestamp);
@@ -239,6 +257,9 @@ impl Writer {
 
     /// Ensure `connection` was registered through [`Self::add_connection`].
     fn check_connection(&self, connection: &Connection) -> Result<()> {
+        if !self.is_open {
+            return Err(Ros2BagError::NotOpen.log());
+        }
         // Ids are assigned sequentially from 1.
         let known = (connection.id as usize)
             .checked_sub(1)
@@ -247,9 +268,7 @@ impl Writer {
         if known {
             Ok(())
         } else {
-            Err(BagError::ConnectionNotFound {
-                topic: connection.topic.clone(),
-            })
+            Err(Ros2BagError::connection_not_found(&connection.topic).log())
         }
     }
 
@@ -265,20 +284,22 @@ impl Writer {
             return Ok(());
         }
 
-        let bag_info = self.generate_metadata()?;
+        let bag_info = self.generate_metadata().map_err(ErrorLogging::log)?;
         let metadata = BagMetadata {
             rosbag2_bagfile_information: bag_info,
         };
-        let metadata_yaml = serde_norway::to_string(&metadata)?;
+        let metadata_yaml =
+            serde_norway::to_string(&metadata).map_err(|e| Ros2BagError::from(e).log())?;
 
         if let Some(mut storage) = self.storage.take() {
             storage.close(self.version, &metadata_yaml)?;
         }
 
-        std::fs::write(&self.metadata_path, &metadata_yaml)?;
+        std::fs::write(&self.metadata_path, &metadata_yaml)
+            .map_err(|e| Ros2BagError::Io(e).log())?;
 
         if self.compression_mode == CompressionMode::File {
-            self.compress_storage_file()?;
+            self.compress_storage_file().map_err(ErrorLogging::log)?;
         }
 
         self.is_open = false;
@@ -300,7 +321,7 @@ impl Writer {
         let bag_file_name = self
             .bag_path
             .file_name()
-            .ok_or_else(|| BagError::writer("bag path has no file name component"))?
+            .ok_or_else(|| Ros2BagError::no_file_name(&self.bag_path))?
             .to_string_lossy();
 
         let storage_file_name = match self.storage_plugin {
@@ -381,7 +402,7 @@ impl Writer {
             return Ok(String::new());
         }
 
-        let yaml = serde_norway::to_string(profiles)?;
+        let yaml = serde_norway::to_string(profiles).map_err(|e| Ros2BagError::from(e).log())?;
         Ok(yaml.trim().to_string())
     }
 
@@ -395,7 +416,7 @@ impl Writer {
         let bag_file_name = self
             .bag_path
             .file_name()
-            .ok_or_else(|| BagError::writer("bag path has no file name component"))?
+            .ok_or_else(|| Ros2BagError::no_file_name(&self.bag_path))?
             .to_string_lossy();
 
         let storage_file = match self.storage_plugin {
@@ -405,7 +426,9 @@ impl Writer {
 
         let ext = storage_file
             .extension()
-            .ok_or_else(|| BagError::writer("storage file has no extension"))?
+            .ok_or_else(|| Ros2BagError::NoExtension {
+                path: storage_file.clone(),
+            })?
             .to_string_lossy();
 
         let compressed_file =
@@ -429,11 +452,11 @@ impl Writer {
         timestamp: u64,
         raw_data: &[u8],
     ) -> Result<()> {
-        if !self.is_open {
-            return Err(BagError::BagNotOpen);
-        }
         self.check_connection(connection)?;
-        let storage = self.storage.as_mut().ok_or(BagError::BagNotOpen)?;
+        let storage = self
+            .storage
+            .as_mut()
+            .ok_or_else(|| Ros2BagError::NotOpen.log())?;
         storage.write(connection, timestamp, raw_data)?;
         self.record_message(connection.id, timestamp);
         Ok(())
@@ -463,6 +486,7 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
+        // `close` logs its own failure; Drop cannot report it.
         let _ = self.close();
     }
 }
@@ -499,7 +523,7 @@ mod tests {
         assert!(writer.is_err());
         assert!(matches!(
             writer.err().ok_or("expected error")?,
-            BagError::BagAlreadyExists { .. }
+            Ros2BagError::BagAlreadyExists { .. }
         ));
         Ok(())
     }
@@ -539,7 +563,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.err().ok_or("expected error")?,
-            BagError::BagAlreadyOpen
+            Ros2BagError::AlreadyOpen
         ));
         Ok(())
     }
@@ -597,7 +621,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.err().ok_or("expected error")?,
-            BagError::ConnectionAlreadyExists { .. }
+            Ros2BagError::ConnectionAlreadyExists { .. }
         ));
         Ok(())
     }
@@ -668,7 +692,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.err().ok_or("expected error")?,
-            BagError::BagAlreadyOpen
+            Ros2BagError::AlreadyOpen
         ));
         Ok(())
     }
@@ -795,7 +819,7 @@ mod tests {
         };
         assert!(matches!(
             writer.write(&fake_conn, 0, &[]),
-            Err(BagError::BagNotOpen)
+            Err(Ros2BagError::NotOpen)
         ));
         Ok(())
     }
@@ -818,7 +842,7 @@ mod tests {
         };
         assert!(matches!(
             writer.write(&unknown_conn, 0, &[]),
-            Err(BagError::ConnectionNotFound { .. })
+            Err(Ros2BagError::ConnectionNotFound { .. })
         ));
         Ok(())
     }
@@ -836,7 +860,7 @@ mod tests {
             None,
             None,
         );
-        assert!(matches!(result, Err(BagError::BagNotOpen)));
+        assert!(matches!(result, Err(Ros2BagError::NotOpen)));
         Ok(())
     }
 

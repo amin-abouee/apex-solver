@@ -46,7 +46,11 @@ impl<'a> Cursor<'a> {
             .pos
             .checked_add(n)
             .filter(|&e| e <= self.buf.len())
-            .ok_or_else(|| VrsError::corrupt("description record truncated"))?;
+            .ok_or(VrsError::Truncated {
+                what: "description record",
+                len: self.buf.len(),
+                need: self.pos.saturating_add(n),
+            })?;
         let s = &self.buf[self.pos..end];
         self.pos = end;
         Ok(s)
@@ -123,8 +127,9 @@ impl Description {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
 
     fn sample() -> Description {
@@ -142,29 +147,33 @@ mod tests {
     }
 
     #[test]
-    fn round_trips() {
+    fn round_trips() -> TestResult {
         let d = sample();
-        assert_eq!(Description::parse(&d.to_bytes()).unwrap(), d);
+        assert_eq!(Description::parse(&d.to_bytes())?, d);
+        Ok(())
     }
 
     #[test]
-    fn empty_description_round_trips() {
+    fn empty_description_round_trips() -> TestResult {
         let d = Description::default();
         assert_eq!(d.to_bytes().len(), 8);
-        assert_eq!(Description::parse(&d.to_bytes()).unwrap(), d);
+        assert_eq!(Description::parse(&d.to_bytes())?, d);
+        Ok(())
     }
 
     #[test]
-    fn truncation_is_an_error_not_a_panic() {
+    fn truncation_is_an_error_not_a_panic() -> TestResult {
         let bytes = sample().to_bytes();
         for cut in 0..bytes.len() {
             assert!(Description::parse(&bytes[..cut]).is_err(), "cut at {cut}");
         }
+        Ok(())
     }
 
     #[test]
-    fn absurd_counts_do_not_allocate_or_hang() {
+    fn absurd_counts_do_not_allocate_or_hang() -> TestResult {
         // nStreams = u32::MAX with no data behind it.
         assert!(Description::parse(&u32::MAX.to_le_bytes()).is_err());
+        Ok(())
     }
 }

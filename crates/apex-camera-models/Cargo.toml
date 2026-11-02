@@ -19,6 +19,7 @@ exclude = ["tests/", "benches/"]
 apex-manifolds.workspace = true
 nalgebra.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

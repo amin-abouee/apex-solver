@@ -13,9 +13,8 @@
 //! Each scenario builds measurements from ground truth, starts the optimizer
 //! from a perturbed state, and asserts the truth is recovered.
 
-#![allow(clippy::print_stderr)]
-
-mod common;
+// `pub` so helpers a given test binary does not call are not reported as dead code.
+pub mod common;
 use common::{
     Trajectory, anchor_rn, anchor_se3, anchor_se23, build_imu_dataset, imu_params, lm_solver,
 };
@@ -78,7 +77,7 @@ fn state_of(pose: &SE3, sb: &SpeedAndBias) -> SE23 {
 /// started with a slightly wrong tilt is. With the states and biases held,
 /// the gravity-frame IMU factor recovers gravity's direction in that world.
 #[test]
-fn gravity_frame_imu_factor_recovers_a_tilted_world() {
+fn gravity_frame_imu_factor_recovers_a_tilted_world() -> Result<(), Box<dyn std::error::Error>> {
     use apex_solver::apex_manifolds::so3::SO3;
     use apex_solver::factors::imu::{ImuMeasurement, ImuSensorReadings};
     // A rig yawing at 0.4 rad/s while accelerating at a constant rate, in a
@@ -105,14 +104,14 @@ fn gravity_frame_imu_factor_recovers_a_tilted_world() {
             );
             let bias = problem.add_variable(ManifoldType::RN, DVector::zeros(6));
             for i in 0..9 {
-                problem.fix_variable(state, i);
+                problem.fix_variable(state, i)?;
             }
             for i in 0..6 {
-                problem.fix_variable(bias, i);
+                problem.fix_variable(bias, i)?;
             }
-            (state, bias)
+            Ok((state, bias))
         })
-        .collect();
+        .collect::<Result<Vec<_>, apex_solver::core::CoreError>>()?;
     for k in 0..keys.len() - 1 {
         let (t0, t1) = (key_times[k], key_times[k + 1]);
         let samples: Vec<ImuMeasurement> = (0..=500)
@@ -135,7 +134,7 @@ fn gravity_frame_imu_factor_recovers_a_tilted_world() {
                 se23::CombinedImuFactor::new(preint),
             )),
             None,
-        );
+        )?;
     }
     let mut solver = lm_solver(100);
     let result = solver
@@ -145,12 +144,13 @@ fn gravity_frame_imu_factor_recovers_a_tilted_world() {
     let up = estimated.rotation_matrix() * Vector3::z();
     let error = up.angle(&(tilt * Vector3::z()));
     assert!(error < 2e-5, "gravity direction error {error:.2e} rad");
+    Ok(())
 }
 
 /// Two views of a textured wall through one camera extrinsic: from a nudged
 /// start, the current body pose comes back, the extrinsic held.
 #[test]
-fn photometric_two_view_factor_recovers_a_pose() {
+fn photometric_two_view_factor_recovers_a_pose() -> Result<(), Box<dyn std::error::Error>> {
     use apex_solver::apex_camera_models::{CameraModel, PinholeCamera};
     use std::sync::Arc;
     let camera = PinholeCamera::from([400.0, 400.0, 320.0, 240.0]);
@@ -199,14 +199,14 @@ fn photometric_two_view_factor_recovers_a_pose() {
         DVector::from_column_slice(start.as_param_slice()),
     );
     for i in 6..9 {
-        problem.fix_variable(x, i);
+        problem.fix_variable(x, i)?;
     }
     let e = problem.add_variable(
         ManifoldType::SE3,
         DVector::from_column_slice(t_sc.as_param_slice()),
     );
     for i in 0..6 {
-        problem.fix_variable(e, i);
+        problem.fix_variable(e, i)?;
     }
     for i in 0..6 {
         for j in 0..4 {
@@ -233,7 +233,7 @@ fn photometric_two_view_factor_recovers_a_pose() {
                 ),
                 None,
                 NoiseModel::null(),
-            );
+            )?;
         }
     }
     let mut solver = lm_solver(50);
@@ -245,10 +245,11 @@ fn photometric_two_view_factor_recovers_a_pose() {
     let rotation_err = (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
     assert!(position_err < 1e-3, "position error {position_err:.2e}");
     assert!(rotation_err < 2e-4, "rotation error {rotation_err:.2e}");
+    Ok(())
 }
 
 #[test]
-fn shared_bias_imu_form_matches_the_combined_form() {
+fn shared_bias_imu_form_matches_the_combined_form() -> Result<(), Box<dyn std::error::Error>> {
     let key_times: Vec<f64> = (0..=5).map(|k| k as f64 * 0.5).collect();
     let (truth, segments) = build_imu_dataset(&key_times);
     let n = key_times.len();
@@ -271,7 +272,7 @@ fn shared_bias_imu_form_matches_the_combined_form() {
         key_times: &[f64],
         bias_truth: &DVector<f64>,
         shared_bias: bool,
-    ) -> Vec<SE23> {
+    ) -> Result<Vec<SE23>, Box<dyn std::error::Error>> {
         let n = truth_states.len();
         let mut problem = Problem::new(JacobianMode::Sparse);
         let mut states = Vec::new();
@@ -302,7 +303,7 @@ fn shared_bias_imu_form_matches_the_combined_form() {
             )),
             None,
             NoiseModel::from_sigmas(&[1e-4; 9]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
         for b in &biases {
             problem.add_residual_block_with_noise(
                 &[*b],
@@ -311,7 +312,7 @@ fn shared_bias_imu_form_matches_the_combined_form() {
                 )),
                 None,
                 NoiseModel::from_sigmas(&[0.05; 6]).unwrap_or_else(|e| panic!("{e}")),
-            );
+            )?;
         }
 
         let params = imu_params();
@@ -334,20 +335,20 @@ fn shared_bias_imu_form_matches_the_combined_form() {
                     &[states[k], states[k + 1], biases[k]],
                     Box::new(se23::ImuFactor::new(preint)),
                     None,
-                );
+                )?;
                 // The companion edge the shared-bias form requires.
                 problem.add_residual_block_with_noise(
                     &[biases[k], biases[k + 1]],
                     Box::new(bias_random_walk()),
                     None,
                     bias_random_walk_noise(&params, dt).unwrap_or_else(|e| panic!("{e}")),
-                );
+                )?;
             } else {
                 problem.add_residual_block(
                     &[states[k], biases[k], states[k + 1], biases[k + 1]],
                     Box::new(se23::CombinedImuFactor::new(preint)),
                     None,
-                );
+                )?;
             }
         }
 
@@ -360,21 +361,21 @@ fn shared_bias_imu_form_matches_the_combined_form() {
                 )),
                 None,
                 NoiseModel::from_sigmas(&[0.1; 9]).unwrap_or_else(|e| panic!("{e}")),
-            );
+            )?;
         }
 
         let mut solver = lm_solver(200);
         let result = solver
             .optimize(&mut problem)
             .unwrap_or_else(|e| panic!("IMU chain failed: {e}"));
-        states
+        Ok(states
             .iter()
             .map(|k| SE23::from_param_slice(result.parameters[*k].as_param_slice()))
-            .collect()
+            .collect())
     }
 
-    let shared = solve(&truth_states, &segments, &key_times, &bias_truth, true);
-    let combined = solve(&truth_states, &segments, &key_times, &bias_truth, false);
+    let shared = solve(&truth_states, &segments, &key_times, &bias_truth, true)?;
+    let combined = solve(&truth_states, &segments, &key_times, &bias_truth, false)?;
 
     for k in 0..n {
         let pos_err = (shared[k].translation() - truth_states[k].translation()).norm();
@@ -388,6 +389,7 @@ fn shared_bias_imu_form_matches_the_combined_form() {
             "the two bias formulations disagree at keyframe {k} by {agree:.4}"
         );
     }
+    Ok(())
 }
 
 // ── 2. SGal(3) IMU factors, including the time coordinate ────────────────────
@@ -402,12 +404,13 @@ fn shared_bias_imu_form_matches_the_combined_form() {
 /// corresponds to `s_i = 0`. Chaining these factors over absolute timestamps is
 /// therefore not yet correct — see the note in `factors::imu::sgal3`.
 #[test]
-fn sgal3_imu_factors_recover_state_and_timestamp() {
-    run_sgal3_interval(false);
-    run_sgal3_interval(true);
+fn sgal3_imu_factors_recover_state_and_timestamp() -> Result<(), Box<dyn std::error::Error>> {
+    run_sgal3_interval(false)?;
+    run_sgal3_interval(true)?;
+    Ok(())
 }
 
-fn run_sgal3_interval(combined: bool) {
+fn run_sgal3_interval(combined: bool) -> Result<(), Box<dyn std::error::Error>> {
     let dt = 0.5_f64;
     let key_times = [0.0_f64, dt];
     let (truth, segments) = build_imu_dataset(&key_times);
@@ -463,7 +466,7 @@ fn run_sgal3_interval(combined: bool) {
         )),
         None,
         NoiseModel::from_sigmas(&[1e-4; 10]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     for b in &biases {
         problem.add_residual_block_with_noise(
             &[*b],
@@ -472,7 +475,7 @@ fn run_sgal3_interval(combined: bool) {
             )),
             None,
             NoiseModel::from_sigmas(&[0.02; 6]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
     }
 
     let mut sb_ref = SpeedAndBias::zeros();
@@ -492,19 +495,19 @@ fn run_sgal3_interval(combined: bool) {
             &[states[0], biases[0], states[1], biases[1]],
             Box::new(sgal3::CombinedImuFactor::new(preint)),
             None,
-        );
+        )?;
     } else {
         problem.add_residual_block(
             &[states[0], states[1], biases[0]],
             Box::new(sgal3::ImuFactor::new(preint)),
             None,
-        );
+        )?;
         problem.add_residual_block_with_noise(
             &[biases[0], biases[1]],
             Box::new(bias_random_walk()),
             None,
             bias_random_walk_noise(&params, dt).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
     }
 
     let mut solver = lm_solver(200);
@@ -524,6 +527,7 @@ fn run_sgal3_interval(combined: bool) {
         "combined={combined}: timestamp error {dt_err:.5} s — \
          the time row should pull it back"
     );
+    Ok(())
 }
 
 // ── 3. GPS in its own frame ──────────────────────────────────────────────────
@@ -531,7 +535,7 @@ fn run_sgal3_interval(combined: bool) {
 /// `GpsFactor` estimates the world→GPS frame transform alongside the poses:
 /// `z = C_GW·(t_WS + C_WS·r_SA) + t_GW`.
 #[test]
-fn gps_factor_recovers_poses_and_the_frame_transform() {
+fn gps_factor_recovers_poses_and_the_frame_transform() -> Result<(), Box<dyn std::error::Error>> {
     let times: Vec<f64> = (0..6).map(|k| k as f64 * 0.4).collect();
     let poses: Vec<SE3> = times.iter().map(|t| Trajectory::pose(*t)).collect();
     let lever = Vector3::new(0.12, -0.05, 0.30);
@@ -567,7 +571,7 @@ fn gps_factor_recovers_poses_and_the_frame_transform() {
             )),
             None,
             NoiseModel::from_sigmas(&[1e-3; 3]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
     }
     // Observability: each pose owns 3 translation DOF and receives exactly one
     // 3D fix, so the poses can absorb *any* frame transform — with a free
@@ -581,7 +585,7 @@ fn gps_factor_recovers_poses_and_the_frame_transform() {
         )),
         None,
         NoiseModel::from_sigmas(&[1e-4; 3]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     problem.add_residual_block_with_noise(
         &[pose_keys[0]],
         Box::new(apex_solver::factors::pose::PriorFactor::new(
@@ -589,7 +593,7 @@ fn gps_factor_recovers_poses_and_the_frame_transform() {
         )),
         None,
         NoiseModel::from_sigmas(&[1e-3; 6]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
 
     for (k, key) in pose_keys.iter().enumerate() {
         let antenna_world =
@@ -599,7 +603,7 @@ fn gps_factor_recovers_poses_and_the_frame_transform() {
             &[*key, frame_key],
             Box::new(GpsFactor::<SE3>::new_isotropic(measured, lever, 0.05)),
             None,
-        );
+        )?;
     }
 
     let mut solver = lm_solver(300);
@@ -618,12 +622,13 @@ fn gps_factor_recovers_poses_and_the_frame_transform() {
         frame_err < 0.1,
         "world→GPS translation error {frame_err:.4}"
     );
+    Ok(())
 }
 
 /// `GpsAsyncFactor` carries a preintegration from the keyframe to the GPS
 /// timestamp, so a fix that lands between keyframes still constrains the state.
 #[test]
-fn gps_async_factor_uses_a_fix_between_keyframes() {
+fn gps_async_factor_uses_a_fix_between_keyframes() -> Result<(), Box<dyn std::error::Error>> {
     let key_times = [0.0f64, 0.5];
     let (truth, segments) = build_imu_dataset(&key_times);
     let params = imu_params();
@@ -684,8 +689,8 @@ fn gps_async_factor_uses_a_fix_between_keyframes() {
         DVector::from_column_slice(SE3::identity().as_param_slice()),
     );
 
-    anchor_se3(&mut problem, frame_key, &SE3::identity());
-    anchor_rn(&mut problem, sb_key, sb_ref.as_slice());
+    anchor_se3(&mut problem, frame_key, &SE3::identity())?;
+    anchor_rn(&mut problem, sb_key, sb_ref.as_slice())?;
     problem.add_residual_block_with_noise(
         &[pose_key],
         Box::new(apex_solver::factors::pose::PoseRotationPrior::new(
@@ -693,13 +698,13 @@ fn gps_async_factor_uses_a_fix_between_keyframes() {
         )),
         None,
         NoiseModel::from_sigmas(&[1e-5; 3]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
 
     problem.add_residual_block(
         &[pose_key, sb_key, frame_key],
         Box::new(GpsAsyncFactor::new_isotropic(measured, lever, 0.02, preint)),
         None,
-    );
+    )?;
 
     let mut solver = lm_solver(150);
     let result = solver
@@ -712,6 +717,7 @@ fn gps_async_factor_uses_a_fix_between_keyframes() {
         err < 0.05,
         "keyframe position error {err:.4}: the mid-segment fix should pull it back"
     );
+    Ok(())
 }
 
 // ── 4. Bearing-only and pose-pose range ──────────────────────────────────────
@@ -719,7 +725,7 @@ fn gps_async_factor_uses_a_fix_between_keyframes() {
 /// A landmark seen only as a direction from several poses, plus a baseline
 /// constraint between two of the poses.
 #[test]
-fn bearing_and_pose_pose_range_recover_a_landmark() {
+fn bearing_and_pose_pose_range_recover_a_landmark() -> Result<(), Box<dyn std::error::Error>> {
     let poses: Vec<SE3> = (0..4)
         .map(|k| {
             SE3::new(
@@ -742,7 +748,7 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
         .collect();
     // Only the landmark is unknown; the poses are anchored.
     for (k, key) in pose_keys.iter().enumerate() {
-        anchor_se3(&mut problem, *key, &poses[k]);
+        anchor_se3(&mut problem, *key, &poses[k])?;
     }
     let lm_key = problem.add_variable(
         ManifoldType::RN,
@@ -757,7 +763,7 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
             &[*key, lm_key],
             Box::new(BearingFactor::<SE3>::new_isotropic(bearing, 0.01)),
             None,
-        );
+        )?;
     }
 
     // A baseline constraint between two poses — a pure pose-pose range edge.
@@ -767,7 +773,7 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
         Box::new(PosePoseRangeFactor::<SE3>::new(baseline)),
         None,
         NoiseModel::from_sigmas(&[0.01]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
 
     let mut solver = lm_solver(150);
     let result = solver
@@ -777,6 +783,7 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
     let hat = result.parameters[lm_key].as_param_slice();
     let err = (Vector3::new(hat[0], hat[1], hat[2]) - landmark).norm();
     assert!(err < 0.05, "landmark error {err:.4} from bearing-only rays");
+    Ok(())
 }
 
 /// The same landmark, seen by `SE23` navigation states instead of `SE3` poses —
@@ -786,7 +793,8 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
 /// The states carry non-zero velocity, which the bearing measurements say
 /// nothing about; the test asserts it is left alone.
 #[test]
-fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
+fn bearing_se23_recovers_a_landmark_without_touching_velocity()
+-> Result<(), Box<dyn std::error::Error>> {
     let states: Vec<SE23> = (0..4)
         .map(|k| {
             SE23::new(
@@ -809,7 +817,7 @@ fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
         })
         .collect();
     for (k, key) in state_keys.iter().enumerate() {
-        anchor_se23(&mut problem, *key, &states[k]);
+        anchor_se23(&mut problem, *key, &states[k])?;
     }
     let lm_key = problem.add_variable(
         ManifoldType::RN,
@@ -823,7 +831,7 @@ fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
             &[*key, lm_key],
             Box::new(BearingFactor::<SE23>::new_isotropic(bearing, 0.01)),
             None,
-        );
+        )?;
     }
 
     let mut solver = lm_solver(150);
@@ -843,6 +851,7 @@ fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
             "state {k} velocity moved by {drift:.3e}; bearing carries no velocity information"
         );
     }
+    Ok(())
 }
 
 /// Inverse-depth landmarks anchored in a host keyframe, reprojected into two
@@ -853,7 +862,7 @@ fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
 /// monocular graph cannot otherwise see); keyframe 2 and every inverse depth
 /// start perturbed and must be recovered.
 #[test]
-fn inverse_depth_plane_recovers_a_pose_and_its_depths() {
+fn inverse_depth_plane_recovers_a_pose_and_its_depths() -> Result<(), Box<dyn std::error::Error>> {
     let states: Vec<SE23> = [0.0, 0.6, 1.25]
         .iter()
         .enumerate()
@@ -902,14 +911,14 @@ fn inverse_depth_plane_recovers_a_pose_and_its_depths() {
             .as_param_slice(),
         )
         .unwrap_or_else(|e| panic!("{e}"));
-    anchor_se23(&mut problem, state_keys[0], &states[0]);
-    anchor_se23(&mut problem, state_keys[1], &states[1]);
+    anchor_se23(&mut problem, state_keys[0], &states[0])?;
+    anchor_se23(&mut problem, state_keys[1], &states[1])?;
 
     let extrinsic_key = problem.add_variable(
         ManifoldType::SE3,
         DVector::from_column_slice(extrinsic.as_param_slice()),
     );
-    anchor_se3(&mut problem, extrinsic_key, &extrinsic);
+    anchor_se3(&mut problem, extrinsic_key, &extrinsic)?;
 
     let noise = NoiseModel::from_sigmas(&[1.0 / 460.0; 2]).unwrap_or_else(|e| panic!("{e}"));
     let mut depth_keys = Vec::new();
@@ -935,7 +944,7 @@ fn inverse_depth_plane_recovers_a_pose_and_its_depths() {
                 Box::new(InverseDepthPlaneFactor::<SE23>::new(bearing, measurement)),
                 None,
                 noise.clone(),
-            );
+            )?;
         }
     }
 
@@ -954,6 +963,7 @@ fn inverse_depth_plane_recovers_a_pose_and_its_depths() {
     let pose = SE23::from_param_slice(result.parameters[state_keys[2]].as_param_slice());
     let error = (pose.translation() - states[2].translation()).norm();
     assert!(error < 1e-3, "keyframe 2 translation error {error:.3e}");
+    Ok(())
 }
 
 /// The same window as above, but with the landmarks spread across a 182° field
@@ -972,7 +982,8 @@ fn inverse_depth_plane_recovers_a_pose_and_its_depths() {
 ///
 /// Here neither happens: the residual is an angle everywhere.
 #[test]
-fn inverse_depth_bearing_recovers_depths_across_a_fisheye_field() {
+fn inverse_depth_bearing_recovers_depths_across_a_fisheye_field()
+-> Result<(), Box<dyn std::error::Error>> {
     let states: Vec<SE23> = [0.0, 0.6, 1.25]
         .iter()
         .enumerate()
@@ -1019,14 +1030,14 @@ fn inverse_depth_bearing_recovers_depths_across_a_fisheye_field() {
             .as_param_slice(),
         )
         .unwrap_or_else(|e| panic!("{e}"));
-    anchor_se23(&mut problem, state_keys[0], &states[0]);
-    anchor_se23(&mut problem, state_keys[1], &states[1]);
+    anchor_se23(&mut problem, state_keys[0], &states[0])?;
+    anchor_se23(&mut problem, state_keys[1], &states[1])?;
 
     let extrinsic_key = problem.add_variable(
         ManifoldType::SE3,
         DVector::from_column_slice(extrinsic.as_param_slice()),
     );
-    anchor_se3(&mut problem, extrinsic_key, &extrinsic);
+    anchor_se3(&mut problem, extrinsic_key, &extrinsic)?;
 
     // One pixel at f = 190, in radians — the TUM VI fisheye's scale.
     let sigma = 1.0 / 190.0;
@@ -1072,7 +1083,7 @@ fn inverse_depth_bearing_recovers_depths_across_a_fisheye_field() {
                 Box::new(factor),
                 None,
                 NoiseModel::null(),
-            );
+            )?;
         }
     }
 
@@ -1103,6 +1114,7 @@ fn inverse_depth_bearing_recovers_depths_across_a_fisheye_field() {
     let pose = SE23::from_param_slice(result.parameters[state_keys[2]].as_param_slice());
     let error = (pose.translation() - states[2].translation()).norm();
     assert!(error < 1e-3, "keyframe 2 translation error {error:.3e}");
+    Ok(())
 }
 
 // ── 5. Epipolar geometry ─────────────────────────────────────────────────────
@@ -1111,7 +1123,8 @@ fn inverse_depth_bearing_recovers_depths_across_a_fisheye_field() {
 /// Scale is unobservable from epipolar geometry, so rotation and the
 /// translation *direction* are what must be recovered.
 #[test]
-fn essential_matrix_factors_recover_rotation_and_direction() {
+fn essential_matrix_factors_recover_rotation_and_direction()
+-> Result<(), Box<dyn std::error::Error>> {
     let t_21 = SE3::new(
         Vector3::new(0.8, -0.2, 0.1),
         UnitQuaternion::from_euler_angles(0.03, 0.08, -0.05),
@@ -1141,7 +1154,7 @@ fn essential_matrix_factors_recover_rotation_and_direction() {
         Box::new(EssentialMatrixFactor::new(p1, p2).unwrap_or_else(|e| panic!("{e}"))),
         None,
         NoiseModel::from_sigmas(&[1e-3; 12]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     // The measured essential matrix as a 6D constraint on the same pose.
     problem.add_residual_block_with_noise(
         &[key],
@@ -1151,7 +1164,7 @@ fn essential_matrix_factors_recover_rotation_and_direction() {
         ),
         None,
         NoiseModel::from_sigmas(&[1e-2; 6]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
 
     let mut solver = lm_solver(150);
     let result = solver
@@ -1170,6 +1183,7 @@ fn essential_matrix_factors_recover_rotation_and_direction() {
     let dir_hat = hat.translation() / hat.translation().norm();
     let dir_err = (dir_hat - trans / trans.norm()).norm();
     assert!(dir_err < 5e-2, "translation direction error {dir_err:.5}");
+    Ok(())
 }
 
 // ── 6. Homogeneous landmark: depth measurements ──────────────────────────────
@@ -1178,7 +1192,7 @@ fn essential_matrix_factors_recover_rotation_and_direction() {
 /// on an R⁴ homogeneous landmark. An RGB-D-style depth reading plus a weak
 /// Euclidean prior should place it.
 #[test]
-fn depth_factors_place_a_homogeneous_landmark() {
+fn depth_factors_place_a_homogeneous_landmark() -> Result<(), Box<dyn std::error::Error>> {
     let t_ws = SE3::new(
         Vector3::new(0.5, -0.2, 1.0),
         UnitQuaternion::from_euler_angles(0.02, -0.03, 0.2),
@@ -1208,27 +1222,27 @@ fn depth_factors_place_a_homogeneous_landmark() {
         ManifoldType::RN,
         DVector::from_vec(vec![1.2, 0.4, 1.6, 1.0]), // off
     );
-    anchor_se3(&mut problem, pose_key, &t_ws);
-    anchor_se3(&mut problem, extrinsics_key, &t_sc);
+    anchor_se3(&mut problem, pose_key, &t_ws)?;
+    anchor_se3(&mut problem, extrinsics_key, &t_sc)?;
 
     problem.add_residual_block(
         &[pose_key, lm_key, extrinsics_key],
         Box::new(DepthFactor::<false>::new_from_stdev(depth_true, 0.02)),
         None,
-    );
+    )?;
     // The one-sided variant is inactive beyond the measurement, so it must not
     // fight the reading above; it only guards against the landmark coming closer.
     problem.add_residual_block(
         &[pose_key, lm_key, extrinsics_key],
         Box::new(OneSidedDepthFactor::new_from_stdev(depth_true, 0.05)),
         None,
-    );
+    )?;
     // Lateral position comes from the dehomogenized-point prior.
     problem.add_residual_block(
         &[lm_key],
         Box::new(HomogeneousPointFactor::new_isotropic(landmark, 0.05)),
         None,
-    );
+    )?;
 
     let mut solver = lm_solver(150);
     let result = solver
@@ -1239,6 +1253,7 @@ fn depth_factors_place_a_homogeneous_landmark() {
     let recovered = Vector3::new(hat[0], hat[1], hat[2]) / hat[3];
     let err = (recovered - landmark).norm();
     assert!(err < 0.05, "homogeneous landmark error {err:.4}");
+    Ok(())
 }
 
 // ── 7. Distance-field ICP and the LOAM plane alias ───────────────────────────
@@ -1247,7 +1262,7 @@ fn depth_factors_place_a_homogeneous_landmark() {
 /// that same factor against a precomputed plane. Three non-parallel planes
 /// determine the translation between the scans.
 #[test]
-fn icp_and_lidar_plane_factors_align_two_scans() {
+fn icp_and_lidar_plane_factors_align_two_scans() -> Result<(), Box<dyn std::error::Error>> {
     let t_wa = SE3::identity();
     let t_wb = SE3::new(
         Vector3::new(0.35, -0.2, 0.15),
@@ -1270,7 +1285,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
         ManifoldType::SE3,
         nudge_se3(&t_wb, [0.2, 0.15, -0.1, 0.0, 0.0, 0.0]),
     );
-    anchor_se3(&mut problem, key_a, &t_wa);
+    anchor_se3(&mut problem, key_a, &t_wa)?;
     // Rotation is not observable from three planes plus one point each.
     problem.add_residual_block_with_noise(
         &[key_b],
@@ -1279,7 +1294,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
         )),
         None,
         NoiseModel::from_sigmas(&[1e-5; 3]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
 
     for (i, (normal, point_on_plane)) in planes.iter().enumerate() {
         // A scan point that lies exactly on the plane when B is at truth.
@@ -1299,7 +1314,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
                     0.02,
                 )),
                 None,
-            );
+            )?;
         } else {
             // Through the LOAM plane helper (the same factor, aliased).
             problem.add_residual_block(
@@ -1311,7 +1326,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
                     0.02,
                 )),
                 None,
-            );
+            )?;
         }
     }
 
@@ -1330,7 +1345,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
                 p_b, edge_point, edge_dir, 0.02,
             )),
             None,
-        );
+        )?;
     }
 
     let mut solver = lm_solver(150);
@@ -1341,6 +1356,7 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
     let hat = se3_of(result.parameters[key_b].as_param_slice());
     let err = (hat.translation() - t_wb.translation()).norm();
     assert!(err < 0.02, "scan pose translation error {err:.4}");
+    Ok(())
 }
 
 /// A LiDAR scan registered to a map of planes on a navigation state: points
@@ -1348,7 +1364,8 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
 /// through a fixed LiDAR extrinsic. The velocity sees no LiDAR constraint and
 /// is held fixed.
 #[test]
-fn lidar_map_plane_factor_registers_a_scan_on_a_navigation_state() {
+fn lidar_map_plane_factor_registers_a_scan_on_a_navigation_state()
+-> Result<(), Box<dyn std::error::Error>> {
     let truth = SE23::new(
         Vector3::new(0.4, -0.3, 1.2),
         Vector3::new(0.5, 0.0, 0.0),
@@ -1379,13 +1396,13 @@ fn lidar_map_plane_factor_registers_a_scan_on_a_navigation_state() {
         DVector::from_column_slice(start.as_param_slice()),
     );
     for velocity_axis in 6..9 {
-        problem.fix_variable(key_x, velocity_axis);
+        problem.fix_variable(key_x, velocity_axis)?;
     }
     let key_e = problem.add_variable(
         ManifoldType::SE3,
         DVector::from_column_slice(t_sl.as_param_slice()),
     );
-    anchor_se3(&mut problem, key_e, &t_sl);
+    anchor_se3(&mut problem, key_e, &t_sl)?;
 
     let world_to_lidar = |w: &Vector3<f64>| {
         let s = truth.rotation_matrix().transpose() * (w - truth.translation());
@@ -1413,7 +1430,7 @@ fn lidar_map_plane_factor_registers_a_scan_on_a_navigation_state() {
                         .unwrap_or_else(|e| panic!("{e}")),
                     ),
                     None,
-                );
+                )?;
                 count += 1;
             }
         }
@@ -1431,6 +1448,7 @@ fn lidar_map_plane_factor_registers_a_scan_on_a_navigation_state() {
     assert!(position_err < 1e-6, "position error {position_err:.2e}");
     assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
     assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
+    Ok(())
 }
 
 /// `L(p) = pᵀ·A·p − 1`: an ellipsoid with semi-axes 3, 2, 1 m, standing in
@@ -1449,7 +1467,8 @@ impl DistanceField for EllipsoidField {
 /// second submap anchored at `X_b` (submap-to-submap) both start perturbed and
 /// are pulled back onto the field's zero level set.
 #[test]
-fn lidar_submap_field_factors_register_a_scan_and_a_submap() {
+fn lidar_submap_field_factors_register_a_scan_and_a_submap()
+-> Result<(), Box<dyn std::error::Error>> {
     let x_a = SE23::new(
         Vector3::new(0.1, 0.2, 0.0),
         Vector3::new(0.4, 0.0, 0.0),
@@ -1479,27 +1498,27 @@ fn lidar_submap_field_factors_register_a_scan_and_a_submap() {
             DVector::from_column_slice(start.as_param_slice()),
         );
         for velocity_axis in 6..9 {
-            problem.fix_variable(key, velocity_axis);
+            problem.fix_variable(key, velocity_axis)?;
         }
-        key
+        Ok::<_, apex_solver::core::CoreError>(key)
     };
-    let key_a = add_state(&mut problem, &x_a, [0.0; 9]);
-    anchor_se23(&mut problem, key_a, &x_a);
+    let key_a = add_state(&mut problem, &x_a, [0.0; 9])?;
+    anchor_se23(&mut problem, key_a, &x_a)?;
     let key_k = add_state(
         &mut problem,
         &x_k,
         [0.08, -0.05, 0.04, 0.02, -0.015, 0.03, 0.0, 0.0, 0.0],
-    );
+    )?;
     let key_b = add_state(
         &mut problem,
         &x_b,
         [-0.06, 0.05, -0.03, -0.02, 0.02, -0.025, 0.0, 0.0, 0.0],
-    );
+    )?;
     let key_e = problem.add_variable(
         ManifoldType::SE3,
         DVector::from_column_slice(t_sl.as_param_slice()),
     );
-    anchor_se3(&mut problem, key_e, &t_sl);
+    anchor_se3(&mut problem, key_e, &t_sl)?;
 
     for i in 0..12 {
         for j in 1..6 {
@@ -1521,7 +1540,7 @@ fn lidar_submap_field_factors_register_a_scan_and_a_submap() {
                         .unwrap_or_else(|e| panic!("{e}")),
                 ),
                 None,
-            );
+            )?;
             let point_b = x_b.inverse(None).act(&world, None, None);
             problem.add_residual_block(
                 &[key_a, key_b],
@@ -1530,7 +1549,7 @@ fn lidar_submap_field_factors_register_a_scan_and_a_submap() {
                         .unwrap_or_else(|e| panic!("{e}")),
                 ),
                 None,
-            );
+            )?;
         }
     }
 
@@ -1554,6 +1573,7 @@ fn lidar_submap_field_factors_register_a_scan_and_a_submap() {
         );
         assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
     }
+    Ok(())
 }
 
 /// FAST-LIVO2's visual update: LiDAR map points with reference patches pull a
@@ -1561,7 +1581,8 @@ fn lidar_submap_field_factors_register_a_scan_and_a_submap() {
 /// textured image (a photometric PnP). The reference patches carry a
 /// brightness offset the zero-mean residual must ignore.
 #[test]
-fn photometric_patch_factor_recovers_a_navigation_state() {
+fn photometric_patch_factor_recovers_a_navigation_state() -> Result<(), Box<dyn std::error::Error>>
+{
     use apex_camera_models::{CameraModel, PinholeCamera};
 
     let texture = |x: f64, y: f64| {
@@ -1593,13 +1614,13 @@ fn photometric_patch_factor_recovers_a_navigation_state() {
         DVector::from_column_slice(start.as_param_slice()),
     );
     for velocity_axis in 6..9 {
-        problem.fix_variable(key_x, velocity_axis);
+        problem.fix_variable(key_x, velocity_axis)?;
     }
     let key_c = problem.add_variable(
         ManifoldType::SE3,
         DVector::from_column_slice(t_sc.as_param_slice()),
     );
-    anchor_se3(&mut problem, key_c, &t_sc);
+    anchor_se3(&mut problem, key_c, &t_sc)?;
 
     let offsets = PhotometricPatchFactor::<SE23, PinholeCamera>::square_offsets(4, 1.0);
     for i in 0..6 {
@@ -1636,7 +1657,7 @@ fn photometric_patch_factor_recovers_a_navigation_state() {
                     .unwrap_or_else(|e| panic!("{e}")),
                 ),
                 None,
-            );
+            )?;
         }
     }
 
@@ -1651,6 +1672,7 @@ fn photometric_patch_factor_recovers_a_navigation_state() {
     assert!(position_err < 1e-5, "position error {position_err:.2e}");
     assert!(rotation_err < 1e-5, "rotation error {rotation_err:.2e}");
     assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
+    Ok(())
 }
 
 /// BALM-style LiDAR bundle adjustment: three navigation states see the six
@@ -1658,7 +1680,8 @@ fn photometric_patch_factor_recovers_a_navigation_state() {
 /// each one plane shared by all three frames, eliminated in closed form —
 /// pull them back with no map and no plane variable.
 #[test]
-fn lidar_plane_bundle_factor_aligns_frames_through_shared_planes() {
+fn lidar_plane_bundle_factor_aligns_frames_through_shared_planes()
+-> Result<(), Box<dyn std::error::Error>> {
     let t_sl = SE3::new(
         Vector3::new(0.02, -0.01, 0.08),
         UnitQuaternion::from_euler_angles(0.0, 0.0, 1.5),
@@ -1696,12 +1719,12 @@ fn lidar_plane_bundle_factor_aligns_frames_through_shared_planes() {
                 DVector::from_column_slice(start.as_param_slice()),
             );
             for velocity_axis in 6..9 {
-                problem.fix_variable(key, velocity_axis);
+                problem.fix_variable(key, velocity_axis)?;
             }
-            key
+            Ok(key)
         })
-        .collect();
-    anchor_se23(&mut problem, keys[0], &truths[0]);
+        .collect::<Result<Vec<_>, apex_solver::core::CoreError>>()?;
+    anchor_se23(&mut problem, keys[0], &truths[0])?;
 
     // Walls of a 6 × 4 × 3 m room, each sampled on a patch every frame sees.
     let walls = [
@@ -1738,7 +1761,7 @@ fn lidar_plane_bundle_factor_aligns_frames_through_shared_planes() {
                     .unwrap_or_else(|e| panic!("{e}")),
             ),
             None,
-        );
+        )?;
     }
 
     let mut solver = lm_solver(100);
@@ -1753,12 +1776,13 @@ fn lidar_plane_bundle_factor_aligns_frames_through_shared_planes() {
         assert!(position_err < 1e-6, "position error {position_err:.2e}");
         assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
     }
+    Ok(())
 }
 
 /// A whole sweep's point-to-plane matches in one factor: a nudged pose
 /// comes back exactly from points on the six walls of a room.
 #[test]
-fn lidar_map_planes_factor_registers_a_sweep_to_a_room() {
+fn lidar_map_planes_factor_registers_a_sweep_to_a_room() -> Result<(), Box<dyn std::error::Error>> {
     let truth = SE23::new(
         Vector3::new(0.4, -0.3, 1.2),
         Vector3::new(0.5, 0.0, 0.0),
@@ -1797,14 +1821,14 @@ fn lidar_map_planes_factor_registers_a_sweep_to_a_room() {
         DVector::from_column_slice(start.as_param_slice()),
     );
     for velocity_axis in 6..9 {
-        problem.fix_variable(key, velocity_axis);
+        problem.fix_variable(key, velocity_axis)?;
     }
     problem.add_residual_block_with_noise(
         &[key],
         Box::new(LidarMapPlanesFactor::<SE23>::new(matches).unwrap_or_else(|e| panic!("{e}"))),
         None,
         NoiseModel::null(),
-    );
+    )?;
     let mut solver = lm_solver(50);
     let result = solver
         .optimize(&mut problem)
@@ -1814,13 +1838,15 @@ fn lidar_map_planes_factor_registers_a_sweep_to_a_room() {
     let rotation_err = (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
     assert!(position_err < 1e-8, "position error {position_err:.2e}");
     assert!(rotation_err < 1e-8, "rotation error {rotation_err:.2e}");
+    Ok(())
 }
 
 /// The moment form of the plane bundle: the same three frames in a room,
 /// each wall a plane over every frame's point moments, anchored by a few
 /// fixed world points — the nudged frames come back exactly.
 #[test]
-fn lidar_plane_moment_factor_aligns_frames_through_shared_planes() {
+fn lidar_plane_moment_factor_aligns_frames_through_shared_planes()
+-> Result<(), Box<dyn std::error::Error>> {
     let truths = [
         SE23::new(
             Vector3::new(0.0, 0.0, 1.2),
@@ -1854,12 +1880,12 @@ fn lidar_plane_moment_factor_aligns_frames_through_shared_planes() {
                 DVector::from_column_slice(start.as_param_slice()),
             );
             for velocity_axis in 6..9 {
-                problem.fix_variable(key, velocity_axis);
+                problem.fix_variable(key, velocity_axis)?;
             }
-            key
+            Ok(key)
         })
-        .collect();
-    anchor_se23(&mut problem, keys[0], &truths[0]);
+        .collect::<Result<Vec<_>, apex_solver::core::CoreError>>()?;
+    anchor_se23(&mut problem, keys[0], &truths[0])?;
 
     let walls = [
         (Vector3::x(), 3.0),
@@ -1903,7 +1929,7 @@ fn lidar_plane_moment_factor_aligns_frames_through_shared_planes() {
                 .unwrap_or_else(|e| panic!("{e}")),
             ),
             None,
-        );
+        )?;
     }
 
     let mut solver = lm_solver(100);
@@ -1918,12 +1944,14 @@ fn lidar_plane_moment_factor_aligns_frames_through_shared_planes() {
         assert!(position_err < 1e-6, "position error {position_err:.2e}");
         assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
     }
+    Ok(())
 }
 
 /// The plane moment factors of a room, summed into one aggregate factor:
 /// the solve is the same, from a fraction of the rows.
 #[test]
-fn aggregated_plane_moment_factors_align_frames_like_the_parts() {
+fn aggregated_plane_moment_factors_align_frames_like_the_parts()
+-> Result<(), Box<dyn std::error::Error>> {
     use apex_solver::factors::aggregate::{AggregateFactor, AggregatePart};
     let mut parts = Vec::new();
     let truths = [
@@ -1959,12 +1987,12 @@ fn aggregated_plane_moment_factors_align_frames_like_the_parts() {
                 DVector::from_column_slice(start.as_param_slice()),
             );
             for velocity_axis in 6..9 {
-                problem.fix_variable(key, velocity_axis);
+                problem.fix_variable(key, velocity_axis)?;
             }
-            key
+            Ok(key)
         })
-        .collect();
-    anchor_se23(&mut problem, keys[0], &truths[0]);
+        .collect::<Result<Vec<_>, apex_solver::core::CoreError>>()?;
+    anchor_se23(&mut problem, keys[0], &truths[0])?;
 
     let walls = [
         (Vector3::x(), 3.0),
@@ -2016,7 +2044,7 @@ fn aggregated_plane_moment_factors_align_frames_like_the_parts() {
         ),
         None,
         NoiseModel::null(),
-    );
+    )?;
 
     let mut solver = lm_solver(100);
     let result = solver
@@ -2030,6 +2058,7 @@ fn aggregated_plane_moment_factors_align_frames_like_the_parts() {
         assert!(position_err < 1e-6, "position error {position_err:.2e}");
         assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
     }
+    Ok(())
 }
 
 // ── 9. Motion constraints: a stopped, ground-bound vehicle ───────────────────
@@ -2039,7 +2068,7 @@ fn aggregated_plane_moment_factors_align_frames_like_the_parts() {
 /// constraint should flatten and drop the pose onto the plane — starting from a
 /// state that is wrong in all three respects.
 #[test]
-fn motion_constraints_pin_a_stopped_ground_vehicle() {
+fn motion_constraints_pin_a_stopped_ground_vehicle() -> Result<(), Box<dyn std::error::Error>> {
     use apex_solver::factors::motion::{
         NonholonomicFactor, PlanarMotionFactor, ZeroAngularRateFactor, ZeroVelocityFactor,
     };
@@ -2073,25 +2102,25 @@ fn motion_constraints_pin_a_stopped_ground_vehicle() {
         Box::new(ZeroVelocityFactor::<SE23>::new()),
         None,
         NoiseModel::from_sigmas(&[0.01; 3]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     problem.add_residual_block_with_noise(
         &[state_key],
         Box::new(NonholonomicFactor::<SE23>::new()),
         None,
         NoiseModel::from_sigmas(&[0.05; 2]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     problem.add_residual_block_with_noise(
         &[bias_key],
         Box::new(ZeroAngularRateFactor::new(measured_rate)),
         None,
         NoiseModel::from_sigmas(&[1e-3; 3]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     problem.add_residual_block_with_noise(
         &[pose_key],
         Box::new(PlanarMotionFactor::<SE3>::new(0.1)),
         None,
         NoiseModel::from_sigmas(&[0.01; 3]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     // The accelerometer half needs anchoring, the gyro half must stay free for
     // ZARU to determine it — so this prior is deliberately anisotropic rather
     // than a uniform `anchor_rn`, which would out-weight ZARU 1000:1.
@@ -2103,7 +2132,7 @@ fn motion_constraints_pin_a_stopped_ground_vehicle() {
         None,
         NoiseModel::from_sigmas(&[1e3, 1e3, 1e3, 1e-4, 1e-4, 1e-4])
             .unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
 
     let mut solver = lm_solver(150);
     let result = solver
@@ -2145,6 +2174,7 @@ fn motion_constraints_pin_a_stopped_ground_vehicle() {
         rotation[(2, 0)],
         rotation[(2, 1)]
     );
+    Ok(())
 }
 
 // ── 10. Extrinsic calibration from reprojections ─────────────────────────────
@@ -2152,7 +2182,8 @@ fn motion_constraints_pin_a_stopped_ground_vehicle() {
 /// A miscalibrated camera-to-body transform, recovered from observations of
 /// known landmarks at known body poses — the offline calibration problem.
 #[test]
-fn extrinsic_projection_recovers_the_camera_to_body_transform() {
+fn extrinsic_projection_recovers_the_camera_to_body_transform()
+-> Result<(), Box<dyn std::error::Error>> {
     use apex_camera_models::{CameraModel, PinholeCamera};
     use apex_solver::factors::visual::ExtrinsicProjectionFactor;
 
@@ -2205,7 +2236,7 @@ fn extrinsic_projection_recovers_the_camera_to_body_transform() {
     // Poses and landmarks are surveyed in a calibration rig; only the
     // extrinsics are unknown.
     for (k, key) in pose_keys.iter().enumerate() {
-        anchor_se3(&mut problem, *key, &poses[k]);
+        anchor_se3(&mut problem, *key, &poses[k])?;
     }
 
     let mut observations = 0usize;
@@ -2220,13 +2251,13 @@ fn extrinsic_projection_recovers_the_camera_to_body_transform() {
                 ManifoldType::RN,
                 DVector::from_vec(vec![point.x, point.y, point.z]),
             );
-            anchor_rn(&mut problem, landmark_key, &[point.x, point.y, point.z]);
+            anchor_rn(&mut problem, landmark_key, &[point.x, point.y, point.z])?;
             problem.add_residual_block_with_noise(
                 &[pose_keys[k], extrinsics_key, landmark_key],
                 Box::new(ExtrinsicProjectionFactor::new(camera, uv)),
                 None,
                 NoiseModel::from_sigmas(&[1.0; 2]).unwrap_or_else(|e| panic!("{e}")),
-            );
+            )?;
             observations += 1;
         }
     }
@@ -2253,6 +2284,7 @@ fn extrinsic_projection_recovers_the_camera_to_body_transform() {
         rotation_error < 5e-3,
         "extrinsic rotation error {rotation_error:.5} rad"
     );
+    Ok(())
 }
 
 // ── 11. Camera-to-IMU time offset ────────────────────────────────────────────
@@ -2261,7 +2293,7 @@ fn extrinsic_projection_recovers_the_camera_to_body_transform() {
 /// reprojections while the platform moves. The offset is only observable
 /// through motion, so the scenario keeps the platform translating and rotating.
 #[test]
-fn time_offset_projection_recovers_the_clock_offset() {
+fn time_offset_projection_recovers_the_clock_offset() -> Result<(), Box<dyn std::error::Error>> {
     use apex_camera_models::{CameraModel, PinholeCamera};
     use apex_solver::apex_manifolds::so3::SO3Tangent;
     use apex_solver::factors::visual::TimeOffsetProjectionFactor;
@@ -2309,7 +2341,7 @@ fn time_offset_projection_recovers_the_clock_offset() {
     // Start the offset at zero: the usual assumption when nobody has calibrated.
     let offset_key = problem.add_variable(ManifoldType::RN, DVector::from_vec(vec![0.0]));
 
-    anchor_se3(&mut problem, extrinsics_key, &extrinsics);
+    anchor_se3(&mut problem, extrinsics_key, &extrinsics)?;
     for (k, key) in state_keys.iter().enumerate() {
         problem.add_residual_block_with_noise(
             &[*key],
@@ -2318,7 +2350,7 @@ fn time_offset_projection_recovers_the_clock_offset() {
             )),
             None,
             NoiseModel::from_sigmas(&[1e-4; 9]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
     }
 
     let mut observations = 0usize;
@@ -2342,13 +2374,13 @@ fn time_offset_projection_recovers_the_clock_offset() {
                 ManifoldType::RN,
                 DVector::from_vec(vec![point.x, point.y, point.z]),
             );
-            anchor_rn(&mut problem, landmark_key, &[point.x, point.y, point.z]);
+            anchor_rn(&mut problem, landmark_key, &[point.x, point.y, point.z])?;
             problem.add_residual_block_with_noise(
                 &[state_keys[k], extrinsics_key, landmark_key, offset_key],
                 Box::new(TimeOffsetProjectionFactor::new(camera, uv, body_rate)),
                 None,
                 NoiseModel::from_sigmas(&[1.0; 2]).unwrap_or_else(|e| panic!("{e}")),
-            );
+            )?;
             observations += 1;
         }
     }
@@ -2364,6 +2396,7 @@ fn time_offset_projection_recovers_the_clock_offset() {
         (recovered - truth_offset).abs() < 1e-3,
         "time offset {recovered:.5} s should recover {truth_offset:.5} s"
     );
+    Ok(())
 }
 
 // ── 8. The coverage guard ────────────────────────────────────────────────────
@@ -2380,7 +2413,8 @@ fn time_offset_projection_recovers_the_clock_offset() {
 /// inverse range from the 11 cm baseline — the body state cancels — and the
 /// later views then recover keyframe 1, which starts 8 cm and 3° off.
 #[test]
-fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
+fn stereo_inverse_range_factors_recover_ranges_and_a_pose() -> Result<(), Box<dyn std::error::Error>>
+{
     use apex_solver::apex_camera_models::{
         CameraModel, DistortionModel, KannalaBrandtCamera, PinholeParams,
     };
@@ -2426,7 +2460,7 @@ fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
         ManifoldType::SE23,
         DVector::from_column_slice(host.as_param_slice()),
     );
-    anchor_se23(&mut problem, host_key, &host);
+    anchor_se23(&mut problem, host_key, &host)?;
     let start = SE23::new(
         Vector3::new(0.36, 0.0, 0.15),
         Vector3::new(0.3, 0.0, 0.0),
@@ -2441,12 +2475,12 @@ fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
             ManifoldType::SE3,
             DVector::from_column_slice(pose.as_param_slice()),
         );
-        anchor_se3(&mut problem, key, pose);
-        key
+        anchor_se3(&mut problem, key, pose)?;
+        Ok::<_, Box<dyn std::error::Error>>(key)
     };
-    let (b0_key, b1_key) = (extrinsic(&t_b0), extrinsic(&t_b1));
+    let (b0_key, b1_key) = (extrinsic(&t_b0)?, extrinsic(&t_b1)?);
     let k_key = problem.add_variable(ManifoldType::RN, intrinsics.clone());
-    anchor_rn(&mut problem, k_key, intrinsics.as_slice());
+    anchor_rn(&mut problem, k_key, intrinsics.as_slice())?;
 
     let mut range_keys = Vec::new();
     let mut truth = Vec::new();
@@ -2470,7 +2504,7 @@ fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
             0.5,
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        problem.add_residual_block(&[b0_key, b1_key, key, k_key], Box::new(stereo), None);
+        problem.add_residual_block(&[b0_key, b1_key, key, k_key], Box::new(stereo), None)?;
 
         let moving = InverseRangeProjectionFactor::<SE23, KannalaBrandtCamera>::new(
             bearing,
@@ -2482,7 +2516,7 @@ fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
             &[host_key, observer_key, b0_key, b1_key, key, k_key],
             Box::new(moving),
             None,
-        );
+        )?;
     }
 
     let mut solver = lm_solver(200);
@@ -2502,12 +2536,13 @@ fn stereo_inverse_range_factors_recover_ranges_and_a_pose() {
     assert!(error < 1e-4, "keyframe 1 translation error {error:.3e}");
     let angle = (solved.rotation_quaternion().inverse() * observer.rotation_quaternion()).angle();
     assert!(angle < 1e-5, "keyframe 1 rotation error {angle:.3e}");
+    Ok(())
 }
 
 /// A four-degree-of-freedom pose graph: nodes are `Rn(4)` `[x, y, z, ψ]` with a
 /// constant tilt, and the relative-pose factors recover position and yaw.
 #[test]
-fn relative_4dof_factor_recovers_positions_and_yaws() {
+fn relative_4dof_factor_recovers_positions_and_yaws() -> Result<(), Box<dyn std::error::Error>> {
     use apex_solver::factors::pose::Relative4DofFactor;
     use nalgebra::Matrix3;
 
@@ -2555,7 +2590,7 @@ fn relative_4dof_factor_recovers_positions_and_yaws() {
             )
         })
         .collect();
-    anchor_rn(&mut problem, keys[0], &truth[0]);
+    anchor_rn(&mut problem, keys[0], &truth[0])?;
 
     let noise =
         NoiseModel::from_sigmas(&[0.01, 0.01, 0.01, 0.005]).unwrap_or_else(|e| panic!("{e}"));
@@ -2569,7 +2604,7 @@ fn relative_4dof_factor_recovers_positions_and_yaws() {
             Box::new(Relative4DofFactor::new(tilts[i], delta, b[3] - a[3])),
             None,
             noise.clone(),
-        );
+        )?;
     }
 
     let result = lm_solver(100)
@@ -2586,6 +2621,7 @@ fn relative_4dof_factor_recovers_positions_and_yaws() {
             );
         }
     }
+    Ok(())
 }
 
 #[test]

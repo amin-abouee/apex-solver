@@ -5,13 +5,20 @@
 //! [kannala-brandt cookbook chapter](../doc/cookbook/src/kannala-brandt.html) for the full
 //! projection, unprojection, and Jacobian derivations.
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
+use crate::error::ErrorLogging;
+use crate::{
+    CameraModel, DistortionModel, EstimationError, EstimationResult, ParamError, ParamResult,
+    PinholeParams, ProjectionError, ProjectionResult, UnprojectionError, UnprojectionResult,
+    check_param_count,
+};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Kannala-Brandt fisheye camera model with 8 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KannalaBrandtCamera {
     pub pinhole: PinholeParams,
+    /// Must be [`DistortionModel::KannalaBrandt`]; the checked constructors reject any
+    /// other variant, and a struct literal with one projects to NaN.
     pub distortion: DistortionModel,
 }
 
@@ -20,7 +27,7 @@ impl KannalaBrandtCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// Returns a [`ParamError`], logged here, if `distortion` is not
     /// [`DistortionModel::KannalaBrandt`].
     ///
     /// # Example
@@ -34,15 +41,12 @@ impl KannalaBrandtCamera {
     /// assert_eq!(camera.get_model_name(), "kannala_brandt");
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    pub fn new(
-        pinhole: PinholeParams,
-        distortion: DistortionModel,
-    ) -> Result<Self, CameraModelError> {
+    pub fn new(pinhole: PinholeParams, distortion: DistortionModel) -> ParamResult<Self> {
         let model = Self {
             pinhole,
             distortion,
         };
-        model.validate_params()?;
+        model.validate_params().map_err(ErrorLogging::log)?;
         Ok(model)
     }
 
@@ -51,7 +55,7 @@ impl KannalaBrandtCamera {
     fn distortion_params(&self) -> (f64, f64, f64, f64) {
         match self.distortion {
             DistortionModel::KannalaBrandt { k1, k2, k3, k4 } => (k1, k2, k3, k4),
-            _ => (0.0, 0.0, 0.0, 0.0),
+            _ => (f64::NAN, f64::NAN, f64::NAN, f64::NAN),
         }
     }
 
@@ -66,16 +70,20 @@ impl KannalaBrandtCamera {
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
         points_2d: &nalgebra::Matrix2xX<f64>,
-    ) -> Result<(), CameraModelError> {
+    ) -> EstimationResult<()> {
         if points_3d.ncols() != points_2d.ncols() {
-            return Err(CameraModelError::InvalidParams(
-                "Number of 2D and 3D points must match".to_string(),
-            ));
+            return Err(EstimationError::PointCountMismatch {
+                points_3d: points_3d.ncols(),
+                points_2d: points_2d.ncols(),
+            }
+            .log());
         }
         if points_3d.ncols() < 4 {
-            return Err(CameraModelError::InvalidParams(
-                "Not enough points for linear estimation (need at least 4)".to_string(),
-            ));
+            return Err(EstimationError::TooFewPoints {
+                got: points_3d.ncols(),
+                need: 4,
+            }
+            .log());
         }
 
         let num_points = points_3d.ncols();
@@ -128,16 +136,16 @@ impl KannalaBrandtCamera {
             };
 
             if (self.pinhole.fx * x_r).abs() < f64::EPSILON && x_r.abs() > f64::EPSILON {
-                return Err(CameraModelError::NumericalError {
-                    operation: "linear_estimation".to_string(),
-                    details: "fx * x_r is zero in linear estimation".to_string(),
-                });
+                return Err(EstimationError::DegenerateFocalLength {
+                    focal: self.pinhole.fx,
+                }
+                .log());
             }
             if (self.pinhole.fy * y_r).abs() < f64::EPSILON && y_r.abs() > f64::EPSILON {
-                return Err(CameraModelError::NumericalError {
-                    operation: "linear_estimation".to_string(),
-                    details: "fy * y_r is zero in linear estimation".to_string(),
-                });
+                return Err(EstimationError::DegenerateFocalLength {
+                    focal: self.pinhole.fy,
+                }
+                .log());
             }
 
             if x_r.abs() > f64::EPSILON {
@@ -162,21 +170,21 @@ impl KannalaBrandtCamera {
         }
 
         let svd = a_mat.svd(true, true);
-        let x_coeffs =
-            svd.solve(&b_vec, f64::EPSILON)
-                .map_err(|e_str| CameraModelError::NumericalError {
-                    operation: "svd_solve".to_string(),
-                    details: format!("SVD solve failed in linear estimation: {e_str}"),
-                })?;
+        let x_coeffs = svd
+            .solve(&b_vec, f64::EPSILON)
+            .map_err(|reason| EstimationError::SvdSolve { reason }.log())?;
 
-        self.distortion = DistortionModel::KannalaBrandt {
-            k1: x_coeffs[0],
-            k2: x_coeffs[1],
-            k3: x_coeffs[2],
-            k4: x_coeffs[3],
+        let estimated = Self {
+            pinhole: self.pinhole,
+            distortion: DistortionModel::KannalaBrandt {
+                k1: x_coeffs[0],
+                k2: x_coeffs[1],
+                k3: x_coeffs[2],
+                k4: x_coeffs[3],
+            },
         };
-
-        self.validate_params()?;
+        estimated.validate_params().map_err(ErrorLogging::log)?;
+        *self = estimated;
         Ok(())
     }
 }
@@ -218,16 +226,11 @@ impl From<&KannalaBrandtCamera> for [f64; 8] {
 /// Creates a camera from a slice with layout `[fx, fy, cx, cy, k1, k2, k3, k4]`.
 /// Returns an error if the slice has fewer than 8 elements.
 impl TryFrom<&[f64]> for KannalaBrandtCamera {
-    type Error = CameraModelError;
+    type Error = ParamError;
 
-    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
-        if params.len() < 8 {
-            return Err(CameraModelError::InvalidParams(format!(
-                "KannalaBrandtCamera requires at least 8 parameters, got {}",
-                params.len()
-            )));
-        }
-        Ok(Self {
+    fn try_from(params: &[f64]) -> ParamResult<Self> {
+        check_param_count("kannala_brandt", 8, params)?;
+        let camera = Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -240,7 +243,9 @@ impl TryFrom<&[f64]> for KannalaBrandtCamera {
                 k3: params[6],
                 k4: params[7],
             },
-        })
+        };
+        camera.validate_params()?;
+        Ok(camera)
     }
 }
 
@@ -270,10 +275,8 @@ impl From<[f64; 8]> for KannalaBrandtCamera {
 /// Creates a `KannalaBrandtCamera` from a parameter slice with full validation.
 /// Unlike [`<KannalaBrandtCamera as TryFrom<&[f64]>>::try_from`], this also calls
 /// [`CameraModel::validate_params`] and returns any validation errors.
-pub fn try_from_params(params: &[f64]) -> Result<KannalaBrandtCamera, CameraModelError> {
-    let camera = KannalaBrandtCamera::try_from(params)?;
-    camera.validate_params()?;
-    Ok(camera)
+pub fn try_from_params(params: &[f64]) -> ParamResult<KannalaBrandtCamera> {
+    KannalaBrandtCamera::try_from(params).map_err(ErrorLogging::log)
 }
 
 impl CameraModel for KannalaBrandtCamera {
@@ -282,15 +285,15 @@ impl CameraModel for KannalaBrandtCamera {
     type PointJacobian = SMatrix<f64, 2, 3>;
 
     /// Projects a 3D point in the camera frame to 2D image coordinates.
-    /// Returns [`CameraModelError::PointBehindCamera`] if the point lies at or behind
+    /// Returns [`ProjectionError::PointBehindCamera`] if the point lies at or behind
     /// the camera.
-    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
+    fn project(&self, p_cam: &Vector3<f64>) -> ProjectionResult<Vector2<f64>> {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
         if !self.check_projection_condition(z) {
-            return Err(CameraModelError::PointBehindCamera {
+            return Err(ProjectionError::PointBehindCamera {
                 z,
                 min_z: crate::GEOMETRIC_PRECISION,
             });
@@ -326,9 +329,10 @@ impl CameraModel for KannalaBrandtCamera {
     }
 
     /// Unprojects a 2D image point to a unit 3D ray. Solves for the incidence angle
-    /// θ with Newton-Raphson, then converts to a 3D direction. Returns
-    /// [`CameraModelError::NumericalError`] if the derivative becomes too small.
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+    /// θ with Newton-Raphson, then converts to a 3D direction. Returns an
+    /// [`UnprojectionError`] for a pixel outside the field of view, a vanishing
+    /// derivative, or a Newton solve that diverges or does not converge.
+    fn unproject(&self, point_2d: &Vector2<f64>) -> UnprojectionResult<Vector3<f64>> {
         let u = point_2d.x;
         let v = point_2d.y;
 
@@ -342,12 +346,13 @@ impl CameraModel for KannalaBrandtCamera {
         // model's valid field of view are REJECTED rather than silently
         // clamped — clamping rewrote the input ray and returned a direction
         // that never projected back to the pixel (ftheta behaves the same).
-        if !ru.is_finite() || ru > std::f64::consts::PI / 2.0 {
-            return Err(CameraModelError::NumericalError {
-                operation: "unprojection".to_string(),
-                details: format!(
-                    "undistorted radius ru = {ru} is outside the KB model's valid domain (0, pi/2]"
-                ),
+        if !ru.is_finite() {
+            return Err(UnprojectionError::NonFinitePixel);
+        }
+        if ru > std::f64::consts::FRAC_PI_2 {
+            return Err(UnprojectionError::RadiusOutOfDomain {
+                radius: ru,
+                max: std::f64::consts::FRAC_PI_2,
             });
         }
 
@@ -375,10 +380,7 @@ impl CameraModel for KannalaBrandtCamera {
                 1.0 + 3.0 * k1_theta2 + 5.0 * k2_theta4 + 7.0 * k3_theta6 + 9.0 * k4_theta8;
 
             if f_prime.abs() < f64::EPSILON {
-                return Err(CameraModelError::NumericalError {
-                    operation: "unprojection".to_string(),
-                    details: "Derivative too small in KB unprojection".to_string(),
-                });
+                return Err(UnprojectionError::SingularJacobian);
             }
 
             let delta = f / f_prime;
@@ -392,10 +394,7 @@ impl CameraModel for KannalaBrandtCamera {
         // Post-Newton convergence gate (mirrors `ftheta::unproject`): a
         // non-converged or diverged theta must not silently become a ray.
         if !theta.is_finite() || theta < 0.0 {
-            return Err(CameraModelError::NumericalError {
-                operation: "unprojection".to_string(),
-                details: format!("Newton-Raphson diverged, theta={theta}"),
-            });
+            return Err(UnprojectionError::Diverged { theta });
         }
         let theta2 = theta * theta;
         let residual_f = theta
@@ -406,12 +405,9 @@ impl CameraModel for KannalaBrandtCamera {
                 + k4 * theta2 * theta2 * theta2 * theta2)
             - ru;
         if residual_f.abs() > crate::CONVERGENCE_THRESHOLD {
-            return Err(CameraModelError::NumericalError {
-                operation: "unprojection".to_string(),
-                details: format!(
-                    "Newton-Raphson did not converge after {MAX_ITER} iterations: |f(theta)| = {}",
-                    residual_f.abs()
-                ),
+            return Err(UnprojectionError::NotConverged {
+                iterations: MAX_ITER,
+                residual: residual_f.abs(),
             });
         }
 
@@ -573,10 +569,12 @@ impl CameraModel for KannalaBrandtCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any rule is violated.
-    fn validate_params(&self) -> Result<(), CameraModelError> {
+    /// Returns a [`ParamError`] if any rule is violated.
+    fn validate_params(&self) -> ParamResult<()> {
         self.pinhole.validate()?;
-        self.get_distortion().validate()
+        self.distortion
+            .expect_variant("kannala_brandt", "KannalaBrandt")?;
+        self.distortion.validate()
     }
 
     /// Returns the pinhole parameters.
@@ -959,17 +957,12 @@ mod tests {
             Vector3::new(-0.4, 0.1, 2.0),
         ]);
         let batch = camera.project_batch(&pts);
-        for i in 0..3 {
-            let col = pts.column(i);
+        assert_eq!(batch.len(), 3);
+        for (i, (col, uv)) in pts.column_iter().zip(&batch).enumerate() {
             let p = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
-            assert!(
-                (batch[(0, i)] - p.x).abs() < 1e-10,
-                "batch u mismatch at col {i}"
-            );
-            assert!(
-                (batch[(1, i)] - p.y).abs() < 1e-10,
-                "batch v mismatch at col {i}"
-            );
+            let uv = (*uv)?;
+            assert!((uv.x - p.x).abs() < 1e-10, "batch u mismatch at col {i}");
+            assert!((uv.y - p.y).abs() < 1e-10, "batch v mismatch at col {i}");
         }
         Ok(())
     }

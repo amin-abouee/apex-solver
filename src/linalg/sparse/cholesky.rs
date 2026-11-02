@@ -74,10 +74,11 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
         } else {
             // Create new symbolic factorization and cache it
             let new_sym = SymbolicLlt::try_new(hessian.symbolic(), Side::Lower).map_err(|e| {
-                LinAlgError::FactorizationFailed(
-                    "Symbolic Cholesky decomposition failed".to_string(),
-                )
-                .log_with_source(e)
+                LinAlgError::Symbolic {
+                    context: "the normal equations",
+                    source: e.into(),
+                }
+                .log()
             })?;
             // Cache it (clone is cheap due to reference counting)
             self.symbolic_factorization = Some(new_sym.clone());
@@ -85,13 +86,8 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
         };
 
         // Perform numeric factorization using the symbolic structure
-        let cholesky =
-            Llt::try_new_with_symbolic(sym, hessian.as_ref(), Side::Lower).map_err(|e| {
-                LinAlgError::SingularMatrix(
-                    "Cholesky factorization failed (matrix may be singular)".to_string(),
-                )
-                .log_with_source(e)
-            })?;
+        let cholesky = Llt::try_new_with_symbolic(sym, hessian.as_ref(), Side::Lower)
+            .map_err(|e| LinAlgError::factorization("the normal equations", e.into()))?;
 
         let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);
@@ -122,10 +118,11 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
             // Create new symbolic factorization and cache it
             let new_sym =
                 SymbolicLlt::try_new(augmented_hessian.symbolic(), Side::Lower).map_err(|e| {
-                    LinAlgError::FactorizationFailed(
-                        "Symbolic Cholesky decomposition failed for augmented system".to_string(),
-                    )
-                    .log_with_source(e)
+                    LinAlgError::Symbolic {
+                        context: "the damped normal equations",
+                        source: e.into(),
+                    }
+                    .log()
                 })?;
             // Cache it (clone is cheap due to reference counting)
             self.symbolic_factorization = Some(new_sym.clone());
@@ -134,12 +131,7 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
 
         // Perform numeric factorization
         let cholesky = Llt::try_new_with_symbolic(sym, augmented_hessian.as_ref(), Side::Lower)
-            .map_err(|e| {
-                LinAlgError::SingularMatrix(
-                    "Cholesky factorization failed (matrix may be singular)".to_string(),
-                )
-                .log_with_source(e)
-            })?;
+            .map_err(|e| LinAlgError::factorization("the damped normal equations", e.into()))?;
 
         let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);

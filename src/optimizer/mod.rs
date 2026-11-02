@@ -10,11 +10,8 @@ use crate::core::VarKey;
 use crate::core::problem::Problem;
 use crate::core::variable::ManifoldVariable;
 use crate::error::ErrorLogging;
-use crate::linalg::{
-    self, JacobianMode, LinearSolver, SparseCholeskySolver, SparseMode, SparseQRSolver,
-};
+use crate::linalg::{self, JacobianMode, LinearSolver, SparseMode};
 use crate::linearizer::SymbolicStructure;
-use faer::sparse::{SparseColMat, Triplet};
 use faer::{Mat, MatRef};
 use slotmap::{SecondaryMap, SlotMap};
 use std::time::{self, Duration};
@@ -61,87 +58,118 @@ impl Display for OptimizerType {
     }
 }
 
-/// Optimizer-specific error types for apex-solver
+/// Errors of the optimization algorithms.
+///
+/// Module errors from below are wrapped with the context of the hop and keep
+/// the original as their source; they were logged where they were built, so
+/// the optimizer propagates them with a bare `?`.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum OptimizerError {
-    /// Linear system solve failed during optimization
-    #[error("Linear system solve failed: {0}")]
-    LinearSolveFailed(String),
-
-    /// Maximum iterations reached without achieving convergence
-    #[error("Maximum iterations ({max_iters}) reached without convergence")]
-    MaxIterationsReached { max_iters: usize },
-
-    /// Trust region radius became too small
-    #[error("Trust region radius became too small: {radius:.6e} < {min_radius:.6e}")]
-    TrustRegionFailure { radius: f64, min_radius: f64 },
-
-    /// Damping parameter became too large (LM-specific)
-    #[error("Damping parameter became too large: {damping:.6e} > {max_damping:.6e}")]
-    DampingFailure { damping: f64, max_damping: f64 },
-
-    /// Cost increased unexpectedly when it should decrease
-    #[error("Cost increased unexpectedly: {old_cost:.6e} -> {new_cost:.6e}")]
-    CostIncrease { old_cost: f64, new_cost: f64 },
-
-    /// Jacobian computation failed
-    #[error("Jacobian computation failed: {0}")]
-    JacobianFailed(String),
-
-    /// Invalid optimization parameters provided
-    #[error("Invalid optimization parameters: {0}")]
-    InvalidParameters(String),
-
-    /// Numerical instability detected (NaN, Inf in cost, gradient, or parameters)
-    #[error("Numerical instability detected: {0}")]
-    NumericalInstability(String),
-
-    /// Linear algebra operation failed
-    ///
-    /// **Convention**: When a `LinAlgError` occurs during optimization, it wraps
-    /// here via `?` to preserve optimizer context. This ensures the error
-    /// propagates as `ApexSolverError::Optimizer(OptimizerError::LinAlg(...))`
-    /// at the API level, not `ApexSolverError::LinearAlgebra(...)`.
-    #[error("Linear algebra error: {0}")]
+    /// The linear solver failed (factorization, Schur setup, PCG).
+    #[error("linear solve failed")]
     LinAlg(#[from] linalg::LinAlgError),
 
-    /// Core module error (problem construction, factor linearization)
-    ///
-    /// Wraps errors from the core module that occur during optimization,
-    /// such as symbolic structure failures or parallel computation errors.
-    #[error("Core error: {0}")]
+    /// Problem setup failed before the first iteration.
+    #[error("problem setup failed")]
     Core(#[from] crate::core::CoreError),
 
-    /// Linearizer error (Jacobian assembly, symbolic structure)
-    ///
-    /// Wraps errors from the linearizer module that occur during optimization,
-    /// such as symbolic structure failures or variable mapping errors.
-    #[error("Linearizer error: {0}")]
+    /// Residual or Jacobian assembly failed.
+    #[error("linearization failed")]
     Linearizer(#[from] crate::linearizer::LinearizerError),
 
-    /// Problem has no variables to optimize
-    #[error("Problem has no variables to optimize")]
-    EmptyProblem,
+    /// A linear solve returned a step with a NaN or infinite entry.
+    #[error("{optimizer} computed a step with a NaN or infinite entry at index {index}")]
+    NonFiniteStep {
+        optimizer: &'static str,
+        index: usize,
+    },
 
-    /// Problem has no residual blocks
-    #[error("Problem has no residual blocks")]
-    NoResidualBlocks,
+    /// A linear solver that does not match the problem's Jacobian mode.
+    #[error("{optimizer} in {mode} Jacobian mode supports {supported}; requested {requested}")]
+    UnsupportedSolver {
+        optimizer: &'static str,
+        mode: &'static str,
+        supported: &'static str,
+        requested: linalg::LinearSolverType,
+    },
 
-    /// Jacobi scaling matrix creation failed
-    #[error("Failed to create Jacobi scaling matrix: {0}")]
-    JacobiScalingCreation(String),
+    /// A finite variable bound, which no optimizer enforces yet: solving
+    /// would silently return the unconstrained answer.
+    #[error(
+        "variable {key:?} component {index} has bound [{lower}, {upper}], but no optimizer \
+         enforces variable bounds yet; remove it with Problem::remove_variable_bounds"
+    )]
+    BoundsUnsupported {
+        key: crate::core::VarKey,
+        index: usize,
+        lower: f64,
+        upper: f64,
+    },
 
-    /// Jacobi scaling not initialized when expected
+    /// Jacobi scaling enabled but never built.
     #[error("Jacobi scaling not initialized")]
     JacobiScalingNotInitialized,
 
-    /// Unknown or unsupported linear solver type
-    #[error("Unknown linear solver type: {0}")]
-    UnknownLinearSolver(String),
+    /// The linear solver holds no gradient or Hessian after a solve.
+    #[error("the linear solver has no {what} after a successful solve")]
+    MissingSolverState { what: &'static str },
+
+    /// Dog Leg could not solve for its Gauss-Newton step at any damping.
+    #[error("Gauss-Newton step failed after {attempts} damping attempts (mu = {mu:.3e})")]
+    DampingExhausted {
+        attempts: usize,
+        mu: f64,
+        #[source]
+        source: Option<linalg::LinAlgError>,
+    },
+
+    /// A step vector whose length disagrees with the free columns of the
+    /// variables it is applied to.
+    #[error("step has {actual} entries, the variables have {expected} free columns")]
+    StepSize { expected: usize, actual: usize },
+
+    /// A step applied to a variable that is not in the variable map.
+    #[error("step applied to unknown variable {key:?}")]
+    UnknownVariable { key: crate::core::VarKey },
 }
 
 /// Result type for optimizer operations
 pub type OptimizerResult<T> = Result<T, OptimizerError>;
+
+/// Rejects a step with a NaN or infinite entry. The solvers that factorize
+/// report their own failures, but a solve can still return a non-finite step
+/// without one (an overflowing normal matrix, a degenerate QR), and applying it
+/// would poison every variable.
+pub(crate) fn ensure_finite_step(
+    step: &Mat<f64>,
+    optimizer: &'static str,
+) -> Result<(), OptimizerError> {
+    let mut index = 0;
+    for column in 0..step.ncols() {
+        for row in 0..step.nrows() {
+            if !step[(row, column)].is_finite() {
+                return Err(OptimizerError::NonFiniteStep { optimizer, index }.log());
+            }
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
+/// The error for a linear solve the optimizer gives up on.
+///
+/// A [numerical](linalg::LinAlgError::is_numerical) failure is not logged
+/// where it is built, since a larger damping may cure it, so it is logged
+/// here, once, with its chain. Every other linear-algebra error was logged
+/// at its origin and passes through unlogged.
+pub(crate) fn linear_solve_failed(error: linalg::LinAlgError) -> OptimizerError {
+    if error.is_numerical() {
+        OptimizerError::LinAlg(error).log_chain()
+    } else {
+        OptimizerError::LinAlg(error)
+    }
+}
 
 /// Detailed convergence information.
 #[derive(Debug, Clone)]
@@ -202,8 +230,6 @@ pub enum OptimizationStatus {
     IllConditionedJacobian,
     /// NaN or Inf detected in cost or parameters
     InvalidNumericalValues,
-    /// Other failure
-    Failed(String),
 }
 
 impl Display for OptimizationStatus {
@@ -234,7 +260,6 @@ impl Display for OptimizationStatus {
             OptimizationStatus::InvalidNumericalValues => {
                 write!(f, "Invalid numerical values (NaN/Inf) detected")
             }
-            OptimizationStatus::Failed(msg) => write!(f, "Failed: {msg}"),
         }
     }
 }
@@ -268,7 +293,7 @@ pub struct SolverResult<T> {
 
 /// Type alias for the result returned by all optimizer `optimize()` calls.
 pub type OptimizeResult =
-    Result<SolverResult<SlotMap<VarKey, Box<dyn ManifoldVariable>>>, crate::error::ApexSolverError>;
+    Result<SolverResult<SlotMap<VarKey, Box<dyn ManifoldVariable>>>, OptimizerError>;
 
 /// Unified optimizer interface. Object-safe — `Box<dyn Optimizer>` is valid.
 ///
@@ -300,11 +325,17 @@ pub trait Optimizer {
 /// specified by `variable_order`. Each variable's tangent space dimension determines
 /// how many elements it occupies in the step vector.
 ///
+/// # Errors
+///
+/// [`OptimizerError::UnknownVariable`] for a key of `variable_order` that is
+/// not in `variables`, or [`OptimizerError::StepSize`] when `step` does not
+/// have exactly one entry per free column. Both are checked before any
+/// variable is touched.
 pub fn apply_parameter_step(
     variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     step: MatRef<f64>,
     variable_order: &[VarKey],
-) -> f64 {
+) -> OptimizerResult<f64> {
     apply_signed_parameter_step(variables, step, variable_order, 1.0)
 }
 
@@ -317,7 +348,21 @@ fn apply_signed_parameter_step(
     step: MatRef<f64>,
     variable_order: &[VarKey],
     sign: f64,
-) -> f64 {
+) -> OptimizerResult<f64> {
+    let mut free_columns = 0;
+    for &key in variable_order {
+        let var = variables
+            .get(key)
+            .ok_or_else(|| OptimizerError::UnknownVariable { key }.log())?;
+        free_columns += var.free_dof();
+    }
+    if step.nrows() != free_columns {
+        return Err(OptimizerError::StepSize {
+            expected: free_columns,
+            actual: step.nrows(),
+        }
+        .log());
+    }
     // `step` is sized to `total_dof` from `build_variable_index_map`, i.e.
     // free columns only (see ISSUE-0003) — its norm below is already the
     // norm of the step actually applied, with no fixed-coordinate entries
@@ -348,7 +393,7 @@ fn apply_signed_parameter_step(
         }
     }
 
-    step.norm_l2()
+    Ok(step.norm_l2())
 }
 
 /// Apply negative parameter step to rollback variables.
@@ -361,12 +406,16 @@ fn apply_signed_parameter_step(
 /// * `step` - Full step vector in tangent space (faer matrix view) to negate
 /// * `variable_order` - Ordered list of variable names (defines indexing into step vector)
 ///
+/// # Errors
+///
+/// As [`apply_parameter_step`].
 pub fn apply_negative_parameter_step(
     variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     step: MatRef<f64>,
     variable_order: &[VarKey],
-) {
-    apply_signed_parameter_step(variables, step, variable_order, -1.0);
+) -> OptimizerResult<()> {
+    apply_signed_parameter_step(variables, step, variable_order, -1.0)?;
+    Ok(())
 }
 
 pub fn compute_cost(residual: &Mat<f64>) -> f64 {
@@ -480,62 +529,6 @@ pub fn compute_parameter_norm(variables: &SlotMap<VarKey, Box<dyn ManifoldVariab
         .sqrt()
 }
 
-/// Create Jacobi scaling diagonal matrix from Jacobian column norms.
-///
-/// The scaling factor for each column is `1 / (1 + ||col||)`, which normalizes
-/// the columns to improve conditioning of the linear system.
-#[deprecated(
-    since = "1.6.0",
-    note = "quadratic in the number of columns; the optimizers use \
-            `AssemblyBackend::compute_column_norms` + `apply_column_scaling`, which are \
-            linear in nnz and parallel"
-)]
-pub fn create_jacobi_scaling(
-    jacobian: &SparseColMat<usize, f64>,
-) -> Result<SparseColMat<usize, f64>, OptimizerError> {
-    let cols = jacobian.ncols();
-    let jacobi_scaling_vec: Vec<Triplet<usize, usize, f64>> = (0..cols)
-        .map(|c| {
-            let col_norm_squared: f64 = jacobian
-                .triplet_iter()
-                .filter(|t| t.col == c)
-                .map(|t| t.val * t.val)
-                .sum();
-            let col_norm = col_norm_squared.sqrt();
-            let scaling = 1.0 / (1.0 + col_norm);
-            Triplet::new(c, c, scaling)
-        })
-        .collect();
-
-    SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec)
-        .map_err(|e| OptimizerError::JacobiScalingCreation(e.to_string()).log_with_source(e))
-}
-
-/// Process Jacobian by applying Jacobi scaling (created on first iteration).
-///
-/// On `iteration == 0`, creates the scaling matrix and stores it. On subsequent
-/// iterations, reuses the cached scaling.
-#[deprecated(
-    since = "1.6.0",
-    note = "builds a diagonal scaling matrix and multiplies; the optimizers scale the \
-            CSC values in place via `AssemblyBackend::apply_column_scaling`"
-)]
-#[allow(deprecated)]
-pub fn process_jacobian(
-    jacobian: &SparseColMat<usize, f64>,
-    jacobi_scaling: &mut Option<SparseColMat<usize, f64>>,
-    iteration: usize,
-) -> Result<SparseColMat<usize, f64>, OptimizerError> {
-    if iteration == 0 {
-        let scaling = create_jacobi_scaling(jacobian)?;
-        *jacobi_scaling = Some(scaling);
-    }
-    let scaling = jacobi_scaling
-        .as_ref()
-        .ok_or_else(|| OptimizerError::JacobiScalingNotInitialized.log())?;
-    Ok(jacobian * scaling)
-}
-
 /// Assign each variable a contiguous range of tangent-space **free** columns.
 ///
 /// Ordering follows `variables.keys()` — slotmap insertion order, which is already
@@ -595,14 +588,13 @@ pub fn initialize_optimization_state(problem: &mut Problem) -> OptimizerResult<I
             .find(|&(_, &(lower, upper))| lower > f64::NEG_INFINITY || upper < f64::INFINITY)
             .map(|(&idx, &(lower, upper))| (k, idx, lower, upper))
     }) {
-        let core_err = crate::core::CoreError::InvalidConstraint(format!(
-            "variable {var_key:?} component {idx} has bound [{lower}, {upper}], but no \
-             optimizer currently enforces variable bounds during the solve — set_variable_bounds \
-             is accepted and stored but silently ignored, which would return the unconstrained \
-             answer; remove the bound (Problem::remove_variable_bounds) or wait for constrained \
-             optimization support"
-        ));
-        return Err(OptimizerError::from(core_err));
+        return Err(OptimizerError::BoundsUnsupported {
+            key: var_key,
+            index: idx,
+            lower,
+            upper,
+        }
+        .log());
     }
 
     let mut variables = problem.variables.clone();
@@ -824,7 +816,7 @@ pub(crate) fn iteration_preamble<M: AssemblyBackend>(
     iteration: usize,
     max_condition_number: Option<f64>,
     jacobian_evaluations: &mut usize,
-) -> Result<IterationPreamble<M>, crate::error::ApexSolverError> {
+) -> OptimizerResult<IterationPreamble<M>> {
     // Evaluate residuals and Jacobian using the assembly mode
     let (residuals, jacobian) = M::assemble(
         problem,
@@ -944,44 +936,34 @@ pub fn compute_step_quality(current_cost: f64, new_cost: f64, predicted_reductio
     }
 }
 
-/// Create a sparse linear solver for the given solver type.
-///
-/// Never referenced by the optimizers — each dispatches its own supported
-/// solver/mode combinations and rejects the rest. Superseded; scheduled for
-/// removal.
-#[deprecated(
-    since = "1.5.0",
-    note = "no optimizer calls this; construct the desired solver directly"
-)]
-pub fn create_linear_solver(
-    solver_type: &linalg::LinearSolverType,
-) -> Box<dyn LinearSolver<SparseMode>> {
-    match solver_type {
-        linalg::LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
-        linalg::LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
-        _ => {
-            // Schur requires StructureAware initialization; dense solvers live
-            // behind the dense dispatch. Callers get plain Cholesky here.
-            Box::new(SparseCholeskySolver::new())
-        }
-    }
+/// What one iteration reports to the observers.
+#[derive(Debug, Clone, Copy)]
+pub struct IterationReport {
+    pub iteration: usize,
+    pub cost: f64,
+    pub gradient_norm: f64,
+    pub damping: Option<f64>,
+    pub step_norm: f64,
+    pub step_quality: Option<f64>,
 }
 
 /// Notify observers with current optimization state (sparse path).
 ///
 /// This is the common observer notification pattern used by all three optimizers.
-#[allow(clippy::too_many_arguments)]
 pub fn notify_observers(
     observers: &mut OptObserverVec,
     variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-    iteration: usize,
-    cost: f64,
-    gradient_norm: f64,
-    damping: Option<f64>,
-    step_norm: f64,
-    step_quality: Option<f64>,
+    report: IterationReport,
     linear_solver: &dyn LinearSolver<SparseMode>,
 ) {
+    let IterationReport {
+        iteration,
+        cost,
+        gradient_norm,
+        damping,
+        step_norm,
+        step_quality,
+    } = report;
     observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
 
     // Backends that eliminate straight from J never materialize JᵀJ, so the
@@ -999,18 +981,20 @@ pub fn notify_observers(
 ///
 /// For dense mode, the Hessian is converted to sparse for observer compatibility.
 /// This is acceptable since observers are for visualization/debugging, not the hot path.
-#[allow(clippy::too_many_arguments)]
 pub fn notify_observers_generic<M: AssemblyBackend>(
     observers: &mut OptObserverVec,
     variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-    iteration: usize,
-    cost: f64,
-    gradient_norm: f64,
-    damping: Option<f64>,
-    step_norm: f64,
-    step_quality: Option<f64>,
+    report: IterationReport,
     _linear_solver: &dyn LinearSolver<M>,
 ) {
+    let IterationReport {
+        iteration,
+        cost,
+        gradient_norm,
+        damping,
+        step_norm,
+        step_quality,
+    } = report;
     observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
     // Skip matrix data for generic path since observers expect sparse Hessian.
     // Observer matrix visualization is optional and only used for debugging.
@@ -1034,22 +1018,18 @@ pub fn process_jacobian_generic<M: AssemblyBackend>(
     let scaling = jacobi_scaling
         .as_ref()
         .ok_or_else(|| OptimizerError::JacobiScalingNotInitialized.log())?;
-    Ok(M::apply_column_scaling(jacobian, scaling))
+    Ok(M::apply_column_scaling(jacobian, scaling)?)
 }
 
 /// Build a SolverResult from common optimization loop outputs.
 ///
 /// All three optimizers construct SolverResult identically at convergence.
-#[allow(clippy::too_many_arguments)]
 pub fn build_solver_result(
     status: OptimizationStatus,
     iterations: usize,
     state: InitializedState,
     elapsed: Duration,
-    final_gradient_norm: f64,
-    final_parameter_update_norm: f64,
-    cost_evaluations: usize,
-    jacobian_evaluations: usize,
+    convergence_info: ConvergenceInfo,
     covariances: Option<SecondaryMap<VarKey, Mat<f64>>>,
 ) -> SolverResult<SlotMap<VarKey, Box<dyn ManifoldVariable>>> {
     SolverResult {
@@ -1059,12 +1039,7 @@ pub fn build_solver_result(
         final_cost: state.current_cost,
         parameters: state.variables,
         elapsed_time: elapsed,
-        convergence_info: Some(ConvergenceInfo {
-            final_gradient_norm,
-            final_parameter_update_norm,
-            cost_evaluations,
-            jacobian_evaluations,
-        }),
+        convergence_info: Some(convergence_info),
         covariances,
     }
 }
@@ -1192,26 +1167,50 @@ impl Display for OptimizerSummary {
 }
 
 /// Create an OptimizerSummary from common optimization loop outputs.
-#[allow(clippy::too_many_arguments)]
-pub fn create_optimizer_summary(
-    optimizer_name: &'static str,
-    initial_cost: f64,
-    final_cost: f64,
-    iterations: usize,
-    successful_steps: Option<usize>,
-    unsuccessful_steps: Option<usize>,
-    max_gradient_norm: f64,
-    final_gradient_norm: f64,
-    max_parameter_update_norm: f64,
-    final_parameter_update_norm: f64,
-    total_cost_reduction: f64,
-    total_time: Duration,
-    iteration_history: Vec<IterationStats>,
-    convergence_status: OptimizationStatus,
-    final_damping: Option<f64>,
-    final_trust_region_radius: Option<f64>,
-    rho: Option<f64>,
-) -> OptimizerSummary {
+/// The running totals an optimizer reports when it finishes, before the
+/// per-iteration averages are derived from them.
+#[derive(Debug, Clone)]
+pub struct SummaryTotals {
+    pub optimizer_name: &'static str,
+    pub initial_cost: f64,
+    pub final_cost: f64,
+    pub iterations: usize,
+    pub successful_steps: Option<usize>,
+    pub unsuccessful_steps: Option<usize>,
+    pub max_gradient_norm: f64,
+    pub final_gradient_norm: f64,
+    pub max_parameter_update_norm: f64,
+    pub final_parameter_update_norm: f64,
+    pub total_cost_reduction: f64,
+    pub total_time: Duration,
+    pub iteration_history: Vec<IterationStats>,
+    pub convergence_status: OptimizationStatus,
+    pub final_damping: Option<f64>,
+    pub final_trust_region_radius: Option<f64>,
+    pub rho: Option<f64>,
+}
+
+/// The summary of a finished solve, with the averages per iteration.
+pub fn create_optimizer_summary(totals: SummaryTotals) -> OptimizerSummary {
+    let SummaryTotals {
+        optimizer_name,
+        initial_cost,
+        final_cost,
+        iterations,
+        successful_steps,
+        unsuccessful_steps,
+        max_gradient_norm,
+        final_gradient_norm,
+        max_parameter_update_norm,
+        final_parameter_update_norm,
+        total_cost_reduction,
+        total_time,
+        iteration_history,
+        convergence_status,
+        final_damping,
+        final_trust_region_radius,
+        rho,
+    } = totals;
     OptimizerSummary {
         optimizer_name,
         initial_cost,
@@ -1243,7 +1242,6 @@ pub fn create_optimizer_summary(
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // these tests exist to cover the deprecated helpers until removal
 mod tests {
     use super::*;
     use crate::core::VarKey;
@@ -1254,7 +1252,6 @@ mod tests {
     use apex_manifolds::rn::Rn;
     use faer::Mat;
     use faer::prelude::ReborrowMut;
-    use faer::sparse::{SparseColMat, Triplet};
     use nalgebra::dvector;
     use slotmap::{SecondaryMap, SlotMap};
     use std::time::Duration;
@@ -1404,101 +1401,6 @@ mod tests {
         assert!((rho - (-1.0)).abs() < 1e-12);
     }
 
-    // -------------------------------------------------------------------------
-    // create_jacobi_scaling
-    // -------------------------------------------------------------------------
-
-    fn make_identity_jacobian(n: usize) -> SparseColMat<usize, f64> {
-        let triplets: Vec<Triplet<usize, usize, f64>> =
-            (0..n).map(|i| Triplet::new(i, i, 1.0)).collect();
-        SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap_or_else(|_| {
-            let empty: Vec<Triplet<usize, usize, f64>> = vec![];
-            SparseColMat::try_new_from_triplets(0, 0, &empty)
-                .unwrap_or_else(|_| panic!("failed to create empty matrix"))
-        })
-    }
-
-    #[test]
-    fn test_create_jacobi_scaling_identity_jacobian() -> TestResult {
-        // For identity Jacobian each column has norm 1.0 → scaling = 1/(1+1) = 0.5
-        let jac = make_identity_jacobian(3);
-        let scaling = create_jacobi_scaling(&jac)?;
-        for i in 0..3 {
-            let val = scaling.get(i, i).copied().unwrap_or(0.0);
-            assert!(
-                (val - 0.5).abs() < 1e-12,
-                "col {i}: expected 0.5, got {val}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_create_jacobi_scaling_zero_column() -> TestResult {
-        // A zero column has norm 0 → scaling = 1/(1+0) = 1.0
-        let triplets = vec![Triplet::new(0_usize, 0_usize, 1.0_f64)];
-        let jac = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
-        let scaling = create_jacobi_scaling(&jac)?;
-        // col 0: norm=1 → 0.5; col 1: norm=0 → 1.0
-        let s0 = scaling.get(0, 0).copied().unwrap_or(0.0);
-        let s1 = scaling.get(1, 1).copied().unwrap_or(0.0);
-        assert!((s0 - 0.5).abs() < 1e-12);
-        assert!((s1 - 1.0).abs() < 1e-12);
-        Ok(())
-    }
-
-    // -------------------------------------------------------------------------
-    // process_jacobian
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_process_jacobian_creates_at_iter0() -> TestResult {
-        let jac = make_identity_jacobian(2);
-        let mut cache: Option<SparseColMat<usize, f64>> = None;
-        let scaled = process_jacobian(&jac, &mut cache, 0)?;
-        assert!(cache.is_some(), "scaling should be cached after iter 0");
-        // Each diagonal entry should be scaled by 0.5
-        let s = scaled.get(0, 0).copied().unwrap_or(0.0);
-        assert!((s - 0.5).abs() < 1e-12);
-        Ok(())
-    }
-
-    #[test]
-    fn test_process_jacobian_reuses_at_iter1() -> TestResult {
-        let jac = make_identity_jacobian(2);
-        let mut cache: Option<SparseColMat<usize, f64>> = None;
-        // build cache at iter 0
-        process_jacobian(&jac, &mut cache, 0)?;
-        // now use cached at iter 1
-        let scaled = process_jacobian(&jac, &mut cache, 1)?;
-        let s = scaled.get(0, 0).copied().unwrap_or(0.0);
-        assert!((s - 0.5).abs() < 1e-12);
-        Ok(())
-    }
-
-    #[test]
-    fn test_process_jacobian_error_at_iter1_without_init() {
-        let jac = make_identity_jacobian(2);
-        let mut cache: Option<SparseColMat<usize, f64>> = None;
-        // skip iter 0 — should error
-        let result = process_jacobian(&jac, &mut cache, 1);
-        assert!(result.is_err(), "should fail without prior iter=0 call");
-    }
-
-    // -------------------------------------------------------------------------
-    // compute_parameter_norm
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_compute_parameter_norm_two_variables() {
-        let mut vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
-        vars.insert(Box::new(Variable::new(Rn::new(dvector![3.0]))));
-        vars.insert(Box::new(Variable::new(Rn::new(dvector![4.0]))));
-        let norm = compute_parameter_norm(&vars);
-        // sqrt(3² + 4²) = 5.0
-        assert!((norm - 5.0).abs() < 1e-12, "expected 5.0, got {norm}");
-    }
-
     #[test]
     fn test_compute_parameter_norm_empty() {
         let vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
@@ -1510,27 +1412,29 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_apply_parameter_step_advances_variable() {
+    fn test_apply_parameter_step_advances_variable() -> TestResult {
         let mut vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
         let k = vars.insert(Box::new(Variable::new(Rn::new(dvector![0.0]))));
         let order = vec![k];
         let step = Mat::from_fn(1, 1, |_, _| 3.0);
-        let norm = apply_parameter_step(&mut vars, step.as_ref(), &order);
+        let norm = apply_parameter_step(&mut vars, step.as_ref(), &order)?;
         assert!((norm - 3.0).abs() < 1e-12);
         let val = vars[k].as_param_slice()[0];
         assert!((val - 3.0).abs() < 1e-12, "expected 3.0, got {val}");
+        Ok(())
     }
 
     #[test]
-    fn test_apply_negative_parameter_step_reverts() {
+    fn test_apply_negative_parameter_step_reverts() -> TestResult {
         let mut vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
         let k = vars.insert(Box::new(Variable::new(Rn::new(dvector![5.0]))));
         let order = vec![k];
         let step = Mat::from_fn(1, 1, |_, _| 2.0);
-        apply_parameter_step(&mut vars, step.as_ref(), &order);
+        apply_parameter_step(&mut vars, step.as_ref(), &order)?;
         assert!((vars[k].as_param_slice()[0] - 7.0).abs() < 1e-12);
-        apply_negative_parameter_step(&mut vars, step.as_ref(), &order);
+        apply_negative_parameter_step(&mut vars, step.as_ref(), &order)?;
         assert!((vars[k].as_param_slice()[0] - 5.0).abs() < 1e-12);
+        Ok(())
     }
 
     // -------------------------------------------------------------------------
@@ -1688,33 +1592,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // create_linear_solver (deprecated)
-    // -------------------------------------------------------------------------
-
-    #[allow(deprecated)]
-    #[test]
-    fn test_create_linear_solver_cholesky() {
-        let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseCholesky);
-        // just verify it's constructable and callable without panic
-        let _ = solver.get_hessian();
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn test_create_linear_solver_qr() {
-        let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseQR);
-        let _ = solver.get_hessian();
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn test_create_linear_solver_fallback_for_schur() {
-        // ExplicitSparseSchur is special; falls back to Cholesky in create_linear_solver
-        let solver = create_linear_solver(&crate::linalg::LinearSolverType::ExplicitSparseSchur);
-        let _ = solver.get_hessian();
-    }
-
-    // -------------------------------------------------------------------------
     // Display impls
     // -------------------------------------------------------------------------
 
@@ -1740,37 +1617,57 @@ mod tests {
             format!("{}", OptimizationStatus::InvalidNumericalValues),
             "Invalid numerical values (NaN/Inf) detected"
         );
-        assert!(format!("{}", OptimizationStatus::Failed("oops".into())).contains("oops"));
     }
 
     #[test]
-    fn test_optimizer_error_variants() {
-        let e1 = OptimizerError::TrustRegionFailure {
-            radius: 1e-40,
-            min_radius: 1e-32,
+    fn a_linalg_error_reaches_the_root_through_the_optimizer() -> TestResult {
+        use crate::error::{ApexSolverError, ErrorChainExt};
+        fn solve() -> linalg::LinAlgResult<()> {
+            Err(linalg::LinAlgError::NotInitialized {
+                component: "chunk eliminator",
+            })
+        }
+        fn optimize() -> OptimizerResult<()> {
+            solve()?;
+            Ok(())
+        }
+        fn api() -> crate::error::ApexSolverResult<()> {
+            optimize()?;
+            Ok(())
+        }
+        let error = api().err().ok_or("expected an error")?;
+        assert!(matches!(
+            error,
+            ApexSolverError::Optimizer(OptimizerError::LinAlg(_))
+        ));
+        assert_eq!(
+            error.chain(),
+            "linear solve failed\n  → chunk eliminator used before it was initialized"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_step_of_the_wrong_length_is_rejected_before_any_variable_moves() -> TestResult {
+        let mut vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let order: Vec<VarKey> = [0.0, 1.0]
+            .iter()
+            .map(|x| vars.insert(Box::new(Variable::new(Rn::new(dvector![*x])))))
+            .collect();
+        let before: Vec<f64> = vars[order[0]].as_param_slice().to_vec();
+        let short = Mat::<f64>::zeros(1, 1);
+        let Err(err) = apply_parameter_step(&mut vars, short.as_ref(), &order) else {
+            return Err("a short step must be rejected".into());
         };
-        assert!(e1.to_string().contains("Trust region radius"));
-
-        let e2 = OptimizerError::DampingFailure {
-            damping: 1e13,
-            max_damping: 1e12,
-        };
-        assert!(e2.to_string().contains("Damping parameter"));
-
-        let e3 = OptimizerError::CostIncrease {
-            old_cost: 1.0,
-            new_cost: 2.0,
-        };
-        assert!(e3.to_string().contains("Cost increased"));
-
-        let e4 = OptimizerError::LinearSolveFailed("singular".into());
-        assert!(e4.to_string().contains("singular"));
-
-        let e5 = OptimizerError::EmptyProblem;
-        assert!(e5.to_string().contains("no variables"));
-
-        let e6 = OptimizerError::NoResidualBlocks;
-        assert!(e6.to_string().contains("residual blocks"));
+        assert!(matches!(
+            err,
+            OptimizerError::StepSize {
+                expected: 2,
+                actual: 1
+            }
+        ));
+        assert_eq!(vars[order[0]].as_param_slice(), before.as_slice());
+        Ok(())
     }
 
     // -------------------------------------------------------------------------
@@ -1823,10 +1720,12 @@ mod tests {
             10,
             state,
             Duration::from_millis(50),
-            1e-5,
-            1e-6,
-            15,
-            10,
+            ConvergenceInfo {
+                final_gradient_norm: 1e-5,
+                final_parameter_update_norm: 1e-6,
+                cost_evaluations: 15,
+                jacobian_evaluations: 10,
+            },
             None,
         );
         assert_eq!(result.status, OptimizationStatus::CostToleranceReached);
@@ -1848,25 +1747,25 @@ mod tests {
 
     #[test]
     fn test_create_optimizer_summary_averages() {
-        let summary = create_optimizer_summary(
-            "TestOptimizer",
-            10.0,
-            1.0,
-            4,
-            Some(3),
-            Some(1),
-            2.0,
-            0.1,
-            3.0,
-            0.05,
-            9.0, // total_cost_reduction
-            Duration::from_millis(400),
-            vec![],
-            OptimizationStatus::CostToleranceReached,
-            Some(1e-3),
-            None,
-            Some(0.8),
-        );
+        let summary = create_optimizer_summary(SummaryTotals {
+            optimizer_name: "TestOptimizer",
+            initial_cost: 10.0,
+            final_cost: 1.0,
+            iterations: 4,
+            successful_steps: Some(3),
+            unsuccessful_steps: Some(1),
+            max_gradient_norm: 2.0,
+            final_gradient_norm: 0.1,
+            max_parameter_update_norm: 3.0,
+            final_parameter_update_norm: 0.05,
+            total_cost_reduction: 9.0,
+            total_time: Duration::from_millis(400),
+            iteration_history: vec![],
+            convergence_status: OptimizationStatus::CostToleranceReached,
+            final_damping: Some(1e-3),
+            final_trust_region_radius: None,
+            rho: Some(0.8),
+        });
         // average_cost_reduction = 9.0 / 4 = 2.25
         assert!((summary.average_cost_reduction - 2.25).abs() < 1e-10);
         // average_time_per_iteration = 400ms / 4 = 100ms
@@ -1880,25 +1779,25 @@ mod tests {
 
     #[test]
     fn test_create_optimizer_summary_zero_iterations() {
-        let summary = create_optimizer_summary(
-            "Test",
-            1.0,
-            1.0,
-            0, // zero iterations
-            None,
-            None,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            Duration::from_secs(0),
-            vec![],
-            OptimizationStatus::MaxIterationsReached,
-            None,
-            None,
-            None,
-        );
+        let summary = create_optimizer_summary(SummaryTotals {
+            optimizer_name: "Test",
+            initial_cost: 1.0,
+            final_cost: 1.0,
+            iterations: 0,
+            successful_steps: None,
+            unsuccessful_steps: None,
+            max_gradient_norm: 0.0,
+            final_gradient_norm: 0.0,
+            max_parameter_update_norm: 0.0,
+            final_parameter_update_norm: 0.0,
+            total_cost_reduction: 0.0,
+            total_time: Duration::from_secs(0),
+            iteration_history: vec![],
+            convergence_status: OptimizationStatus::MaxIterationsReached,
+            final_damping: None,
+            final_trust_region_radius: None,
+            rho: None,
+        });
         assert_eq!(summary.average_cost_reduction, 0.0);
         assert_eq!(summary.average_time_per_iteration, Duration::from_secs(0));
     }
@@ -1942,7 +1841,7 @@ mod tests {
 
         let mut problem = Problem::new(JacobianMode::Sparse);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
 
         let state = initialize_optimization_state(&mut problem)?;
         assert_eq!(state.total_dof, 1);
@@ -1956,14 +1855,14 @@ mod tests {
     /// reject with a typed error rather than silently solving the
     /// unconstrained problem, for zero-width, one-sided, and interior bounds.
     #[test]
-    fn initialize_optimization_state_rejects_active_variable_bounds() {
+    fn initialize_optimization_state_rejects_active_variable_bounds() -> TestResult {
         use crate::core::problem::Problem;
 
         for (lower, upper) in [(0.0, 0.0), (f64::NEG_INFINITY, 5.0), (-5.0, f64::INFINITY)] {
             let mut problem = Problem::new(JacobianMode::Sparse);
             let k = problem.add_variable(ManifoldType::RN, dvector![10.0]);
-            problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
-            problem.set_variable_bounds(k, 0, lower, upper);
+            problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
+            problem.set_variable_bounds(k, 0, lower, upper)?;
 
             let Err(err) = initialize_optimization_state(&mut problem) else {
                 panic!("a non-trivial bound must be rejected, not silently ignored");
@@ -1974,6 +1873,7 @@ mod tests {
                 "error must reference the offending bound, got: {message}"
             );
         }
+        Ok(())
     }
 
     /// A bound of exactly `(-inf, inf)` is a documented no-op (equivalent to
@@ -1984,8 +1884,8 @@ mod tests {
 
         let mut problem = Problem::new(JacobianMode::Sparse);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
-        problem.set_variable_bounds(k, 0, f64::NEG_INFINITY, f64::INFINITY);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
+        problem.set_variable_bounds(k, 0, f64::NEG_INFINITY, f64::INFINITY)?;
 
         initialize_optimization_state(&mut problem)?;
         Ok(())
@@ -1998,10 +1898,35 @@ mod tests {
 
         let mut problem = Problem::new(JacobianMode::Sparse);
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None)?;
 
         let state = initialize_optimization_state(&mut problem)?;
         assert_eq!(state.total_dof, 1);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod finite_step_tests {
+    use super::*;
+
+    #[test]
+    fn a_finite_step_is_accepted() {
+        let step = Mat::from_fn(3, 1, |row, _| row as f64);
+        assert!(ensure_finite_step(&step, "test").is_ok());
+    }
+
+    #[test]
+    fn a_nan_or_infinite_step_is_rejected_with_its_index() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let step = Mat::from_fn(3, 1, |row, _| if row == 2 { bad } else { 1.0 });
+            assert!(matches!(
+                ensure_finite_step(&step, "test").err(),
+                Some(OptimizerError::NonFiniteStep {
+                    optimizer: "test",
+                    index: 2
+                })
+            ));
+        }
     }
 }

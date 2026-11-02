@@ -18,6 +18,7 @@ use crate::{
         residual_block::ResidualBlock,
         variable::{ManifoldVariable, Variable},
     },
+    error::ErrorLogging,
     factors::Factor,
     linalg::JacobianMode,
 };
@@ -100,6 +101,12 @@ impl Problem {
     /// Add a variable with a given manifold type and initial parameter vector.
     ///
     /// Returns a stable `VarKey` handle for use in `add_residual_block`, `fix_variable`, etc.
+    ///
+    /// # Panics
+    ///
+    /// If `params` has the wrong length for `manifold_type` (the manifold's
+    /// unchecked constructor indexes past the slice). Use
+    /// [`Self::try_add_variable`] for parameters that are not known to be valid.
     pub fn add_variable(&mut self, manifold_type: ManifoldType, params: DVector<f64>) -> VarKey {
         let var = Self::create_variable(&manifold_type, &params);
         let key = self.variables.insert(var);
@@ -107,65 +114,23 @@ impl Problem {
         key
     }
 
-    /// Add a residual block (factor + optional loss) connecting the given variables.
+    /// [`Self::add_variable`] that validates `params` first: the right length
+    /// for the manifold, finite, and a unit quaternion where it has one.
     ///
-    /// Returns a `FactorKey` that can be used to remove the block later.
-    pub fn add_residual_block(
-        &mut self,
-        variable_keys: &[VarKey],
-        factor: Box<dyn Factor + Send + Sync>,
-        loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
-    ) -> FactorKey {
-        self.add_residual_block_with_noise(variable_keys, factor, loss_func, NoiseModel::null())
-    }
-
-    /// Register a residual block with a measurement noise model, keeping the
-    /// validation behaviour of [`Self::try_add_residual_block`].
+    /// # Errors
     ///
-    /// The model carries the square-root information `S`; residuals and
-    /// Jacobians are whitened (`S·r`, `S·J`) before the robust-loss corrector,
-    /// so the optimized objective is `Σ ½·ρ(‖S·r‖²)` — the Ω-weighted
-    /// objective g2o-style benchmarks report. Its dimension must equal the
-    /// factor's `residual_dim()`.
-    pub fn add_residual_block_with_noise(
+    /// [`CoreError::Manifold`] when `params` is not a valid element.
+    pub fn try_add_variable(
         &mut self,
-        variable_keys: &[VarKey],
-        factor: Box<dyn Factor + Send + Sync>,
-        loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
-        noise: NoiseModel,
-    ) -> FactorKey {
-        self.try_add_residual_block_with_noise(variable_keys, factor, loss_func, noise)
-            .unwrap_or_else(|e| panic!("invalid residual block: {e}"))
+        manifold_type: ManifoldType,
+        params: DVector<f64>,
+    ) -> CoreResult<VarKey> {
+        Self::validate_params(&manifold_type, params.as_slice())?;
+        Ok(self.add_variable(manifold_type, params))
     }
 
-    /// [`Self::add_residual_block_with_noise`] returning a typed error.
-    pub fn try_add_residual_block_with_noise(
-        &mut self,
-        variable_keys: &[VarKey],
-        factor: Box<dyn Factor + Send + Sync>,
-        loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
-        noise: NoiseModel,
-    ) -> CoreResult<FactorKey> {
-        if noise.dim() != 0 && noise.dim() != factor.residual_dim() {
-            return Err(CoreError::DimensionMismatch(format!(
-                "noise model covers {} residual rows but the factor produces {}",
-                noise.dim(),
-                factor.residual_dim()
-            )));
-        }
-        if factor.whitens_internally() && !matches!(noise, NoiseModel::Null) {
-            return Err(CoreError::InvalidInput(
-                "this factor applies its own square-root information; register it with \
-                 NoiseModel::null(). Supplying a noise model as well would whiten the \
-                 residual twice."
-                    .into(),
-            ));
-        }
-        self.try_add_residual_block_impl(variable_keys, factor, loss_func, noise)
-    }
-
-    /// Register a residual block, validating it against the referenced
-    /// variables first.
+    /// Add a residual block (factor + optional loss) connecting the given
+    /// variables, validating it against them first.
     ///
     /// Runs the factor's [`Factor::validate_variables`] hook so shape
     /// mismatches (e.g. a landmark variable whose parameter count disagrees
@@ -173,38 +138,63 @@ impl Problem {
     /// instead of a panic inside the parallel assembly. Unknown variable keys
     /// are rejected as well — they would otherwise be silently skipped during
     /// linearization.
-    pub fn try_add_residual_block(
+    ///
+    /// Returns a `FactorKey` that can be used to remove the block later.
+    ///
+    /// # Errors
+    ///
+    /// An unknown key, a factor that rejects its variables, or a factor whose
+    /// declared Jacobian shape disagrees with its residual and variables.
+    pub fn add_residual_block(
         &mut self,
         variable_keys: &[VarKey],
         factor: Box<dyn Factor + Send + Sync>,
         loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
     ) -> CoreResult<FactorKey> {
-        self.try_add_residual_block_impl(variable_keys, factor, loss_func, NoiseModel::Null)
+        self.add_residual_block_with_noise(variable_keys, factor, loss_func, NoiseModel::null())
     }
 
-    fn try_add_residual_block_impl(
+    /// Register a residual block with a measurement noise model, validated as
+    /// in [`Self::add_residual_block`].
+    ///
+    /// The model carries the square-root information `S`; residuals and
+    /// Jacobians are whitened (`S·r`, `S·J`) before the robust-loss corrector,
+    /// so the optimized objective is `Σ ½·ρ(‖S·r‖²)` — the Ω-weighted
+    /// objective g2o-style benchmarks report. Its dimension must equal the
+    /// factor's `residual_dim()`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::add_residual_block`], plus a noise model of the wrong
+    /// dimension or one given to a factor that whitens internally.
+    pub fn add_residual_block_with_noise(
         &mut self,
         variable_keys: &[VarKey],
         factor: Box<dyn Factor + Send + Sync>,
         loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
         noise: NoiseModel,
     ) -> CoreResult<FactorKey> {
+        if noise.dim() != 0 && noise.dim() != factor.residual_dim() {
+            return Err(CoreError::DimensionMismatch {
+                what: "noise model",
+                expected: factor.residual_dim(),
+                actual: noise.dim(),
+            }
+            .log());
+        }
+        if factor.whitens_internally() && !matches!(noise, NoiseModel::Null) {
+            return Err(CoreError::DoubleWhitening.log());
+        }
         let mut variables: Vec<&dyn ManifoldVariable> = Vec::with_capacity(variable_keys.len());
         for &key in variable_keys {
             let variable = self
                 .variables
                 .get(key)
-                .ok_or_else(|| {
-                    CoreError::Variable(format!(
-                        "residual block references unknown variable key {key:?}"
-                    ))
-                })?
+                .ok_or_else(|| CoreError::UnknownVariable { key }.log())?
                 .as_ref();
             variables.push(variable);
         }
-        factor
-            .validate_variables(&variables)
-            .map_err(CoreError::DimensionMismatch)?;
+        factor.validate_variables(&variables)?;
 
         // Factor-independent shape invariant: the Jacobian block is laid out
         // column-major over the connected variables' full local dofs (the
@@ -215,18 +205,21 @@ impl Problem {
         let (jac_rows, jac_cols) = factor.jacobian_shape();
         let residual_dim = factor.residual_dim();
         if jac_rows != residual_dim {
-            return Err(CoreError::DimensionMismatch(format!(
-                "factor declares a {jac_rows}×{jac_cols} Jacobian but residual_dim() is \
-                 {residual_dim}; jacobian_shape().0 must equal residual_dim()"
-            )));
+            return Err(CoreError::DimensionMismatch {
+                what: "factor Jacobian rows",
+                expected: residual_dim,
+                actual: jac_rows,
+            }
+            .log());
         }
         let total_dof: usize = variables.iter().map(|v| v.dof()).sum();
         if jac_cols != total_dof {
-            return Err(CoreError::DimensionMismatch(format!(
-                "factor declares a {jac_rows}×{jac_cols} Jacobian but the registered \
-                 variables have {total_dof} dofs in total; jacobian_shape().1 must equal \
-                 the sum of the connected variables' dofs"
-            )));
+            return Err(CoreError::DimensionMismatch {
+                what: "factor Jacobian columns",
+                expected: total_dof,
+                actual: jac_cols,
+            }
+            .log());
         }
 
         let new_residual_dimension = residual_dim;
@@ -415,7 +408,7 @@ impl Problem {
     ///
     /// # Errors
     ///
-    /// [`CoreError::Variable`] for an unknown key, or
+    /// [`CoreError::UnknownVariable`] for an unknown key, or
     /// [`CoreError::DimensionMismatch`] if `params` is the wrong length for the
     /// variable's manifold.
     pub fn set_variable_params(&mut self, key: VarKey, params: &[f64]) -> CoreResult<()> {
@@ -423,17 +416,18 @@ impl Problem {
             .manifold_types
             .get(key)
             .copied()
-            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?;
+            .ok_or_else(|| CoreError::UnknownVariable { key }.log())?;
         let existing = self
             .variables
             .get(key)
-            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?;
+            .ok_or_else(|| CoreError::UnknownVariable { key }.log())?;
         if existing.as_param_slice().len() != params.len() {
-            return Err(CoreError::DimensionMismatch(format!(
-                "variable {key:?} takes {} parameters, got {}",
-                existing.as_param_slice().len(),
-                params.len()
-            )));
+            return Err(CoreError::DimensionMismatch {
+                what: "variable parameters",
+                expected: existing.as_param_slice().len(),
+                actual: params.len(),
+            }
+            .log());
         }
 
         let fixed = existing.get_fixed_indices().clone();
@@ -450,9 +444,7 @@ impl Problem {
         replacement.set_fixed_indices(fixed);
         replacement.set_bounds(bounds);
         if let Some(point) = frozen {
-            replacement
-                .set_linearization_point(&point)
-                .map_err(CoreError::Variable)?;
+            replacement.set_linearization_point(&point)?;
         }
         self.variables[key] = replacement;
         Ok(())
@@ -507,14 +499,14 @@ impl Problem {
     ///
     /// # Errors
     ///
-    /// [`CoreError::Variable`] if the key is unknown or the variable does not
-    /// support freezing.
+    /// [`CoreError::UnknownVariable`] if the key is unknown, or
+    /// [`CoreError::FreezeUnsupported`] if the variable does not support
+    /// freezing.
     pub fn freeze_linearization_point(&mut self, key: VarKey) -> CoreResult<()> {
         self.variables
             .get_mut(key)
-            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?
+            .ok_or_else(|| CoreError::UnknownVariable { key }.log())?
             .freeze_linearization_point()
-            .map_err(CoreError::Variable)
     }
 
     /// Freeze `key`'s linearization point at an **explicit** value.
@@ -526,14 +518,14 @@ impl Problem {
     ///
     /// # Errors
     ///
-    /// [`CoreError::Variable`] if the key is unknown, the variable does not
-    /// support freezing, or `params` is the wrong length.
+    /// [`CoreError::UnknownVariable`] if the key is unknown,
+    /// [`CoreError::FreezeUnsupported`] if the variable does not support
+    /// freezing, or [`CoreError::Manifold`] if `params` is not a valid element.
     pub fn set_linearization_point(&mut self, key: VarKey, params: &[f64]) -> CoreResult<()> {
         self.variables
             .get_mut(key)
-            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?
+            .ok_or_else(|| CoreError::UnknownVariable { key }.log())?
             .set_linearization_point(params)
-            .map_err(CoreError::Variable)
     }
 
     /// Release `key`'s frozen linearization point.
@@ -544,11 +536,11 @@ impl Problem {
     ///
     /// # Errors
     ///
-    /// [`CoreError::Variable`] if the key is unknown.
+    /// [`CoreError::UnknownVariable`] if the key is unknown.
     pub fn clear_linearization_point(&mut self, key: VarKey) -> CoreResult<()> {
         self.variables
             .get_mut(key)
-            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?
+            .ok_or_else(|| CoreError::UnknownVariable { key }.log())?
             .clear_linearization_point();
         Ok(())
     }
@@ -564,22 +556,21 @@ impl Problem {
     ///
     /// # Errors
     ///
-    /// [`CoreError::Variable`] if the key is unknown, or if a residual block
-    /// still references it — a dangling key would otherwise surface far away,
-    /// inside the parallel assembly, as a variable lookup failure.
+    /// [`CoreError::UnknownVariable`] if the key is unknown, or
+    /// [`CoreError::VariableInUse`] if a residual block still references it —
+    /// a dangling key would otherwise surface far away, inside the parallel
+    /// assembly, as a variable lookup failure.
     pub fn try_remove_variable(&mut self, key: VarKey) -> CoreResult<Box<dyn ManifoldVariable>> {
         if !self.variables.contains_key(key) {
-            return Err(CoreError::Variable(format!("unknown variable key {key:?}")));
+            return Err(CoreError::UnknownVariable { key }.log());
         }
-        if let Some((factor, _)) = self
+        let blocks = self
             .residual_blocks
-            .iter()
-            .find(|(_, block)| block.variable_keys.contains(&key))
-        {
-            return Err(CoreError::Variable(format!(
-                "variable {key:?} is still referenced by residual block {factor:?}; \
-                 remove the block first"
-            )));
+            .values()
+            .filter(|block| block.variable_keys.contains(&key))
+            .count();
+        if blocks > 0 {
+            return Err(CoreError::VariableInUse { key, blocks }.log());
         }
 
         self.fixed_variable_indexes.remove(key);
@@ -588,30 +579,21 @@ impl Problem {
         self.schur_landmark_keys.remove(&key);
         self.variables
             .remove(key)
-            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))
+            .ok_or_else(|| CoreError::UnknownVariable { key }.log())
     }
 
     /// Hold tangent-space component `idx` of `var_key` fixed during solving.
     ///
-    /// # Panics
-    /// If the key is unknown or `idx` is outside the variable's DOF. Use
-    /// [`Self::try_fix_variable`] to handle that as an error.
-    pub fn fix_variable(&mut self, var_key: VarKey, idx: usize) {
-        self.try_fix_variable(var_key, idx)
-            .unwrap_or_else(|e| panic!("invalid variable constraint: {e}"))
-    }
-
-    /// [`Self::fix_variable`] returning a typed error.
+    /// # Errors
     ///
-    /// An out-of-range `idx` used to be accepted and then silently ignored
-    /// forever, because the constraint is only ever applied by index against a
-    /// tangent vector that never has that component.
-    pub fn try_fix_variable(&mut self, var_key: VarKey, idx: usize) -> CoreResult<()> {
+    /// An unknown key, or an `idx` outside the variable's DOF (it would
+    /// otherwise be accepted and silently ignored forever, because the
+    /// constraint is only applied by index against a tangent vector that never
+    /// has that component).
+    pub fn fix_variable(&mut self, var_key: VarKey, idx: usize) -> CoreResult<()> {
         let dof = self.variable_dof(var_key)?;
         if idx >= dof {
-            return Err(CoreError::Variable(format!(
-                "cannot fix component {idx} of a {dof}-DOF variable"
-            )));
+            return Err(CoreError::IndexOutOfRange { index: idx, dof }.log());
         }
         if let Some(set) = self.fixed_variable_indexes.get_mut(var_key) {
             set.insert(idx);
@@ -627,7 +609,7 @@ impl Problem {
         self.variables
             .get(var_key)
             .map(|v| v.dof())
-            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {var_key:?}")))
+            .ok_or_else(|| CoreError::UnknownVariable { key: var_key }.log())
     }
 
     pub fn unfix_variable(&mut self, var_key: VarKey) {
@@ -636,26 +618,11 @@ impl Problem {
 
     /// Constrain tangent-space component `idx` of `var_key` to `[lower, upper]`.
     ///
-    /// # Panics
-    /// If the key is unknown, `idx` is outside the variable's DOF, or the range
-    /// is inverted. Use [`Self::try_set_variable_bounds`] to handle that as an
-    /// error.
-    pub fn set_variable_bounds(
-        &mut self,
-        var_key: VarKey,
-        idx: usize,
-        lower_bound: f64,
-        upper_bound: f64,
-    ) {
-        self.try_set_variable_bounds(var_key, idx, lower_bound, upper_bound)
-            .unwrap_or_else(|e| panic!("invalid variable bounds: {e}"))
-    }
-
-    /// [`Self::set_variable_bounds`] returning a typed error.
+    /// # Errors
     ///
-    /// An inverted range used to be warned about and then dropped, leaving the
-    /// caller unable to distinguish "bound set" from "bound rejected".
-    pub fn try_set_variable_bounds(
+    /// An unknown key, an `idx` outside the variable's DOF, a NaN bound or an
+    /// inverted range.
+    pub fn set_variable_bounds(
         &mut self,
         var_key: VarKey,
         idx: usize,
@@ -664,22 +631,18 @@ impl Problem {
     ) -> CoreResult<()> {
         let dof = self.variable_dof(var_key)?;
         if idx >= dof {
-            return Err(CoreError::Variable(format!(
-                "cannot bound component {idx} of a {dof}-DOF variable"
-            )));
+            return Err(CoreError::IndexOutOfRange { index: idx, dof }.log());
         }
         // NaN comparisons are always false, so `lower_bound > upper_bound`
         // alone lets a NaN bound through silently. ±infinity remains valid —
         // it is the legitimate "unbounded on this side" sentinel.
-        if lower_bound.is_nan() || upper_bound.is_nan() {
-            return Err(CoreError::Variable(format!(
-                "bound [{lower_bound}, {upper_bound}] must not be NaN"
-            )));
-        }
-        if lower_bound > upper_bound {
-            return Err(CoreError::Variable(format!(
-                "lower bound {lower_bound} exceeds upper bound {upper_bound}"
-            )));
+        if lower_bound.is_nan() || upper_bound.is_nan() || lower_bound > upper_bound {
+            return Err(CoreError::InvalidBounds {
+                index: idx,
+                lower: lower_bound,
+                upper: upper_bound,
+            }
+            .log());
         }
         if let Some(map) = self.variable_bounds.get_mut(var_key) {
             map.insert(idx, (lower_bound, upper_bound));
@@ -692,6 +655,21 @@ impl Problem {
 
     pub fn remove_variable_bounds(&mut self, var_key: VarKey) {
         self.variable_bounds.remove(var_key);
+    }
+
+    /// Checks `params` against the manifold's checked constructor.
+    fn validate_params(manifold_type: &ManifoldType, params: &[f64]) -> CoreResult<()> {
+        match manifold_type {
+            ManifoldType::SO2 => so2::SO2::try_from_param_slice(params).map(drop),
+            ManifoldType::SO3 => so3::SO3::try_from_param_slice(params).map(drop),
+            ManifoldType::SE2 => se2::SE2::try_from_param_slice(params).map(drop),
+            ManifoldType::SE3 => se3::SE3::try_from_param_slice(params).map(drop),
+            ManifoldType::RN => rn::Rn::try_from_param_slice(params).map(drop),
+            ManifoldType::SE23 => se23::SE23::try_from_param_slice(params).map(drop),
+            ManifoldType::SGal3 => sgal3::SGal3::try_from_param_slice(params).map(drop),
+            ManifoldType::Sim3 => sim3::Sim3::try_from_param_slice(params).map(drop),
+        }?;
+        Ok(())
     }
 
     fn create_variable(
@@ -950,7 +928,12 @@ impl Problem {
             match crate::linalg::covariance::Covariance::compute(options, self, variables) {
                 Ok(covariance) => covariance,
                 Err(e) => {
-                    tracing::error!("Covariance estimation failed: {e}");
+                    // The error was logged where it was built; this only says
+                    // that the caller carries on without covariances.
+                    tracing::warn!(
+                        "covariances unavailable: {}",
+                        crate::error::ErrorChainExt::chain_compact(&e)
+                    );
                     return None;
                 }
             };
@@ -1007,7 +990,7 @@ mod tests {
                     tt - ft,
                 ))),
                 Some(Box::new(HuberLoss::new(1.0)?)),
-            );
+            )?;
         }
 
         let (fx, fy, ft) = poses[9];
@@ -1020,13 +1003,13 @@ mod tests {
                 tt - ft,
             ))),
             Some(Box::new(HuberLoss::new(1.0)?)),
-        );
+        )?;
 
         problem.add_residual_block(
             &[keys[0]],
             Box::new(PriorFactor::<SE2>::new(SE2::identity())),
             None,
-        );
+        )?;
 
         Ok((problem, keys))
     }
@@ -1079,14 +1062,14 @@ mod tests {
                 &[keys[f], keys[t]],
                 Box::new(BetweenFactor::new(rel)),
                 Some(Box::new(HuberLoss::new(1.0)?)),
-            );
+            )?;
         }
 
         problem.add_residual_block(
             &[keys[0]],
             Box::new(PriorFactor::<SE3>::new(SE3::identity())),
             None,
-        );
+        )?;
 
         Ok((problem, keys))
     }
@@ -1149,12 +1132,12 @@ mod tests {
             &[k0, k1],
             Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1))),
             Some(Box::new(HuberLoss::new(1.0)?)),
-        );
+        )?;
         let fk2 = p.add_residual_block(
             &[k0],
             Box::new(PriorFactor::<SE2>::new(SE2::identity())),
             None,
-        );
+        )?;
 
         assert_ne!(fk1, fk2);
         assert_eq!(p.num_residual_blocks(), 2);
@@ -1170,14 +1153,14 @@ mod tests {
     }
 
     #[test]
-    fn test_fix_unfix_variable() {
+    fn test_fix_unfix_variable() -> TestResult {
         let mut p = Problem::new(JacobianMode::Sparse);
         let k0 = p.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]);
         let k1 = p.add_variable(ManifoldType::SE2, dvector![1.0, 0.0, 0.1]);
 
-        p.fix_variable(k0, 0);
-        p.fix_variable(k0, 1);
-        p.fix_variable(k1, 2);
+        p.fix_variable(k0, 0)?;
+        p.fix_variable(k0, 1)?;
+        p.fix_variable(k1, 2)?;
 
         assert_eq!(p.fixed_variable_indexes[k0].len(), 2);
         assert_eq!(p.fixed_variable_indexes[k1].len(), 1);
@@ -1185,6 +1168,7 @@ mod tests {
         p.unfix_variable(k0);
         assert!(!p.fixed_variable_indexes.contains_key(k0));
         assert!(p.fixed_variable_indexes.contains_key(k1));
+        Ok(())
     }
 
     /// Regrouping rows for elimination must not change the problem.
@@ -1209,7 +1193,7 @@ mod tests {
                     apex_manifolds::se2::SE2::from_xy_angle(0.5, 0.1, 0.01),
                 )),
                 None,
-            );
+            )?;
         }
         p.mark_for_elimination(p0);
         p.mark_for_elimination(p1);
@@ -1283,7 +1267,7 @@ mod tests {
                     apex_manifolds::se2::SE2::from_xy_angle(0.5, 0.1, 0.01),
                 )),
                 None,
-            );
+            )?;
         }
         p.mark_for_elimination(p0);
         p.mark_for_elimination(p1);
@@ -1303,7 +1287,7 @@ mod tests {
                 apex_manifolds::se2::SE2::from_xy_angle(0.2, 0.0, 0.0),
             )),
             None,
-        );
+        )?;
         assert!(
             p.group_rows_for_elimination(),
             "the appended unchunked block must move ahead of the chunks"
@@ -1335,7 +1319,7 @@ mod tests {
             .filter(|b| touches_eliminated(&b.variable_keys))
             .map(|b| b.residual_row_start_idx)
             .min()
-            .ok_or_else(|| CoreError::Variable("eliminated block missing".to_string()))?;
+            .ok_or("eliminated block missing")?;
         for block in p.residual_blocks().values() {
             if !touches_eliminated(&block.variable_keys) {
                 assert!(
@@ -1356,14 +1340,14 @@ mod tests {
     }
 
     #[test]
-    fn test_variable_bounds_set_remove() {
+    fn test_variable_bounds_set_remove() -> TestResult {
         let mut p = Problem::new(JacobianMode::Sparse);
         let k0 = p.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]);
         let k1 = p.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]);
 
-        p.set_variable_bounds(k0, 0, -1.0, 1.0);
-        p.set_variable_bounds(k0, 1, -2.0, 2.0);
-        p.set_variable_bounds(k1, 0, 0.0, 5.0);
+        p.set_variable_bounds(k0, 0, -1.0, 1.0)?;
+        p.set_variable_bounds(k0, 1, -2.0, 2.0)?;
+        p.set_variable_bounds(k1, 0, 0.0, 5.0)?;
 
         assert_eq!(p.variable_bounds[k0].len(), 2);
         assert_eq!(p.variable_bounds[k1].len(), 1);
@@ -1371,6 +1355,7 @@ mod tests {
         p.remove_variable_bounds(k0);
         assert!(!p.variable_bounds.contains_key(k0));
         assert!(p.variable_bounds.contains_key(k1));
+        Ok(())
     }
 
     #[test]
@@ -1380,10 +1365,10 @@ mod tests {
 
         // An inverted range is rejected, not warned about and dropped: the
         // caller could not previously tell the two apart.
-        let Err(err) = p.try_set_variable_bounds(k, 0, 5.0, 1.0) else {
+        let Err(err) = p.set_variable_bounds(k, 0, 5.0, 1.0) else {
             panic!("inverted range must be rejected");
         };
-        assert!(err.to_string().contains("exceeds upper bound"), "{err}");
+        assert!(matches!(err, CoreError::InvalidBounds { .. }), "{err}");
         assert!(!p.variable_bounds.contains_key(k));
     }
 
@@ -1395,19 +1380,19 @@ mod tests {
         let mut p = Problem::new(JacobianMode::Sparse);
         let k = p.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]);
 
-        let Err(err) = p.try_set_variable_bounds(k, 0, f64::NAN, 1.0) else {
+        let Err(err) = p.set_variable_bounds(k, 0, f64::NAN, 1.0) else {
             panic!("NaN lower bound must be rejected");
         };
-        assert!(err.to_string().contains("NaN"), "{err}");
+        assert!(matches!(err, CoreError::InvalidBounds { .. }), "{err}");
 
-        let Err(err) = p.try_set_variable_bounds(k, 0, -1.0, f64::NAN) else {
+        let Err(err) = p.set_variable_bounds(k, 0, -1.0, f64::NAN) else {
             panic!("NaN upper bound must be rejected");
         };
-        assert!(err.to_string().contains("NaN"), "{err}");
+        assert!(matches!(err, CoreError::InvalidBounds { .. }), "{err}");
 
         assert!(!p.variable_bounds.contains_key(k));
         assert!(
-            p.try_set_variable_bounds(k, 0, f64::NEG_INFINITY, f64::INFINITY)
+            p.set_variable_bounds(k, 0, f64::NEG_INFINITY, f64::INFINITY)
                 .is_ok()
         );
     }
@@ -1419,15 +1404,21 @@ mod tests {
         let mut p = Problem::new(JacobianMode::Sparse);
         let k = p.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]); // 3 DOF
 
-        let Err(err) = p.try_fix_variable(k, 3) else {
+        let Err(err) = p.fix_variable(k, 3) else {
             panic!("index 3 is out of range for a 3-DOF variable");
         };
-        assert!(err.to_string().contains("3-DOF"), "{err}");
+        assert!(
+            matches!(err, CoreError::IndexOutOfRange { dof: 3, .. }),
+            "{err}"
+        );
 
-        let Err(err) = p.try_set_variable_bounds(k, 7, -1.0, 1.0) else {
+        let Err(err) = p.set_variable_bounds(k, 7, -1.0, 1.0) else {
             panic!("index 7 is out of range for a 3-DOF variable");
         };
-        assert!(err.to_string().contains("3-DOF"), "{err}");
+        assert!(
+            matches!(err, CoreError::IndexOutOfRange { dof: 3, .. }),
+            "{err}"
+        );
 
         assert!(!p.fixed_variable_indexes.contains_key(k));
         assert!(!p.variable_bounds.contains_key(k));
@@ -1494,7 +1485,7 @@ mod tests {
             &[x],
             Box::new(IdentityFactor),
             Some(Box::new(HuberLoss::new(1.0)?)),
-        );
+        )?;
 
         let (residual, cost) = problem.compute_residual_and_cost_sparse(&problem.variables)?;
 
@@ -1519,7 +1510,7 @@ mod tests {
     fn cost_without_loss_is_half_squared_norm() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x = problem.add_variable(ManifoldType::RN, dvector![3.0]);
-        problem.add_residual_block(&[x], Box::new(IdentityFactor), None);
+        problem.add_residual_block(&[x], Box::new(IdentityFactor), None)?;
 
         let (residual, cost) = problem.compute_residual_and_cost_sparse(&problem.variables)?;
         assert!(
@@ -1543,7 +1534,7 @@ mod tests {
             &[x],
             Box::new(IdentityFactor),
             Some(Box::new(CauchyLoss::new(1.0)?)),
-        );
+        )?;
 
         let (_, cost) = problem.compute_residual_and_cost_sparse(&problem.variables)?;
         let expected = 0.5 * CauchyLoss::new(1.0)?.evaluate(value * value)[0];
@@ -1570,14 +1561,15 @@ mod tests {
     }
 
     #[test]
-    fn test_fixed_indices_stored_correctly() {
+    fn test_fixed_indices_stored_correctly() -> TestResult {
         let mut p = Problem::new(JacobianMode::Sparse);
         let k = p.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]);
-        p.fix_variable(k, 0);
-        p.fix_variable(k, 2);
+        p.fix_variable(k, 0)?;
+        p.fix_variable(k, 2)?;
         assert_eq!(p.fixed_variable_indexes[k].len(), 2);
         assert!(p.fixed_variable_indexes[k].contains(&0));
         assert!(p.fixed_variable_indexes[k].contains(&2));
+        Ok(())
     }
 
     #[test]
@@ -1669,7 +1661,7 @@ mod tests {
         fn try_add_accepts_matching_landmark_variable() -> TestResult {
             let mut problem = Problem::new(JacobianMode::Sparse);
             let (pose, landmarks) = pose_and_landmarks(&mut problem, 9);
-            let key = problem.try_add_residual_block(&[pose, landmarks], ba_factor(3), None)?;
+            let key = problem.add_residual_block(&[pose, landmarks], ba_factor(3), None)?;
             assert_eq!(problem.residual_blocks().len(), 1);
             assert_eq!(problem.total_residual_dimension(), 6);
             let _ = key;
@@ -1681,21 +1673,27 @@ mod tests {
             let mut problem = Problem::new(JacobianMode::Sparse);
             let (pose, landmarks) = pose_and_landmarks(&mut problem, 12);
             let err = problem
-                .try_add_residual_block(&[pose, landmarks], ba_factor(3), None)
+                .add_residual_block(&[pose, landmarks], ba_factor(3), None)
                 .err()
                 .ok_or("mismatched landmark count must be rejected")?;
-            assert!(matches!(err, CoreError::DimensionMismatch(_)), "{err}");
+            assert!(
+                matches!(
+                    err,
+                    CoreError::Factor(crate::factors::FactorError::VariableSize { .. })
+                ),
+                "{err}"
+            );
             Ok(())
         }
 
         #[test]
-        fn add_residual_block_panics_on_invalid_registration() {
+        fn an_invalid_registration_adds_nothing() {
             let mut problem = Problem::new(JacobianMode::Sparse);
             let (pose, landmarks) = pose_and_landmarks(&mut problem, 12);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                problem.add_residual_block(&[pose, landmarks], ba_factor(3), None);
-            }));
-            assert!(result.is_err(), "registration panic expected");
+            let result = problem.add_residual_block(&[pose, landmarks], ba_factor(3), None);
+            assert!(result.is_err());
+            assert_eq!(problem.num_residual_blocks(), 0);
+            assert_eq!(problem.total_residual_dimension(), 0);
         }
 
         #[test]
@@ -1714,10 +1712,10 @@ mod tests {
             let foreign_key = foreign_key.ok_or("inserted five keys")?;
 
             let err = problem
-                .try_add_residual_block(&[pose, foreign_key], ba_factor(3), None)
+                .add_residual_block(&[pose, foreign_key], ba_factor(3), None)
                 .err()
                 .ok_or("unknown variable key must be rejected")?;
-            assert!(matches!(err, CoreError::Variable(_)), "{err}");
+            assert!(matches!(err, CoreError::UnknownVariable { .. }), "{err}");
             Ok(())
         }
 
@@ -1772,10 +1770,19 @@ mod tests {
             let mut problem = Problem::new(JacobianMode::Sparse);
             let x = problem.add_variable(ManifoldType::RN, dvector![1.0]);
             let err = problem
-                .try_add_residual_block(&[x], Box::new(WrongRowFactor), None)
+                .add_residual_block(&[x], Box::new(WrongRowFactor), None)
                 .err()
                 .ok_or("row mismatch must be rejected")?;
-            assert!(matches!(err, CoreError::DimensionMismatch(_)), "{err}");
+            assert!(
+                matches!(
+                    err,
+                    CoreError::DimensionMismatch {
+                        what: "factor Jacobian rows",
+                        ..
+                    }
+                ),
+                "{err}"
+            );
             Ok(())
         }
 
@@ -1784,10 +1791,19 @@ mod tests {
             let mut problem = Problem::new(JacobianMode::Sparse);
             let x = problem.add_variable(ManifoldType::RN, dvector![1.0]);
             let err = problem
-                .try_add_residual_block(&[x], Box::new(WrongColFactor), None)
+                .add_residual_block(&[x], Box::new(WrongColFactor), None)
                 .err()
                 .ok_or("column mismatch must be rejected")?;
-            assert!(matches!(err, CoreError::DimensionMismatch(_)), "{err}");
+            assert!(
+                matches!(
+                    err,
+                    CoreError::DimensionMismatch {
+                        what: "factor Jacobian columns",
+                        ..
+                    }
+                ),
+                "{err}"
+            );
             Ok(())
         }
 
@@ -1817,13 +1833,13 @@ mod tests {
             let x = problem.add_variable(ManifoldType::RN, dvector![1.0]);
             let noise = NoiseModel::from_sigmas(&[0.5]).map_err(|e| format!("noise model: {e}"))?;
             let err = problem
-                .try_add_residual_block_with_noise(&[x], scalar_marginal(), None, noise)
+                .add_residual_block_with_noise(&[x], scalar_marginal(), None, noise)
                 .err()
                 .ok_or("noise model on a self-whitening factor must be rejected")?;
-            assert!(matches!(err, CoreError::InvalidInput(_)), "{err}");
+            assert!(matches!(err, CoreError::DoubleWhitening), "{err}");
 
             // The null model stays acceptable.
-            problem.try_add_residual_block_with_noise(
+            problem.add_residual_block_with_noise(
                 &[x],
                 scalar_marginal(),
                 None,
@@ -1838,7 +1854,9 @@ mod tests {
         dvector![x, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
     }
 
-    fn three_pose_chain() -> (Problem, Vec<VarKey>, Vec<FactorKey>) {
+    type Chain = (Problem, Vec<VarKey>, Vec<FactorKey>);
+
+    fn three_pose_chain() -> CoreResult<Chain> {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let keys: Vec<VarKey> = (0..3)
             .map(|k| problem.add_variable(ManifoldType::SE3, se3_at(k as f64)))
@@ -1847,7 +1865,7 @@ mod tests {
             &[keys[0]],
             Box::new(PriorFactor::new(SE3::identity())),
             None,
-        )];
+        )?];
         for pair in keys.windows(2) {
             blocks.push(problem.add_residual_block(
                 &[pair[0], pair[1]],
@@ -1856,9 +1874,9 @@ mod tests {
                     nalgebra::UnitQuaternion::identity(),
                 ))),
                 None,
-            ));
+            )?);
         }
-        (problem, keys, blocks)
+        Ok((problem, keys, blocks))
     }
 
     /// Removing a non-last block leaves a hole in the row layout, and every
@@ -1866,7 +1884,7 @@ mod tests {
     /// panicked inside `split_by_row_offsets_mut`.
     #[test]
     fn remove_middle_block_then_solve() -> TestResult {
-        let (mut problem, _keys, blocks) = three_pose_chain();
+        let (mut problem, _keys, blocks) = three_pose_chain()?;
         let before = problem.total_residual_dimension();
         problem.remove_residual_block(blocks[1]);
         assert_eq!(problem.num_residual_blocks(), 2);
@@ -1881,7 +1899,7 @@ mod tests {
 
     #[test]
     fn compacting_is_idempotent() -> TestResult {
-        let (mut problem, _keys, blocks) = three_pose_chain();
+        let (mut problem, _keys, blocks) = three_pose_chain()?;
         problem.remove_residual_block(blocks[0]);
         assert!(problem.compact_residual_rows());
         let total = problem.total_residual_dimension();
@@ -1892,25 +1910,28 @@ mod tests {
     }
 
     #[test]
-    fn remove_residual_blocks_counts_only_what_existed() {
-        let (mut problem, _keys, blocks) = three_pose_chain();
+    fn remove_residual_blocks_counts_only_what_existed() -> TestResult {
+        let (mut problem, _keys, blocks) = three_pose_chain()?;
         let removed = problem.remove_residual_blocks(&[blocks[0], blocks[0], blocks[2]]);
         assert_eq!(removed, 2, "a repeated key must not be counted twice");
         assert_eq!(problem.num_residual_blocks(), 1);
+        Ok(())
     }
 
     #[test]
-    fn remove_variable_rejects_a_referenced_key() {
-        let (mut problem, keys, _blocks) = three_pose_chain();
-        let Err(CoreError::Variable(message)) = problem.try_remove_variable(keys[0]) else {
-            panic!("expected a Variable error for a still-referenced key");
+    fn remove_variable_rejects_a_referenced_key() -> TestResult {
+        let (mut problem, keys, _blocks) = three_pose_chain()?;
+        let Err(CoreError::VariableInUse { blocks, .. }) = problem.try_remove_variable(keys[0])
+        else {
+            panic!("expected a VariableInUse error for a still-referenced key");
         };
-        assert!(message.contains("still referenced"), "{message}");
+        assert_eq!(blocks, 2);
+        Ok(())
     }
 
     #[test]
     fn remove_variable_succeeds_once_its_blocks_are_gone() -> TestResult {
-        let (mut problem, keys, blocks) = three_pose_chain();
+        let (mut problem, keys, blocks) = three_pose_chain()?;
         problem.remove_residual_blocks(&blocks);
         problem.try_remove_variable(keys[2])?;
         assert_eq!(problem.num_variables(), 2);
@@ -1923,7 +1944,7 @@ mod tests {
     /// remove-and-re-add cycle. Nothing may depend on the two matching.
     #[test]
     fn remove_then_add_reuses_a_slot_and_still_solves() -> TestResult {
-        let (mut problem, keys, blocks) = three_pose_chain();
+        let (mut problem, keys, blocks) = three_pose_chain()?;
         problem.remove_residual_blocks(&blocks);
         problem.try_remove_variable(keys[2])?;
         let fresh = problem.add_variable(ManifoldType::SE3, se3_at(5.0));
@@ -1934,7 +1955,7 @@ mod tests {
                 nalgebra::UnitQuaternion::identity(),
             ))),
             None,
-        );
+        )?;
         let mut solver = crate::optimizer::levenberg_marquardt::LevenbergMarquardt::new();
         crate::optimizer::Optimizer::optimize(&mut solver, &mut problem)?;
         Ok(())
@@ -1942,8 +1963,8 @@ mod tests {
 
     #[test]
     fn set_variable_params_preserves_fixed_indices() -> TestResult {
-        let (mut problem, keys, _blocks) = three_pose_chain();
-        problem.fix_variable(keys[1], 2);
+        let (mut problem, keys, _blocks) = three_pose_chain()?;
+        problem.fix_variable(keys[1], 2)?;
         problem.set_variable_params(keys[1], se3_at(9.0).as_slice())?;
 
         let Some(var) = problem.variable(keys[1]) else {
@@ -1960,20 +1981,35 @@ mod tests {
     }
 
     #[test]
-    fn set_variable_params_rejects_a_wrong_length() {
-        let (mut problem, keys, _blocks) = three_pose_chain();
-        let Err(CoreError::DimensionMismatch(_)) =
+    fn try_add_variable_rejects_a_wrong_length_without_adding_it() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let Err(CoreError::Manifold(_)) =
+            problem.try_add_variable(ManifoldType::SE3, dvector![0.0, 0.0, 0.0])
+        else {
+            return Err("a 3-value SE3 must be rejected".into());
+        };
+        assert_eq!(problem.num_variables(), 0);
+        let key = problem.try_add_variable(ManifoldType::SE3, se3_at(1.0))?;
+        assert_eq!(problem.variable_params(key).map(<[f64]>::len), Some(7));
+        Ok(())
+    }
+
+    #[test]
+    fn set_variable_params_rejects_a_wrong_length() -> TestResult {
+        let (mut problem, keys, _blocks) = three_pose_chain()?;
+        let Err(CoreError::DimensionMismatch { .. }) =
             problem.set_variable_params(keys[0], &[1.0, 2.0])
         else {
             panic!("expected DimensionMismatch");
         };
+        Ok(())
     }
 
     /// `optimize` works on a clone; without writing the result back a window
     /// would re-linearize from its original values on every step.
     #[test]
     fn update_values_from_writes_a_solve_back() -> TestResult {
-        let (mut problem, keys, _blocks) = three_pose_chain();
+        let (mut problem, keys, _blocks) = three_pose_chain()?;
         // Start away from the solution, or the solve moves nothing and the
         // assertion below passes for the wrong reason.
         problem.set_variable_params(keys[2], se3_at(5.0).as_slice())?;

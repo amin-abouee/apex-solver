@@ -194,9 +194,10 @@ impl RowSpans {
         let mut block_of = vec![0u32; partition.eliminated_dof()];
         for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
             let owner = u32::try_from(block_idx).map_err(|_| {
-                LinAlgError::InvalidInput(format!(
-                    "{block_idx} eliminated blocks exceed the implicit Schur operator's u32 range"
-                ))
+                LinAlgError::IndexOverflow {
+                    what: "eliminated block index",
+                    value: block_idx,
+                }
                 .log()
             })?;
             let base = partition.eliminated_offset(block_idx);
@@ -232,9 +233,10 @@ fn push_column_spans(
     let rows = symbolic.row_idx_of_col_raw(col);
     let narrow = |x: usize| {
         u32::try_from(x).map_err(|_| {
-            LinAlgError::InvalidInput(format!(
-                "Jacobian index {x} exceeds the implicit Schur operator's u32 range"
-            ))
+            LinAlgError::IndexOverflow {
+                what: "Jacobian index",
+                value: x,
+            }
             .log()
         })
     };
@@ -245,7 +247,12 @@ fn push_column_spans(
         let chunk_end = (chunk + 1) * chunk_rows;
         let hi = k + rows[k..].partition_point(|&r| r < chunk_end);
         let slot = spans.get_mut(chunk).ok_or_else(|| {
-            LinAlgError::InvalidInput(format!("row {first_row} outside the Jacobian")).log()
+            LinAlgError::IndexOutOfRange {
+                what: "Jacobian row",
+                index: first_row,
+                len: jacobian.nrows(),
+            }
+            .log()
         })?;
         slot.push(ColumnSpan {
             lo: narrow(start + k)?,
@@ -301,6 +308,23 @@ pub struct ImplicitSparseSchur {
     block_scratch: Vec<f64>,  // eliminated-DOF sized: u = (EᵀE+λD_e)⁻¹·t
 
     structure: StructureCache,
+}
+
+/// The system the matrix-free Schur operator applies: the partition, `J`
+/// and the damping on the retained diagonal.
+#[derive(Clone, Copy)]
+struct OperatorSystem<'a> {
+    partition: &'a SchurPartition,
+    jacobian: &'a SparseColMat<usize, f64>,
+    damp_kept: &'a [f64],
+}
+
+/// Scratch the Schur operator writes into, reused across PCG iterations.
+struct OperatorBuffers<'a> {
+    out_buf: &'a mut [f64],
+    rows: &'a mut [f64],
+    temp_lm: &'a mut [f64],
+    scratch: &'a mut [f64],
 }
 
 impl ImplicitSparseSchur {
@@ -381,9 +405,9 @@ impl ImplicitSparseSchur {
 
     fn require_partition(&self) -> LinAlgResult<&SchurPartition> {
         self.partition.as_ref().ok_or_else(|| {
-            LinAlgError::InvalidInput(
-                "Schur solver used before initialize_structure; the partition is unknown".into(),
-            )
+            LinAlgError::NotInitialized {
+                component: "Schur solver partition",
+            }
             .log()
         })
     }
@@ -418,13 +442,10 @@ impl ImplicitSparseSchur {
                         owned if owned == block_idx => {}
                         owned => {
                             let other = partition.eliminated_blocks()[owned];
-                            return Err(LinAlgError::InvalidInput(format!(
-                                "variables {:?} and {:?} are both marked for elimination but \
-                                 share residual row {row}, so EᵀE is not block-diagonal and \
-                                 the elimination would give a wrong step; eliminate only \
-                                 mutually unconnected variables",
-                                block.key, other.key
-                            ))
+                            return Err(LinAlgError::ConnectedEliminated {
+                                first: block.key,
+                                second: other.key,
+                            }
                             .log());
                         }
                     }
@@ -494,19 +515,24 @@ impl ImplicitSparseSchur {
     /// `damp_kept` carries `λ·D_k` per retained local column, already clamped;
     /// it is empty for an undamped solve. The eliminated side's damping is
     /// baked into the inverted blocks before this is ever called.
-    #[allow(clippy::too_many_arguments)]
     fn apply_schur_operator(
         &self,
-        partition: &SchurPartition,
-        jacobian: &SparseColMat<usize, f64>,
-        damp_kept: &[f64],
+        system: &OperatorSystem<'_>,
         v: &Mat<f64>,
         out: &mut Mat<f64>,
-        out_buf: &mut [f64],
-        rows: &mut [f64],
-        temp_lm: &mut [f64],
-        scratch: &mut [f64],
+        buffers: OperatorBuffers<'_>,
     ) {
+        let OperatorSystem {
+            partition,
+            jacobian,
+            damp_kept,
+        } = *system;
+        let OperatorBuffers {
+            out_buf,
+            rows,
+            temp_lm,
+            scratch,
+        } = buffers;
         let symbolic = jacobian.symbolic();
         let row_idx = symbolic.row_idx();
         let values = jacobian.val();
@@ -696,7 +722,8 @@ impl ImplicitSparseSchur {
                     }
                 }
 
-                invert_with_retry_dyn(&s_ii).unwrap_or_else(|| DMatrix::identity(dof, dof))
+                invert_with_retry_dyn(&s_ii)
+                    .unwrap_or_else(|| crate::linalg::identity_preconditioner_block(dof))
             })
             .collect();
         Some(blocks)
@@ -735,11 +762,11 @@ impl ImplicitSparseSchur {
         let partition = self.require_partition()?.clone();
 
         if jacobian.ncols() != partition.total_dof() {
-            return Err(LinAlgError::InvalidInput(format!(
-                "Jacobian has {} columns but the partition covers {}",
-                jacobian.ncols(),
-                partition.total_dof()
-            ))
+            return Err(LinAlgError::DimensionMismatch {
+                what: "Jacobian columns",
+                expected: partition.total_dof(),
+                actual: jacobian.ncols(),
+            }
             .log());
         }
 
@@ -983,17 +1010,18 @@ impl ImplicitSparseSchur {
             &PcgParams::new(self.max_cg_iterations, self.cg_tolerance)
                 .with_q_tolerance(self.cg_q_tolerance),
             |p, ap| {
-                self.apply_schur_operator(
+                let system = OperatorSystem {
                     partition,
                     jacobian,
                     damp_kept,
-                    p,
-                    ap,
-                    &mut out_buf,
-                    &mut rows,
-                    &mut temp_lm,
-                    &mut scratch,
-                );
+                };
+                let buffers = OperatorBuffers {
+                    out_buf: &mut out_buf,
+                    rows: &mut rows,
+                    temp_lm: &mut temp_lm,
+                    scratch: &mut scratch,
+                };
+                self.apply_schur_operator(&system, p, ap, buffers);
             },
             |r, z| Self::apply_preconditioner(precond, r, z),
         );
@@ -1096,9 +1124,9 @@ impl StructureAware for ImplicitSparseSchur {
         let mut eliminated = Vec::new();
 
         for (key, variable) in variables {
-            let col_start = *variable_index_map.get(key).ok_or_else(|| {
-                LinAlgError::InvalidInput(format!("VarKey {:?} not in index map", key))
-            })?;
+            let col_start = *variable_index_map
+                .get(key)
+                .ok_or_else(|| LinAlgError::UnknownVariable { key }.log())?;
             let span = BlockSpan {
                 key,
                 col_start,
@@ -1710,17 +1738,18 @@ mod tests {
             let mut rows = vec![0.0; jacobian.nrows()];
             let mut temp_lm = vec![0.0; partition.eliminated_dof()];
             let mut scratch = vec![0.0; partition.eliminated_dof()];
-            solver.apply_schur_operator(
-                &partition,
-                &jacobian,
-                &[],
-                &v,
-                &mut out,
-                &mut out_buf,
-                &mut rows,
-                &mut temp_lm,
-                &mut scratch,
-            );
+            let system = OperatorSystem {
+                partition: &partition,
+                jacobian: &jacobian,
+                damp_kept: &[],
+            };
+            let buffers = OperatorBuffers {
+                out_buf: &mut out_buf,
+                rows: &mut rows,
+                temp_lm: &mut temp_lm,
+                scratch: &mut scratch,
+            };
+            solver.apply_schur_operator(&system, &v, &mut out, buffers);
             for (i, w) in want.iter().enumerate() {
                 assert_eq!(
                     out[(i, 0)].to_bits(),

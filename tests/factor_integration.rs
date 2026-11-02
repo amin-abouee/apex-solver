@@ -18,13 +18,14 @@
 
 // Test diagnostics print convergence traces to stderr; the workspace-wide
 // `print_stderr` deny targets library code, not test output.
-#![allow(clippy::print_stderr)]
 
-mod common;
+// `pub` so helpers a given test binary does not call are not reported as dead code.
+pub mod common;
 use common::{
     BA_TRUE, BG_TRUE, Trajectory, anchor_rn, anchor_se3, build_imu_dataset, imu_params, lm_solver,
     pose_to_dvector, velocity_dvector,
 };
+use std::io::Write;
 
 use apex_camera_models::CameraModel;
 use apex_solver::JacobianMode;
@@ -100,7 +101,7 @@ impl apex_solver::factors::Factor for Se23PositionVelocityFix {
 // ── 1. VIO-style pipeline: IMU + GNSS position fixes ─────────────────────────
 
 #[test]
-fn vio_imu_gnss_recovers_trajectory_with_biases() {
+fn vio_imu_gnss_recovers_trajectory_with_biases() -> Result<(), Box<dyn std::error::Error>> {
     let key_times: Vec<f64> = (0..=6).map(|k| k as f64 * 0.5).collect();
     let (truth, imu_segments) = build_imu_dataset(&key_times);
     let n = key_times.len();
@@ -147,7 +148,7 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
         Box::new(PriorFactor::new(truth_states[0].clone())),
         None,
         NoiseModel::from_sigmas(&[1e-3; 9]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     for bias_key in bias_keys.iter() {
         problem.add_residual_block_with_noise(
             &[*bias_key],
@@ -158,7 +159,7 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
             )),
             None,
             NoiseModel::from_sigmas(&[0.05; 6]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
     }
 
     // IMU factors between consecutive keyframes (SE23 state, bias) x 2.
@@ -191,7 +192,7 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
             ],
             Box::new(factor),
             None,
-        );
+        )?;
     }
 
     // GNSS position + Doppler velocity fixes at each keyframe.
@@ -205,7 +206,7 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
             None,
             NoiseModel::from_sigmas(&[0.05, 0.05, 0.05, 0.15, 0.15, 0.15])
                 .unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
     }
 
     let mut solver = lm_solver(300);
@@ -237,12 +238,13 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
             &b_hat[3..6]
         );
     }
+    Ok(())
 }
 
 // ── 2. Monocular BA with cheirality corner case ──────────────────────────────
 
 #[test]
-fn mono_ba_recovers_poses_with_behind_camera_landmark() {
+fn mono_ba_recovers_poses_with_behind_camera_landmark() -> Result<(), Box<dyn std::error::Error>> {
     let cam = apex_camera_models::PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
     let view_times = [0.0f64, 0.4, 0.8];
     let truth_poses: Vec<SE3> = view_times.iter().map(|t| Trajectory::pose(*t)).collect();
@@ -281,7 +283,7 @@ fn mono_ba_recovers_poses_with_behind_camera_landmark() {
     }
     // Anchor view 0 (defines the frame).
     for idx in 0..6 {
-        problem.fix_variable(pose_keys[0], idx);
+        problem.fix_variable(pose_keys[0], idx)?;
     }
 
     // Packed landmark blocks, fixed at truth (each view observes the same
@@ -293,7 +295,7 @@ fn mono_ba_recovers_poses_with_behind_camera_landmark() {
             flat.extend_from_slice(&[lm.x, lm.y, lm.z]);
         }
         let key = problem.add_variable(ManifoldType::RN, DVector::from_vec(flat.clone()));
-        anchor_rn(&mut problem, key, &flat);
+        anchor_rn(&mut problem, key, &flat)?;
         lm_keys.push(key);
     }
 
@@ -317,7 +319,7 @@ fn mono_ba_recovers_poses_with_behind_camera_landmark() {
                 HuberLoss::new(1.0).unwrap_or_else(|e| panic!("{e}")),
             )),
             NoiseModel::from_sigmas(&vec![1.0; obs.len() * 2]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
     }
 
     let mut solver = lm_solver(300);
@@ -336,12 +338,13 @@ fn mono_ba_recovers_poses_with_behind_camera_landmark() {
         let err = (hat.translation() - pose.translation()).norm();
         assert!(err < 0.05, "BA view {k} translation error {err:.4}");
     }
+    Ok(())
 }
 
 // ── 3. Stereo VO ─────────────────────────────────────────────────────────────
 
 #[test]
-fn stereo_vo_recovers_pose_and_points() {
+fn stereo_vo_recovers_pose_and_points() -> Result<(), Box<dyn std::error::Error>> {
     let cal =
         StereoCalibration::new(400.0, 400.0, 320.0, 240.0, 0.25).unwrap_or_else(|e| panic!("{e}"));
     let pose_true = Trajectory::pose(0.4);
@@ -382,7 +385,7 @@ fn stereo_vo_recovers_pose_and_points() {
             )),
             None,
             NoiseModel::from_sigmas(&[1e-6; 3]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
         let p_cam = pose_true.act(p, None, None);
         let meas = cal
             .project(&p_cam)
@@ -391,7 +394,7 @@ fn stereo_vo_recovers_pose_and_points() {
             &[pose_key, key],
             Box::new(StereoFactor::new(meas, cal.clone())),
             None,
-        );
+        )?;
     }
 
     let mut solver = lm_solver(3000);
@@ -428,23 +431,25 @@ fn stereo_vo_recovers_pose_and_points() {
             factor.linearize(&[&pv, fixed], &mut r, None);
             cost += r.iter().map(|v| v * v).sum::<f64>();
         }
-        eprintln!("stereo cost(frac={frac}) = {cost:.6e}");
+        writeln!(std::io::stderr(), "stereo cost(frac={frac}) = {cost:.6e}")?;
     }
 
     let pose_hat = SE3::from_param_slice(result.parameters[pose_key].as_param_slice());
     let err = (pose_hat.translation() - pose_true.translation()).norm();
-    eprintln!(
+    writeln!(
+        std::io::stderr(),
         "stereo pose_hat={:?} truth={:?}",
         pose_hat.translation(),
         pose_true.translation()
-    );
+    )?;
     assert!(err < 1e-3, "stereo pose error {err:.5}");
+    Ok(())
 }
 
 // ── 4. LiDAR scan matching: point-to-plane + GICP + point correspondences ────
 
 #[test]
-fn lidar_scan_matching_recovers_transform() {
+fn lidar_scan_matching_recovers_transform() -> Result<(), Box<dyn std::error::Error>> {
     // Body-frame scan points on a plane (z = 0 plane plus corner points).
     let scan_body: Vec<Vector3<f64>> = (0..12)
         .map(|i| {
@@ -494,14 +499,14 @@ fn lidar_scan_matching_recovers_transform() {
             )),
             None,
             NoiseModel::from_sigmas(&[1e-6; 3]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
 
         if i < 9 {
             problem.add_residual_block(
                 &[pose_key, p_key],
                 Box::new(PointToPlaneFactor::<SE3>::new(plane.clone())),
                 None,
-            );
+            )?;
         }
 
         if i < 9 && i % 4 == 0 {
@@ -518,7 +523,7 @@ fn lidar_scan_matching_recovers_transform() {
                     .unwrap_or_else(|e| panic!("{e}")),
                 ),
                 None,
-            );
+            )?;
         }
     }
     // Three corner points as exact point correspondences.
@@ -534,12 +539,12 @@ fn lidar_scan_matching_recovers_transform() {
             )),
             None,
             NoiseModel::from_sigmas(&[1e-6; 3]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
         problem.add_residual_block(
             &[pose_key, p_key],
             Box::new(PoseToPointFactor::<SE3>::new(scan_target[i])),
             None,
-        );
+        )?;
     }
 
     let mut solver = lm_solver(60);
@@ -550,12 +555,14 @@ fn lidar_scan_matching_recovers_transform() {
     let t_hat = SE3::from_param_slice(result.parameters[pose_key].as_param_slice());
     let pos_err = (t_hat.translation() - t_true.translation()).norm();
     assert!(pos_err < 1e-3, "scan-match position error {pos_err:.5}");
+    Ok(())
 }
 
 // ── 5. GNSS constellation: pseudorange + Doppler + velocity ──────────────────
 
 #[test]
-fn gnss_constellation_recovers_position_clock_and_velocity() {
+fn gnss_constellation_recovers_position_clock_and_velocity()
+-> Result<(), Box<dyn std::error::Error>> {
     // Four satellites; receiver at a non-trivial position with clock bias.
     let sats = [
         (
@@ -596,14 +603,14 @@ fn gnss_constellation_recovers_position_clock_and_velocity() {
             &[pos_key, bias_key],
             Box::new(PseudorangeFactor::new(s_pos, rho)),
             None,
-        );
+        )?;
         let f_hat = (s_pos - x_true).normalize();
         let rho_dot = f_hat.dot(&(s_vel - v_true));
         problem.add_residual_block(
             &[pos_key, vel_key],
             Box::new(DopplerFactor::new(s_pos, s_vel, rho_dot)),
             None,
-        );
+        )?;
     }
 
     let mut solver = lm_solver(60);
@@ -625,12 +632,13 @@ fn gnss_constellation_recovers_position_clock_and_velocity() {
     let v_err =
         ((v[0] - v_true.x).powi(2) + (v[1] - v_true.y).powi(2) + (v[2] - v_true.z).powi(2)).sqrt();
     assert!(v_err < 1e-3, "velocity error {v_err:.5}");
+    Ok(())
 }
 
 // ── 6. Marginalization consistency ───────────────────────────────────────────
 
 #[test]
-fn marginal_prior_reproduces_full_chain_solution() {
+fn marginal_prior_reproduces_full_chain_solution() -> Result<(), Box<dyn std::error::Error>> {
     // 3-pose chain with between factors and a prior on pose 0.
     let t0 = SE3::identity();
     let t1 = SE3::from_isometry(nalgebra::Isometry3::from_parts(
@@ -654,19 +662,19 @@ fn marginal_prior_reproduces_full_chain_solution() {
         Box::new(PriorFactor::new(t0.clone())),
         None,
         NoiseModel::from_sigmas(&[1e-4; 6]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     full.add_residual_block_with_noise(
         &[k0, k1],
         Box::new(BetweenFactor::new(d01.clone())),
         None,
         NoiseModel::from_sigmas(&[0.01; 6]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     full.add_residual_block_with_noise(
         &[k1, k2],
         Box::new(BetweenFactor::new(d12.clone())),
         None,
         NoiseModel::from_sigmas(&[0.01; 6]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     let mut solver = lm_solver(50);
     let full_result = solver
         .optimize(&mut full)
@@ -719,8 +727,8 @@ fn marginal_prior_reproduces_full_chain_solution() {
         Box::new(PriorFactor::new(t0.clone())),
         None,
         NoiseModel::from_sigmas(&[1e-4; 6]).unwrap_or_else(|e| panic!("{e}")),
-    );
-    reduced.add_residual_block(&[k1, k2], Box::new(marginal), None);
+    )?;
+    reduced.add_residual_block(&[k1, k2], Box::new(marginal), None)?;
 
     let mut solver2 = lm_solver(50);
     let red_result = solver2
@@ -739,12 +747,13 @@ fn marginal_prior_reproduces_full_chain_solution() {
         err2.norm() < 1e-6,
         "p2 mismatch after marginalization: {err2}"
     );
+    Ok(())
 }
 
 // ── 7. Loop closure with partial pose priors ─────────────────────────────────
 
 #[test]
-fn loop_closure_with_rotation_prior_closes_the_loop() {
+fn loop_closure_with_rotation_prior_closes_the_loop() -> Result<(), Box<dyn std::error::Error>> {
     // Square loop; the last edge is a noisy odometry edge, corrected by a
     // rotation prior + translation prior from an independent loop detection.
     let poses = [
@@ -768,7 +777,7 @@ fn loop_closure_with_rotation_prior_closes_the_loop() {
         .iter()
         .map(|p| problem.add_variable(ManifoldType::SE3, pose_to_dvector(p)))
         .collect();
-    anchor_se3(&mut problem, keys[0], &poses[0]);
+    anchor_se3(&mut problem, keys[0], &poses[0])?;
 
     // Odometry edges (perturb the true relative poses).
     for k in 0..3 {
@@ -785,7 +794,7 @@ fn loop_closure_with_rotation_prior_closes_the_loop() {
             Box::new(BetweenFactor::new(d_noisy)),
             None,
             NoiseModel::from_sigmas(&[0.01; 6]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
     }
     // Loop edge with rotation prior (the loop detection says the final pose's
     // rotation must match the start's) + translation prior back at origin.
@@ -794,7 +803,7 @@ fn loop_closure_with_rotation_prior_closes_the_loop() {
         Box::new(PoseRotationPrior::new(poses[0].clone())),
         None,
         NoiseModel::from_sigmas(&[0.01; 3]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
     problem.add_residual_block_with_noise(
         &[keys[3]],
         Box::new(apex_solver::factors::pose::PoseTranslationPrior::new(
@@ -802,7 +811,7 @@ fn loop_closure_with_rotation_prior_closes_the_loop() {
         )),
         None,
         NoiseModel::from_sigmas(&[0.005; 3]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
 
     let mut solver = lm_solver(60);
     let result = solver
@@ -817,12 +826,13 @@ fn loop_closure_with_rotation_prior_closes_the_loop() {
         "loop closure did not pull pose 3 back: {:?}",
         p3.translation()
     );
+    Ok(())
 }
 
 // ── 8. Smart factor & friends at the graph level ─────────────────────────────
 
 #[test]
-fn smart_factor_pose_only_ba_recovers_poses() {
+fn smart_factor_pose_only_ba_recovers_poses() -> Result<(), Box<dyn std::error::Error>> {
     let cam = apex_camera_models::PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
     // Well-spread depths and lateral offsets, wide baseline: a narrow slab
     // of points is near-degenerate for structure-less multi-view factors.
@@ -853,12 +863,12 @@ fn smart_factor_pose_only_ba_recovers_poses() {
         };
         keys.push(problem.add_variable(ManifoldType::SE3, pose_to_dvector(&init)));
     }
-    problem.fix_variable(keys[0], 0);
-    problem.fix_variable(keys[0], 1);
-    problem.fix_variable(keys[0], 2);
-    problem.fix_variable(keys[0], 3);
-    problem.fix_variable(keys[0], 4);
-    problem.fix_variable(keys[0], 5);
+    problem.fix_variable(keys[0], 0)?;
+    problem.fix_variable(keys[0], 1)?;
+    problem.fix_variable(keys[0], 2)?;
+    problem.fix_variable(keys[0], 3)?;
+    problem.fix_variable(keys[0], 4)?;
+    problem.fix_variable(keys[0], 5)?;
 
     for point in &points {
         let obs: Vec<Vector2<f64>> = poses
@@ -869,7 +879,7 @@ fn smart_factor_pose_only_ba_recovers_poses() {
             })
             .collect();
         let smart = SmartProjectionFactor::new(obs, cam).unwrap_or_else(|e| panic!("{e}"));
-        problem.add_residual_block(&keys, Box::new(smart), None);
+        problem.add_residual_block(&keys, Box::new(smart), None)?;
     }
     // Pose-only smart factors are marginally determined on their own (the
     // re-triangulated scene absorbs rigid motion); real VO rides them with
@@ -881,7 +891,7 @@ fn smart_factor_pose_only_ba_recovers_poses() {
             Box::new(BetweenFactor::new(d)),
             None,
             NoiseModel::from_sigmas(&[0.05; 6]).unwrap_or_else(|e| panic!("{e}")),
-        );
+        )?;
     }
 
     let mut solver = lm_solver(300);
@@ -894,6 +904,7 @@ fn smart_factor_pose_only_ba_recovers_poses() {
         let err = (hat.translation() - pose.translation()).norm();
         assert!(err < 1e-2, "smart BA view {k} translation error {err:.4}");
     }
+    Ok(())
 }
 
 #[test]
@@ -932,7 +943,7 @@ fn inverse_depth_factor_slides_along_ray_for_distant_landmarks() {
 // ── 9. Aux inertial aids at the graph level ──────────────────────────────────
 
 #[test]
-fn barometer_and_attitude_factors_constrain_a_hover() {
+fn barometer_and_attitude_factors_constrain_a_hover() -> Result<(), Box<dyn std::error::Error>> {
     // A vehicle hovering at 50 m: barometer fixes altitude, accelerometer
     // direction fixes attitude (level), magnetometer fixes yaw up to the
     // field direction.
@@ -959,7 +970,7 @@ fn barometer_and_attitude_factors_constrain_a_hover() {
         &[pose_key, bias_key],
         Box::new(BarometricFactor::<SE3>::new(50.0)),
         None,
-    );
+    )?;
     // Gravity reads (0,0,-1) in the body frame when level.
     let g_body = Vector3::new(0.0, 0.0, -1.0);
     problem.add_residual_block(
@@ -969,7 +980,7 @@ fn barometer_and_attitude_factors_constrain_a_hover() {
                 .unwrap_or_else(|e| panic!("{e}")),
         ),
         None,
-    );
+    )?;
     // GNSS velocity (zero for a hover).
     problem.add_residual_block_with_noise(
         &[pose_key],
@@ -978,7 +989,7 @@ fn barometer_and_attitude_factors_constrain_a_hover() {
         )),
         None,
         NoiseModel::from_sigmas(&[0.1; 3]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
 
     let mut solver = lm_solver(60);
     let result = solver
@@ -998,10 +1009,11 @@ fn barometer_and_attitude_factors_constrain_a_hover() {
         roll_pitch < 1e-6,
         "vehicle not level: roll/pitch tilt {roll_pitch}"
     );
+    Ok(())
 }
 
 #[test]
-fn bearing_range_and_gps_velocity_graph() {
+fn bearing_range_and_gps_velocity_graph() -> Result<(), Box<dyn std::error::Error>> {
     // A landmark observed with bearing+range, plus a velocity fix.
     let pose_true = Trajectory::pose(0.2);
     let landmark = Vector3::new(3.0, 1.0, 2.0);
@@ -1023,20 +1035,20 @@ fn bearing_range_and_gps_velocity_graph() {
         velocity_dvector(&Trajectory::velocity(0.2)),
     );
 
-    anchor_se3(&mut problem, pose_key, &pose_true);
+    anchor_se3(&mut problem, pose_key, &pose_true)?;
     problem.add_residual_block(
         &[pose_key, lm_key],
         Box::new(
             BearingRangeFactor::<SE3>::new(bearing, delta.norm()).unwrap_or_else(|e| panic!("{e}")),
         ),
         None,
-    );
+    )?;
     problem.add_residual_block_with_noise(
         &[vel_key],
         Box::new(GpsVelocityFactor::new(Trajectory::velocity(0.2))),
         None,
         NoiseModel::from_sigmas(&[0.05; 3]).unwrap_or_else(|e| panic!("{e}")),
-    );
+    )?;
 
     let mut solver = lm_solver(50);
     let result = solver
@@ -1050,4 +1062,5 @@ fn bearing_range_and_gps_velocity_graph() {
     .sqrt();
     assert!(err < 1e-3, "landmark not recovered: {err:.5}");
     let _ = PosePointRangeFactor::<SE3>::new(1.0); // smoke: type is public
+    Ok(())
 }

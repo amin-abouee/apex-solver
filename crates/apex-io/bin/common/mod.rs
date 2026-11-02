@@ -1,5 +1,4 @@
 //! Helpers shared by the bag_* command-line tools.
-#![allow(dead_code)]
 
 use apex_io::rosbag::{BagKind, OutputCompression};
 use std::path::Path;

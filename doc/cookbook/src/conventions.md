@@ -137,7 +137,7 @@ model whitens twice and silently over-weights the block.
 | Guarantee | Enforced by |
 |---|---|
 | a malformed factor is rejected at registration | `Factor::validate_variables` |
-| a double-whitened factor is rejected at registration | `Factor::whitens_internally` + `try_add_residual_block_with_noise` |
+| a double-whitened factor is rejected at registration | `Factor::whitens_internally` + `add_residual_block_with_noise` |
 | a step applies through the manifold's own plus | `apply_parameter_step` |
 | a fixed variable never moves | the free-column step vector |
 | a failed solve is typed | `OptimizeResult` / `SolverResult` |

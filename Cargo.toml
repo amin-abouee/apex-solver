@@ -84,6 +84,7 @@ expect_used = "deny"
 # user-facing console output (and --nocapture test notes) are their job.
 print_stdout = "deny"
 print_stderr = "deny"
+dbg_macro = "deny"
 
 # apex-solver package (root crate)
 [package]

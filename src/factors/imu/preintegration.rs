@@ -20,6 +20,7 @@ use nalgebra::{Matrix3, SMatrix, UnitQuaternion, Vector3};
 use super::types::{
     ImuMeasurement, ImuParameters, PreintegrationError, SpeedAndBias, SpeedAndBiasExt,
 };
+use crate::error::ErrorLogging;
 use crate::factors::common::math::{sinc, skew, symm_sqrt_inverse};
 
 /// `P ← 0.5·(P + Pᵀ)`, in place and with the same result as that expression.
@@ -125,7 +126,7 @@ impl ImuPreintegration {
     ) -> Result<Self, PreintegrationError> {
         let measurements: Arc<[ImuMeasurement]> = measurements.into();
         if !t0.is_finite() || !t1.is_finite() || t1 <= t0 {
-            return Err(PreintegrationError::NonPositiveInterval { t0, t1 });
+            return Err(PreintegrationError::NonPositiveInterval { t0, t1 }.log());
         }
         if let (Some(first), Some(last)) = (measurements.first(), measurements.last())
             && (last.timestamp < t0 || first.timestamp > t1)
@@ -136,7 +137,8 @@ impl ImuPreintegration {
                 last: last.timestamp,
                 t0,
                 t1,
-            });
+            }
+            .log());
         }
         Ok(Self::new(
             measurements,

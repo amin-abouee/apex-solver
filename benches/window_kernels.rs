@@ -106,20 +106,20 @@ fn window() -> SetupResult<(Problem, Vec<VarKey>, Vec<VarKey>)> {
         Box::new(PriorFactor::new(SE23::identity())),
         None,
         sigmas(9, 1e-4)?,
-    );
+    )?;
     problem.add_residual_block_with_noise(
         &[biases[0]],
         Box::new(EuclideanPriorFactor::new(DVector::zeros(6))),
         None,
         sigmas(6, 0.05)?,
-    );
+    )?;
     for k in 0..WINDOW_STATES - 1 {
         let preint = preintegration(k as f64 * INTERVAL);
         problem.add_residual_block(
             &[states[k], biases[k], states[k + 1], biases[k + 1]],
             Box::new(se23::CombinedImuFactor::new(preint)),
             None,
-        );
+        )?;
     }
     for state in &states {
         problem.add_residual_block_with_noise(
@@ -127,7 +127,7 @@ fn window() -> SetupResult<(Problem, Vec<VarKey>, Vec<VarKey>)> {
             Box::new(PriorFactor::new(SE23::identity())),
             None,
             sigmas(9, 1.0)?,
-        );
+        )?;
     }
     Ok((problem, states, biases))
 }

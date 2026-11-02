@@ -1,6 +1,7 @@
 //! Metadata parsing for ROS2 bag files
 
-use crate::rosbag::error::{ReaderError, Result};
+use super::error::{Ros2BagError, Ros2BagResult as Result};
+use crate::error::ErrorLogging;
 use crate::rosbag::types::{Duration, QosProfile, StartingTime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -106,14 +107,18 @@ impl BagMetadata {
     /// Load metadata from a metadata.yaml file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(|_| ReaderError::MetadataNotFound {
-            path: path.to_path_buf(),
+        let content = std::fs::read_to_string(path).map_err(|source| {
+            Ros2BagError::MetadataNotFound {
+                path: path.to_path_buf(),
+                source,
+            }
+            .log()
         })?;
 
-        let metadata: BagMetadata = serde_norway::from_str(&content)?;
+        let metadata: BagMetadata =
+            serde_norway::from_str(&content).map_err(|e| Ros2BagError::from(e).log())?;
 
-        // Validate the metadata
-        metadata.validate()?;
+        metadata.validate().map_err(ErrorLogging::log)?;
 
         Ok(metadata)
     }
@@ -124,7 +129,7 @@ impl BagMetadata {
 
         // Check supported version
         if info.version > 9 {
-            return Err(ReaderError::UnsupportedVersion {
+            return Err(Ros2BagError::UnsupportedVersion {
                 version: info.version,
             });
         }
@@ -144,13 +149,11 @@ impl BagMetadata {
                     .any(|path| path.ends_with(".mcap"));
 
                 if !has_db3 && !has_mcap {
-                    return Err(ReaderError::UnsupportedStorageFormat {
-                        format: "unknown (no .db3 or .mcap files found)".to_string(),
-                    });
+                    return Err(Ros2BagError::NoStorageFiles);
                 }
             }
             _ => {
-                return Err(ReaderError::UnsupportedStorageFormat {
+                return Err(Ros2BagError::UnsupportedStorageFormat {
                     format: info.storage_identifier.clone(),
                 });
             }
@@ -158,7 +161,7 @@ impl BagMetadata {
 
         // Check compression format if specified
         if !info.compression_format.is_empty() && info.compression_format != "zstd" {
-            return Err(ReaderError::UnsupportedCompressionFormat {
+            return Err(Ros2BagError::UnsupportedCompressionFormat {
                 format: info.compression_format.clone(),
             });
         }
@@ -166,7 +169,7 @@ impl BagMetadata {
         // Check serialization formats
         for topic in &info.topics_with_message_count {
             if topic.topic_metadata.serialization_format != "cdr" {
-                return Err(ReaderError::UnsupportedSerializationFormat {
+                return Err(Ros2BagError::UnsupportedSerializationFormat {
                     format: topic.topic_metadata.serialization_format.clone(),
                 });
             }
@@ -228,17 +231,16 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    #[allow(clippy::too_many_arguments)]
+    /// `[duration_ns, start_ns, msg_count]` travel together as `counts`.
     fn make_metadata_yaml(
         version: u32,
         storage_id: &str,
         compression_format: &str,
         compression_mode: &str,
         serialization_format: &str,
-        duration_ns: u64,
-        start_ns: u64,
-        msg_count: u64,
+        counts: [u64; 3],
     ) -> String {
+        let [duration_ns, start_ns, msg_count] = counts;
         format!(
             r#"rosbag2_bagfile_information:
   version: {version}
@@ -275,51 +277,51 @@ mod tests {
 
     #[test]
     fn validate_unsupported_version_returns_err() -> TestResult {
-        let yaml = make_metadata_yaml(10, "sqlite3", "", "", "cdr", 0, 0, 0);
+        let yaml = make_metadata_yaml(10, "sqlite3", "", "", "cdr", [0, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert!(matches!(
             meta.validate(),
-            Err(ReaderError::UnsupportedVersion { .. })
+            Err(Ros2BagError::UnsupportedVersion { .. })
         ));
         Ok(())
     }
 
     #[test]
     fn validate_unsupported_storage_format_returns_err() -> TestResult {
-        let yaml = make_metadata_yaml(9, "hdf5", "", "", "cdr", 0, 0, 0);
+        let yaml = make_metadata_yaml(9, "hdf5", "", "", "cdr", [0, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert!(matches!(
             meta.validate(),
-            Err(ReaderError::UnsupportedStorageFormat { .. })
+            Err(Ros2BagError::UnsupportedStorageFormat { .. })
         ));
         Ok(())
     }
 
     #[test]
     fn validate_unsupported_compression_returns_err() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "lz4", "", "cdr", 0, 0, 0);
+        let yaml = make_metadata_yaml(9, "sqlite3", "lz4", "", "cdr", [0, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert!(matches!(
             meta.validate(),
-            Err(ReaderError::UnsupportedCompressionFormat { .. })
+            Err(Ros2BagError::UnsupportedCompressionFormat { .. })
         ));
         Ok(())
     }
 
     #[test]
     fn validate_unsupported_serialization_format_returns_err() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "protobuf", 0, 0, 0);
+        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "protobuf", [0, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert!(matches!(
             meta.validate(),
-            Err(ReaderError::UnsupportedSerializationFormat { .. })
+            Err(Ros2BagError::UnsupportedSerializationFormat { .. })
         ));
         Ok(())
     }
 
     #[test]
     fn validate_valid_sqlite3_bag_ok() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 1000, 2000, 5);
+        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", [1000, 2000, 5]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert!(meta.validate().is_ok());
         Ok(())
@@ -327,7 +329,7 @@ mod tests {
 
     #[test]
     fn validate_valid_mcap_bag_ok() -> TestResult {
-        let yaml = make_metadata_yaml(9, "mcap", "", "", "cdr", 1000, 2000, 5);
+        let yaml = make_metadata_yaml(9, "mcap", "", "", "cdr", [1000, 2000, 5]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert!(meta.validate().is_ok());
         Ok(())
@@ -335,7 +337,7 @@ mod tests {
 
     #[test]
     fn validate_zstd_compression_ok() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "zstd", "file", "cdr", 0, 0, 0);
+        let yaml = make_metadata_yaml(9, "sqlite3", "zstd", "file", "cdr", [0, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert!(meta.validate().is_ok());
         Ok(())
@@ -345,7 +347,7 @@ mod tests {
 
     #[test]
     fn duration_accessor() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 12345, 0, 0);
+        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", [12345, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert_eq!(meta.duration(), 12345);
         Ok(())
@@ -353,7 +355,7 @@ mod tests {
 
     #[test]
     fn start_time_accessor() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 0, 999_000_000, 1);
+        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", [0, 999_000_000, 1]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert_eq!(meta.start_time(), 999_000_000);
         Ok(())
@@ -361,7 +363,7 @@ mod tests {
 
     #[test]
     fn end_time_equals_start_plus_duration_when_nonzero() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 5_000, 1_000, 1);
+        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", [5_000, 1_000, 1]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert_eq!(meta.end_time(), 6_000);
         Ok(())
@@ -369,7 +371,7 @@ mod tests {
 
     #[test]
     fn end_time_zero_when_no_messages() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 5_000, 1_000, 0);
+        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", [5_000, 1_000, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert_eq!(meta.end_time(), 0);
         Ok(())
@@ -377,7 +379,7 @@ mod tests {
 
     #[test]
     fn message_count_accessor() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 0, 0, 77);
+        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", [0, 0, 77]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert_eq!(meta.message_count(), 77);
         Ok(())
@@ -385,7 +387,7 @@ mod tests {
 
     #[test]
     fn is_compressed_false_when_no_format() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 0, 0, 0);
+        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", [0, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert!(!meta.is_compressed());
         Ok(())
@@ -393,7 +395,7 @@ mod tests {
 
     #[test]
     fn is_compressed_true_when_zstd() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "zstd", "file", "cdr", 0, 0, 0);
+        let yaml = make_metadata_yaml(9, "sqlite3", "zstd", "file", "cdr", [0, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert!(meta.is_compressed());
         Ok(())
@@ -401,7 +403,7 @@ mod tests {
 
     #[test]
     fn compression_mode_none_when_empty() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 0, 0, 0);
+        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", [0, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert!(meta.compression_mode().is_none());
         Ok(())
@@ -409,7 +411,7 @@ mod tests {
 
     #[test]
     fn compression_mode_some_when_set() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "zstd", "FILE", "cdr", 0, 0, 0);
+        let yaml = make_metadata_yaml(9, "sqlite3", "zstd", "FILE", "cdr", [0, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         assert_eq!(meta.compression_mode(), Some("FILE"));
         Ok(())
@@ -423,14 +425,14 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.err().ok_or("expected error")?,
-            ReaderError::MetadataNotFound { .. }
+            Ros2BagError::MetadataNotFound { .. }
         ));
         Ok(())
     }
 
     #[test]
     fn from_file_valid_yaml_parses_ok() -> TestResult {
-        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 100, 200, 3);
+        let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", [100, 200, 3]);
         let f = write_temp_yaml(&yaml)?;
         let meta = BagMetadata::from_file(f.path())?;
         assert_eq!(meta.message_count(), 3);
@@ -456,21 +458,18 @@ mod tests {
 
     #[test]
     fn validate_empty_storage_id_with_unknown_extension_returns_err() -> TestResult {
-        let yaml = make_metadata_yaml(9, "", "", "", "cdr", 0, 0, 0);
+        let yaml = make_metadata_yaml(9, "", "", "", "cdr", [0, 0, 0]);
         // Replace the .db3 file path with an unknown extension
         let yaml_modified = yaml.replace(".db3", ".bag");
         let meta: BagMetadata = serde_norway::from_str(&yaml_modified)?;
         let result = meta.validate();
-        assert!(matches!(
-            result,
-            Err(ReaderError::UnsupportedStorageFormat { .. })
-        ));
+        assert!(matches!(result, Err(Ros2BagError::NoStorageFiles)));
         Ok(())
     }
 
     #[test]
     fn validate_empty_storage_id_with_db3_extension_ok() -> TestResult {
-        let yaml = make_metadata_yaml(9, "", "", "", "cdr", 0, 0, 0);
+        let yaml = make_metadata_yaml(9, "", "", "", "cdr", [0, 0, 0]);
         let meta: BagMetadata = serde_norway::from_str(&yaml)?;
         let result = meta.validate();
         assert!(result.is_ok());

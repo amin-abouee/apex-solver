@@ -10,4 +10,9 @@ ignore = [
     # Re-evaluate when rerun ships a release on quick-xml >= 0.41.
     "RUSTSEC-2026-0195",
     "RUSTSEC-2026-0194",
+    # RUSTSEC-2026-0435 — thrift 0.17 binary protocol `read_bytes` allocates
+    # an unbounded buffer. Pinned by parquet 55 via rerun 0.26 (re_data_loader);
+    # we never read untrusted Parquet. Re-evaluate on a rerun release whose
+    # parquet depends on thrift >= 0.23.
+    "RUSTSEC-2026-0435",
 ]

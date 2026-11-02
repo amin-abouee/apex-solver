@@ -21,8 +21,8 @@
 //! has the `From<&Self> for DVector<f64>` and `TryFrom<&[f64]>` parameter
 //! conversions: all of them.
 
-use crate::CameraModel;
-use crate::CameraModelError;
+use crate::error::ErrorLogging;
+use crate::{CameraModel, ConversionError, ConversionResult, ParamError};
 use nalgebra::{DMatrix, DVector, Vector2, Vector3};
 
 /// Controls for [`convert_camera`].
@@ -71,13 +71,6 @@ struct Sample {
     pixel: Vector2<f64>,
 }
 
-fn numerical(details: impl Into<String>) -> CameraModelError {
-    CameraModelError::NumericalError {
-        operation: "convert_camera".to_string(),
-        details: details.into(),
-    }
-}
-
 /// The rays of `source`'s image, each with its pixel.
 fn sample_rays<S: CameraModel>(
     source: &S,
@@ -112,29 +105,27 @@ fn sample_rays<S: CameraModel>(
     samples
 }
 
-/// The target at `parameters`, or `None` when they are not a valid camera.
-fn build<D>(parameters: &DVector<f64>) -> Option<D>
+/// The target at `parameters`; `TryFrom` checks the length and validates.
+fn build<D>(parameters: &DVector<f64>) -> Result<D, ParamError>
 where
-    D: CameraModel + for<'a> TryFrom<&'a [f64], Error = CameraModelError>,
+    D: CameraModel + for<'a> TryFrom<&'a [f64], Error = ParamError>,
 {
-    let camera = D::try_from(parameters.as_slice()).ok()?;
-    camera.validate_params().ok()?;
-    Some(camera)
+    D::try_from(parameters.as_slice())
 }
 
-/// Residuals `target.project(ray) - pixel`, stacked, or `None` if any sample
-/// does not project.
-fn residuals<D: CameraModel>(camera: &D, samples: &[Sample]) -> Option<DVector<f64>> {
+/// Residuals `target.project(ray) - pixel`, stacked, or the index of the
+/// first sample that does not project to a finite pixel.
+fn residuals<D: CameraModel>(camera: &D, samples: &[Sample]) -> Result<DVector<f64>, usize> {
     let mut out = DVector::zeros(2 * samples.len());
     for (i, sample) in samples.iter().enumerate() {
-        let uv = camera.project(&sample.ray).ok()?;
+        let uv = camera.project(&sample.ray).map_err(|_| i)?;
         if !uv.x.is_finite() || !uv.y.is_finite() {
-            return None;
+            return Err(i);
         }
         out[2 * i] = uv.x - sample.pixel.x;
         out[2 * i + 1] = uv.y - sample.pixel.y;
     }
-    Some(out)
+    Ok(out)
 }
 
 /// Fits a camera of the target model `D` to `source`.
@@ -149,10 +140,13 @@ fn residuals<D: CameraModel>(camera: &D, samples: &[Sample]) -> Option<DVector<f
 ///
 /// # Errors
 ///
-/// [`CameraModelError::NumericalError`] when the source yields no ray the
-/// initial target can project, or the normal equations are singular from the
-/// start. Otherwise the best camera found is returned, and
-/// [`ConversionReport::rms_px`] says whether it is good enough.
+/// [`ConversionError::TooFewRays`] when the source yields fewer rays the
+/// initial target can project than the target has parameters,
+/// [`ConversionError::InvalidInitial`] (with the validation error as its
+/// source) when `initial` is not a valid camera, and
+/// [`ConversionError::InitialCannotProject`] when it projects a sample to a
+/// non-finite pixel. Each is logged here. Otherwise the best camera found is
+/// returned, and [`ConversionReport::rms_px`] says whether it is good enough.
 ///
 /// # Example
 ///
@@ -182,10 +176,10 @@ pub fn convert_camera<S, D>(
     width: u32,
     height: u32,
     options: &ConversionOptions,
-) -> Result<(D, ConversionReport), CameraModelError>
+) -> ConversionResult<(D, ConversionReport)>
 where
     S: CameraModel,
-    D: CameraModel + for<'a> TryFrom<&'a [f64], Error = CameraModelError>,
+    D: CameraModel + for<'a> TryFrom<&'a [f64], Error = ParamError>,
     DVector<f64>: for<'a> From<&'a D>,
 {
     let mut samples = sample_rays(source, width, height, options);
@@ -193,19 +187,18 @@ where
     // costs stay comparable from one iteration to the next.
     samples.retain(|sample| initial.project(&sample.ray).is_ok());
     if samples.len() < D::INTRINSIC_DIM {
-        return Err(numerical(format!(
-            "{} usable rays for {} parameters",
-            samples.len(),
-            D::INTRINSIC_DIM
-        )));
+        return Err(ConversionError::TooFewRays {
+            got: samples.len(),
+            need: D::INTRINSIC_DIM,
+        }
+        .log());
     }
 
     let dim = D::INTRINSIC_DIM;
     let mut parameters = DVector::<f64>::from(initial);
-    let mut camera =
-        build::<D>(&parameters).ok_or_else(|| numerical("the initial camera is not valid"))?;
+    let mut camera = build::<D>(&parameters).map_err(|e| ConversionError::from(e.log()))?;
     let mut residual = residuals(&camera, &samples)
-        .ok_or_else(|| numerical("the initial camera cannot project every sample"))?;
+        .map_err(|sample| ConversionError::InitialCannotProject { sample }.log())?;
     let mut cost = residual.norm_squared();
     let mut damping = 1e-3;
     let mut iterations = 0;
@@ -248,8 +241,11 @@ where
                 continue;
             };
             let trial = &parameters + &step;
+            // A trial step outside the model's domain, or one that cannot
+            // project every sample, is an expected rejection: raise the damping.
             let accepted = build::<D>(&trial)
-                .and_then(|candidate| residuals(&candidate, &samples).map(|r| (candidate, r)));
+                .ok()
+                .and_then(|candidate| residuals(&candidate, &samples).ok().map(|r| (candidate, r)));
             if let Some((candidate, trial_residual)) = accepted {
                 let trial_cost = trial_residual.norm_squared();
                 if trial_cost < cost {
@@ -300,7 +296,7 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     /// LaMAria `R_06_medium` `cam0`.
-    fn lamaria() -> Result<Fisheye624Camera, CameraModelError> {
+    fn lamaria() -> Result<Fisheye624Camera, ParamError> {
         crate::fisheye624::try_from_params(&[
             241.604_892_556_728_4,
             241.604_892_556_728_4,
@@ -321,7 +317,7 @@ mod tests {
         ])
     }
 
-    fn kb() -> Result<KannalaBrandtCamera, CameraModelError> {
+    fn kb() -> Result<KannalaBrandtCamera, ParamError> {
         KannalaBrandtCamera::new(
             PinholeParams::new(280.0, 281.0, 320.0, 240.0)?,
             DistortionModel::KannalaBrandt {
@@ -337,16 +333,16 @@ mod tests {
         source: &S,
         initial: &D,
         options: &ConversionOptions,
-    ) -> Result<(D, ConversionReport), CameraModelError>
+    ) -> ConversionResult<(D, ConversionReport)>
     where
         S: CameraModel,
-        D: CameraModel + for<'a> TryFrom<&'a [f64], Error = CameraModelError>,
+        D: CameraModel + for<'a> TryFrom<&'a [f64], Error = ParamError>,
         DVector<f64>: for<'a> From<&'a D>,
     {
         convert_camera(source, initial, 640, 480, options)
     }
 
-    fn neutral_624(pinhole: PinholeParams) -> Result<Fisheye624Camera, CameraModelError> {
+    fn neutral_624(pinhole: PinholeParams) -> Result<Fisheye624Camera, ParamError> {
         Fisheye624Camera::new(
             pinhole,
             DistortionModel::Fisheye624 {
@@ -499,10 +495,35 @@ mod tests {
             ..ConversionOptions::default()
         };
         let result = convert(&source, &neutral_624(source.pinhole)?, &options);
-        assert!(matches!(
-            result,
-            Err(CameraModelError::NumericalError { .. })
-        ));
+        assert!(matches!(result, Err(ConversionError::TooFewRays { .. })));
+        Ok(())
+    }
+
+    /// An invalid starting camera is reported with the validation error as
+    /// its source, not replaced by a generic message.
+    #[test]
+    fn an_invalid_initial_camera_keeps_the_validation_error() -> TestResult {
+        let source = kb()?;
+        let mut initial = UcmCamera::new(source.pinhole, DistortionModel::UCM { alpha: 0.5 })?;
+        initial.distortion = DistortionModel::UCM { alpha: 1.5 };
+        let error = convert(&source, &initial, &ConversionOptions::default())
+            .err()
+            .ok_or("expected an error")?;
+        let expected = ParamError::ParameterOutOfRange {
+            param: "alpha",
+            value: 1.5,
+            min: 0.0,
+            max: 1.0,
+        };
+        assert_eq!(error, ConversionError::InvalidInitial(expected));
+        let source_error = std::error::Error::source(&error).ok_or("expected a source")?;
+        assert_eq!(source_error.to_string(), expected.to_string());
+        let root = crate::CameraModelError::from(error);
+        assert_eq!(
+            crate::error::ErrorChainExt::chain_compact(&root),
+            "the initial camera is not valid → \
+             parameter alpha must be in range [0, 1], got 1.5"
+        );
         Ok(())
     }
 }

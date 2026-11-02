@@ -21,6 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::ErrorLogging;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
 use nalgebra::Vector3;
@@ -28,35 +29,49 @@ use serde::Deserialize;
 
 /// Why a calibration file could not be read.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum LamariaError {
     /// The file could not be read.
-    #[error("cannot read {path}: {source}")]
+    #[error("cannot read LaMAria calibration {}", path.display())]
     Io {
         /// The file.
         path: PathBuf,
         /// The underlying error.
+        #[source]
         source: std::io::Error,
     },
     /// The text is not the expected JSON.
-    #[error("cannot parse {path}: {source}")]
+    #[error("cannot parse LaMAria calibration {}", path.display())]
     Json {
         /// The file.
         path: PathBuf,
         /// The underlying error.
+        #[source]
         source: serde_json::Error,
     },
-    /// A value is present but unusable.
-    #[error("{path}: {what}")]
-    Invalid {
+    /// A camera's parameter list is empty or holds a NaN or infinity.
+    #[error("{}: {sensor} parameters are empty or not finite", path.display())]
+    InvalidParams {
         /// The file.
         path: PathBuf,
-        /// What is wrong, with the sensor.
-        what: String,
+        /// The sensor, e.g. `cam0`.
+        sensor: &'static str,
+    },
+    /// A sensor's `T_b_s` is not a unit quaternion and a finite vector.
+    #[error("{}: {sensor} T_b_s is not a unit quaternion and a finite vector", path.display())]
+    InvalidPose {
+        /// The file.
+        path: PathBuf,
+        /// The sensor, e.g. `imu0`.
+        sensor: &'static str,
     },
 }
 
 /// Result alias for this module.
 pub type Result<T> = std::result::Result<T, LamariaError>;
+
+/// Result alias for this module, named like the other module aliases.
+pub type LamariaResult<T> = Result<T>;
 
 /// One camera: its model, image size, intrinsics and mounting.
 #[derive(Debug, Clone, PartialEq)]
@@ -133,11 +148,14 @@ impl Calibration {
     /// See [`LamariaError`].
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|source| LamariaError::Io {
-            path: path.to_path_buf(),
-            source,
+        let text = std::fs::read_to_string(path).map_err(|source| {
+            LamariaError::Io {
+                path: path.to_path_buf(),
+                source,
+            }
+            .log()
         })?;
-        Self::parse(&text, path)
+        Self::parse(&text, path).map_err(ErrorLogging::log)
     }
 
     /// Parse calibration JSON. `path` labels errors only.
@@ -150,19 +168,18 @@ impl Calibration {
             path: path.to_path_buf(),
             source,
         })?;
-        let invalid = |what: String| LamariaError::Invalid {
-            path: path.to_path_buf(),
-            what,
-        };
-        let camera = |name: &str, raw: RawCamera| -> Result<CameraCalibration> {
+        let camera = |sensor: &'static str, raw: RawCamera| -> Result<CameraCalibration> {
             if raw.params.is_empty() || raw.params.iter().any(|p| !p.is_finite()) {
-                return Err(invalid(format!("{name}: parameters empty or not finite")));
+                return Err(LamariaError::InvalidParams {
+                    path: path.to_path_buf(),
+                    sensor,
+                });
             }
-            let (translation, rotation) = raw.t_b_s.pose().ok_or_else(|| {
-                invalid(format!(
-                    "{name}: T_b_s is not a unit quaternion and a vector"
-                ))
-            })?;
+            let (translation, rotation) =
+                raw.t_b_s.pose().ok_or_else(|| LamariaError::InvalidPose {
+                    path: path.to_path_buf(),
+                    sensor,
+                })?;
             Ok(CameraCalibration {
                 model: raw.model,
                 width: raw.resolution.width,
@@ -173,9 +190,13 @@ impl Calibration {
             })
         };
         let (translation, rotation) =
-            raw.imu0.t_b_s.pose().ok_or_else(|| {
-                invalid("imu0: T_b_s is not a unit quaternion and a vector".into())
-            })?;
+            raw.imu0
+                .t_b_s
+                .pose()
+                .ok_or_else(|| LamariaError::InvalidPose {
+                    path: path.to_path_buf(),
+                    sensor: "imu0",
+                })?;
         let imu = ImuCalibration {
             translation,
             rotation,
@@ -407,7 +428,7 @@ mod tests {
         let broken = SAMPLE.replacen("0.7871966367212387", "7.871966367212387", 1);
         assert!(matches!(
             Calibration::parse(&broken, path()),
-            Err(LamariaError::Invalid { .. })
+            Err(LamariaError::InvalidPose { sensor: "cam0", .. })
         ));
     }
 }

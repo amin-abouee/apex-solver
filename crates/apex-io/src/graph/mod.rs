@@ -18,7 +18,8 @@ use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
 
 use apex_manifolds::{se2::SE2, se3::SE3};
 
-pub use error::IoError;
+use crate::error::ErrorLogging;
+pub use error::{GraphError, GraphResult};
 
 #[derive(Clone, PartialEq)]
 pub struct VertexSE2 {
@@ -343,32 +344,35 @@ impl Display for Graph {
 /// Trait for graph file loaders and writers
 pub trait GraphLoader {
     /// Load a graph from a file
-    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, IoError>;
+    fn load<P: AsRef<Path>>(path: P) -> GraphResult<Graph>;
 
     /// Write a graph to a file
-    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), IoError>;
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> GraphResult<()>;
 }
 
 use std::path::Path;
 
 /// Convenience function to load any supported format based on file extension
-pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
+pub fn load_graph<P: AsRef<Path>>(path: P) -> GraphResult<Graph> {
     let path_ref = path.as_ref();
     let extension = path_ref
         .extension()
         .and_then(|ext| ext.to_str())
         .ok_or_else(|| {
-            IoError::UnsupportedFormat("No file extension".to_string())
-                .log_with_source(format!("File path: {:?}", path_ref))
+            GraphError::MissingExtension {
+                path: path_ref.to_path_buf(),
+            }
+            .log()
         })?;
 
     match extension.to_lowercase().as_str() {
         "g2o" => g2o::G2oLoader::load(path),
         "graph" => toro::ToroLoader::load(path),
-        _ => Err(
-            IoError::UnsupportedFormat(format!("Unsupported extension: {extension}"))
-                .log_with_source(format!("File path: {:?}", path_ref)),
-        ),
+        _ => Err(GraphError::UnsupportedExtension {
+            path: path_ref.to_path_buf(),
+            extension: extension.to_string(),
+        }
+        .log()),
     }
 }
 
@@ -380,14 +384,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_load_simple_graph() -> Result<(), IoError> {
-        let mut temp_file = NamedTempFile::new().map_err(|e| {
-            IoError::FileCreationFailed {
-                path: "temp_file".to_string(),
-                reason: e.to_string(),
-            }
-            .log()
-        })?;
+    fn test_load_simple_graph() -> Result<(), Box<dyn error::Error>> {
+        let mut temp_file = NamedTempFile::new()?;
         writeln!(temp_file, "VERTEX_SE2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX_SE2 1 1.0 0.0 0.0")?;
         writeln!(temp_file, "# This is a comment")?;
@@ -412,24 +410,18 @@ mod tests {
         writeln!(temp_file, "VERTEX_SE2 0 1.0 0.0 0.0")?; // Duplicate ID
 
         let result = g2o::G2oLoader::load(temp_file.path());
-        assert!(matches!(result, Err(IoError::DuplicateVertex { id: 0 })));
+        assert!(matches!(result, Err(GraphError::DuplicateVertex { id: 0 })));
 
         Ok(())
     }
 
     #[test]
-    fn test_toro_loader() -> Result<(), IoError> {
-        let mut temp_file = NamedTempFile::new().map_err(|e| {
-            IoError::FileCreationFailed {
-                path: "temp_file".to_string(),
-                reason: e.to_string(),
-            }
-            .log()
-        })?;
+    fn test_toro_loader() -> Result<(), Box<dyn error::Error>> {
+        let mut temp_file = NamedTempFile::new()?;
         writeln!(temp_file, "VERTEX2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX2 1 1.0 0.0 0.0")?;
 
-        let graph = toro::ToroLoader::load(temp_file.path()).map_err(|e| e.log())?;
+        let graph = toro::ToroLoader::load(temp_file.path())?;
         assert_eq!(graph.vertices_se2.len(), 2);
 
         Ok(())
@@ -600,8 +592,8 @@ mod tests {
     fn test_load_graph_unsupported_extension() {
         let result = load_graph("fake_path.xyz");
         assert!(
-            matches!(result, Err(IoError::UnsupportedFormat(_))),
-            "unknown extension should return UnsupportedFormat"
+            matches!(result, Err(GraphError::UnsupportedExtension { .. })),
+            "unknown extension should return UnsupportedExtension"
         );
     }
 
@@ -609,8 +601,8 @@ mod tests {
     fn test_load_graph_no_extension() {
         let result = load_graph("/tmp/no_extension_file");
         assert!(
-            matches!(result, Err(IoError::UnsupportedFormat(_))),
-            "path with no extension should return UnsupportedFormat"
+            matches!(result, Err(GraphError::MissingExtension { .. })),
+            "path with no extension should return MissingExtension"
         );
     }
 
@@ -630,18 +622,14 @@ mod tests {
     }
 
     #[test]
-    fn test_io_error_log_returns_self() {
-        let err = IoError::UnsupportedFormat("xyz".to_string());
-        let returned = err.log();
-        assert!(matches!(returned, IoError::UnsupportedFormat(_)));
-    }
-
-    #[test]
-    fn test_io_error_log_with_source() {
-        let err = IoError::UnsupportedFormat("abc".to_string());
-        let source = std::io::Error::other("source");
-        let returned = err.log_with_source(source);
-        assert!(matches!(returned, IoError::UnsupportedFormat(_)));
+    fn test_unknown_g2o_records_are_skipped() -> Result<(), Box<dyn error::Error>> {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE2 0 0.0 0.0 0.0")?;
+        writeln!(f, "FIX 0")?;
+        writeln!(f, "VERTEX_XY 9 1.0 2.0")?;
+        let graph = g2o::G2oLoader::load(f.path())?;
+        assert_eq!(graph.vertices_se2.len(), 1);
+        Ok(())
     }
 
     #[test]

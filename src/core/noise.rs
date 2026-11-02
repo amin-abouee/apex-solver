@@ -18,6 +18,7 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::core::CoreError;
 use crate::core::CoreResult;
+use crate::error::ErrorLogging;
 
 /// Square-root information model for one residual block.
 ///
@@ -99,9 +100,12 @@ impl RepairStrategy {
         } else if name.eq_ignore_ascii_case("unit-weight") {
             Ok(RepairStrategy::UnitWeight)
         } else {
-            Err(CoreError::InvalidInput(format!(
-                "unknown repair strategy {name:?}: expected \"clamp\" or \"unit-weight\""
-            )))
+            Err(CoreError::UnknownName {
+                kind: "repair strategy",
+                name: name.to_string(),
+                valid: "clamp, unit-weight".to_string(),
+            }
+            .log())
         }
     }
 
@@ -161,10 +165,14 @@ impl NoiseModel {
     /// Diagonal model from per-component standard deviations
     /// (`sqrt_info_i = 1/σ_i`).
     pub fn from_sigmas(sigmas: &[f64]) -> CoreResult<Self> {
-        if sigmas.iter().any(|s| !s.is_finite() || *s <= 0.0) {
-            return Err(CoreError::InvalidInput(
-                "noise model sigmas must be finite and positive".to_string(),
-            ));
+        if let Some(&sigma) = sigmas.iter().find(|s| !s.is_finite() || **s <= 0.0) {
+            return Err(CoreError::InvalidParameter {
+                owner: "NoiseModel",
+                param: "sigma",
+                requirement: "finite and positive",
+                value: sigma,
+            }
+            .log());
         }
         Ok(NoiseModel::Diagonal(DVector::from_iterator(
             sigmas.len(),
@@ -174,10 +182,14 @@ impl NoiseModel {
 
     /// Diagonal model from square-root information entries (1/σ per row).
     pub fn from_diagonal_sqrt_info(sqrt_info: &[f64]) -> CoreResult<Self> {
-        if sqrt_info.iter().any(|s| !s.is_finite() || *s < 0.0) {
-            return Err(CoreError::InvalidInput(
-                "noise model sqrt-information entries must be finite and non-negative".to_string(),
-            ));
+        if let Some(&entry) = sqrt_info.iter().find(|s| !s.is_finite() || **s < 0.0) {
+            return Err(CoreError::InvalidParameter {
+                owner: "NoiseModel",
+                param: "sqrt-information entry",
+                requirement: "finite and non-negative",
+                value: entry,
+            }
+            .log());
         }
         Ok(NoiseModel::Diagonal(DVector::from_column_slice(sqrt_info)))
     }
@@ -218,15 +230,13 @@ impl NoiseModel {
     /// optimizing a quietly mutilated objective.
     pub fn from_information_reporting(info: DMatrix<f64>) -> CoreResult<(Self, InformationRepair)> {
         let n = info.nrows();
-        if !info.is_square() || n == 0 {
-            return Err(CoreError::InvalidInput(
-                "information matrix must be non-empty and square".to_string(),
-            ));
-        }
-        if !info.iter().all(|v| v.is_finite()) {
-            return Err(CoreError::InvalidInput(
-                "information matrix must be finite".to_string(),
-            ));
+        if !info.is_square() || n == 0 || !info.iter().all(|v| v.is_finite()) {
+            return Err(CoreError::InvalidMatrix {
+                what: "information matrix",
+                rows: info.nrows(),
+                cols: info.ncols(),
+            }
+            .log());
         }
         let sym = (&info + &info.transpose()) * 0.5;
         let se = nalgebra::linalg::SymmetricEigen::new(sym);
@@ -265,9 +275,12 @@ impl NoiseModel {
     /// (callers guarantee `SᵀS` is the intended information matrix).
     pub fn from_sqrt_info(s: DMatrix<f64>) -> CoreResult<Self> {
         if !s.is_square() || s.nrows() == 0 || !s.iter().all(|v| v.is_finite()) {
-            return Err(CoreError::InvalidInput(
-                "sqrt-information matrix must be non-empty, square and finite".to_string(),
-            ));
+            return Err(CoreError::InvalidMatrix {
+                what: "sqrt-information matrix",
+                rows: s.nrows(),
+                cols: s.ncols(),
+            }
+            .log());
         }
         Ok(NoiseModel::Dense(s))
     }
