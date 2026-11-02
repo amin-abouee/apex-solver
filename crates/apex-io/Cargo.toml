@@ -72,6 +72,11 @@ path = "bin/bag_convert.rs"
 required-features = ["rosbag", "cli"]
 
 [[bin]]
+name = "bag_merge"
+path = "bin/bag_merge.rs"
+required-features = ["rosbag", "cli"]
+
+[[bin]]
 name = "dds_multi_listener"
 path = "bin/dds_multi_listener.rs"
 required-features = ["dds"]
