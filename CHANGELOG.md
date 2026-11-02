@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- MSRV is now 1.95 (was 1.93).
+
 ### Breaking Changes
 
 - Errors are hierarchical and structured: `CoreError`, `FactorError`,

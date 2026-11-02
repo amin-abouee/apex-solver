@@ -16,7 +16,7 @@ Notes:
 - Tests run under `[profile.test] inherits = "release"` (see root `Cargo.toml`);
   debug-only checks (`debug_assert!`, overflow) are **not** exercised by
   `cargo test` — use `cargo run`/`cargo check` for those paths.
-- MSRV is 1.93 (enforced by the `msrv` CI job). Avoid newer std APIs.
+- MSRV is 1.95 (enforced by the `msrv` CI job). Avoid newer std APIs.
 - `unsafe_code = "forbid"` workspace-wide. No new `unsafe` without discussion.
 
 ## Feature flags

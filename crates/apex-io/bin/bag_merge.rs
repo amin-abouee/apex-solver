@@ -1,6 +1,3 @@
-#![allow(clippy::print_stdout, clippy::print_stderr)]
-//! Console output is this CLI's user interface (progress, summaries).
-
 //! Concatenate consecutive bags of one recording into a single bag.
 //!
 //! Long recordings are often cut into fixed-duration files (the VBR dataset
@@ -27,6 +24,7 @@ use apex_io::rosbag::{
 use clap::Parser;
 use common::{CliResult, parse_compression, resolve_output_kind, throughput};
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -150,20 +148,22 @@ fn main() -> CliResult<()> {
             .into());
         }
         last_end = Some(last_end.map_or(last_ts, |e| e.max(last_ts)));
-        println!(
+        writeln!(
+            std::io::stdout().lock(),
             "  {}: {:.3} .. {:.3} s",
             input.display(),
             first_ts as f64 * 1e-9,
             last_ts as f64 * 1e-9
-        );
+        )?;
     }
     writer.close()?;
-    println!(
+    writeln!(
+        std::io::stdout().lock(),
         "Merged {} input(s): {} -> {} ({})",
         args.inputs.len(),
         throughput(messages, bytes, t0.elapsed()),
         args.output.display(),
         kind.name()
-    );
+    )?;
     Ok(())
 }
