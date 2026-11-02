@@ -486,6 +486,15 @@ Apex Solver draws inspiration and reference implementations from:
 
 ---
 
+## Contributing, security and citation
+
+- **Contributing:** see [CONTRIBUTING.md](CONTRIBUTING.md) for the code rules, the CI checks to run locally and the pull-request workflow. Questions and ideas go to [Discussions](https://github.com/amin-abouee/apex-solver/discussions).
+- **Conduct:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- **Security:** report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
+- **Citing:** [CITATION.cff](CITATION.cff) (GitHub's "Cite this repository" button).
+
+---
+
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.

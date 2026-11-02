@@ -100,14 +100,23 @@ rust-version.workspace = true
 description = "High-performance nonlinear least squares optimization with Lie group support for SLAM and bundle adjustment"
 readme = "README.md"
 keywords = ["optimization", "slam", "computer-vision", "robotics", "nonlinear"]
-categories = ["algorithms", "science", "mathematics"]
+categories = ["algorithms", "science", "mathematics", "science::robotics"]
 
+# Keep the published crate to what users build and read: sources, benches,
+# examples, tests, the cookbook. CI, project-management and audit files stay
+# in the repository.
 exclude = [
     "crates/",
     "data/*",
     "profiles/*",
     "output/*",
     "doc/**/*.pdf",
+    ".github/",
+    "codex/",
+    "scripts/",
+    "deny.toml",
+    "clippy.toml",
+    "release-plz.toml",
 ]
 
 # Build docs.rs with every feature so the `visualization` API is documented.

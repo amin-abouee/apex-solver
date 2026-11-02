@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/amin-abouee/apex-solver/discussions
+    about: Ask how to use Apex Solver or discuss a design before opening an issue.
+  - name: Security vulnerability
+    url: https://github.com/amin-abouee/apex-solver/security/advisories/new
+    about: Report privately; do not open a public issue (see SECURITY.md).

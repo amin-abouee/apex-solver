@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: If you use Apex Solver in your research, please cite it as below.
+title: Apex Solver
+type: software
+authors:
+  - family-names: Abouee
+    given-names: Amin
+repository-code: https://github.com/amin-abouee/apex-solver
+url: https://github.com/amin-abouee/apex-solver
+license: Apache-2.0
+abstract: >-
+  A Rust library for nonlinear least squares optimization on Lie groups, for
+  SLAM, pose graph optimization and bundle adjustment.
+keywords:
+  - nonlinear least squares
+  - SLAM
+  - bundle adjustment
+  - Lie groups
