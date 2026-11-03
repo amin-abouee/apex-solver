@@ -31,8 +31,8 @@ The two $\mathbf{C}$ integrals are what make the accelerometer bias's effect
 on the *position* correct: it enters through $\int\!\!\int R$, not through a
 linear $t$.
 
-The factor that uses it is the crate's most reused: `apex-vio` and `apex-cv`
-both build their IMU factors from it.
+The factor that uses it is the crate's most reused: Downstream odometry
+and vision crates build their IMU factors from it.
 
 ## 2. The residual
 

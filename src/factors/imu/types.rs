@@ -1,6 +1,6 @@
 //! IMU-specific type definitions for apex-solver.
 //!
-//! These mirror the types in `apex-vio-types` so the IMU factors are
+//! These are the minimal IMU types the factors need, so they are
 //! self-contained inside apex-solver with no cross-workspace dependency.
 
 use apex_manifolds::se3::SE3;

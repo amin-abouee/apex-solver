@@ -5,7 +5,7 @@
 ## Scope
 
 - Crates touched: <!-- apex-solver / apex-manifolds / apex-io / apex-camera-models -->
-- Other Apex crates affected (apex-cv, apex-vio, ...): <!-- none, or what must change there -->
+- Other Apex crates affected (apex-cv, ...): <!-- none, or what must change there -->
 
 ## Breaking?
 

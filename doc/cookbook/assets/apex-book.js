@@ -1,5 +1,5 @@
 /* ==========================================================================
- * The Apex VIO Cookbook — widget framework + graph widgets
+ * The Apex Solver Cookbook — widget framework + graph widgets
  * --------------------------------------------------------------------------
  * Every widget is a `<div class="apx-widget" data-widget="name">`.  mount()
  * builds its chrome; the widget fills the body.  No dependencies.

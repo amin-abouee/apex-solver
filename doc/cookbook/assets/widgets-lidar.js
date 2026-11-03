@@ -1,5 +1,5 @@
 /* ==========================================================================
- * The Apex VIO Cookbook — LiDAR widgets
+ * The Apex Solver Cookbook — LiDAR widgets
  * deskew · plane fit · degeneracy · preintegration · scan matching
  * ========================================================================== */
 (function () {

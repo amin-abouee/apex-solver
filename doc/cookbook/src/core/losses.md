@@ -73,8 +73,8 @@ what the solve does with a badly wrong measurement:
 - a **gate** (a hard threshold, or a RANSAC inlier set) removes it.
 
 The crate offers both, at different levels: the loss lives on the residual
-block (per measurement, per solve), while selection lives in the consumer (the
-RANSAC driver in `apex-cv`, the inlier masks in `apex-vio`). A graph can use
+block (per measurement, per solve), while selection lives in the consumer (a
+RANSAC driver, inlier masks). A graph can use
 either, both, or neither.
 
 ## 5. Choosing a kernel

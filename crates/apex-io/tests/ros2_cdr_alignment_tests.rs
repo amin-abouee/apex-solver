@@ -13,19 +13,11 @@
 //!
 //! * this crate's own `CdrSerializer` mirrored the same rule, so a round-trip
 //!   through it passed while real bags failed;
-//! * `rosbags-rs`, the other decoder in this workspace, has the same defect —
-//!   it is what apex-vio hand-rolled a `TransformStamped` decoder to work
-//!   around.
+//! * `rosbags-rs`, the other decoder in this workspace, has the same defect.
 //!
 //! So the buffer below is assembled byte by byte from the specification, with
 //! every offset stated. It encodes the standard rather than an implementation.
 
-//! Test diagnostics below print under `--nocapture` only.
-
-use std::io::Write as _;
-use std::path::Path;
-
-use apex_io::rosbag::Reader;
 use apex_io::rosbag::cdr::CdrDeserializer;
 use apex_io::rosbag::messages::{FromCdr, TransformStamped};
 
@@ -148,63 +140,5 @@ fn a_float64_at_the_start_of_the_body_needs_no_padding() -> TestResult {
     let mut deserializer = CdrDeserializer::new(&buf)?;
     let value = deserializer.read_f64()?;
     assert!((value + 4.5).abs() < 1e-12, "got {value}");
-    Ok(())
-}
-
-/// A bag written by real ROS 2 tooling, which is the only encoder in reach that
-/// does not share the defect under test.
-const EUROC_BAG: &str = "/Volumes/External/Workspace/rust/apex-vio/data/V1_01_easy";
-
-/// End-to-end proof on real data.
-///
-/// EuRoC V1_01 is a 1.5 m-wide Vicon room, so every translation must be a few
-/// metres at most. Before the fix this topic decoded to ~1e200 — the classic
-/// signature of reading a `float64` from the wrong offset.
-#[test]
-fn a_real_ros2_bag_decodes_plausible_vicon_translations() -> TestResult {
-    if !Path::new(EUROC_BAG).is_dir() {
-        writeln!(
-            std::io::stderr().lock(),
-            "Skipping: bag not available at {EUROC_BAG}"
-        )?;
-        return Ok(());
-    }
-
-    let mut reader = Reader::new(Path::new(EUROC_BAG))?;
-    reader.open()?;
-
-    let mut checked = 0usize;
-    for message in reader.messages()? {
-        let message = message?;
-        if message.topic != "/vicon/firefly_sbx/firefly_sbx" {
-            continue;
-        }
-        let mut deserializer = CdrDeserializer::new(&message.data)?;
-        let transform = TransformStamped::from_cdr(&mut deserializer)?;
-        let t = &transform.transform.translation;
-
-        for (axis, value) in [("x", t.x), ("y", t.y), ("z", t.z)] {
-            assert!(
-                value.is_finite() && value.abs() < 100.0,
-                "translation.{axis} = {value} — a Vicon room is metres across, \
-                 so this is the alignment bug, not real motion"
-            );
-        }
-
-        if checked == 0 {
-            // The first sample of V1_01, decoded correctly. Pinned so a future
-            // regression that merely keeps the values finite still fails.
-            assert!((t.x - 0.7868).abs() < 1e-3, "first x = {}", t.x);
-            assert!((t.y - 2.1766).abs() < 1e-3, "first y = {}", t.y);
-            assert!((t.z - 1.0620).abs() < 1e-3, "first z = {}", t.z);
-        }
-
-        checked += 1;
-        if checked >= 200 {
-            break;
-        }
-    }
-
-    assert!(checked > 0, "the Vicon topic should carry messages");
     Ok(())
 }

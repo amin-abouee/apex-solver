@@ -2,9 +2,8 @@
 
 `apex-solver` is the optimization engine under the Apex stack: the crate that
 turns a graph of measurements and unknowns into a trajectory, a map, and an
-uncertainty estimate. It is used by `apex-vio` for visual-inertial and
-LiDAR-inertial odometry, by `apex-cv` for its refinement steps, and by
-`apex-calibration` for target poses. This book teaches it the way the other
+uncertainty estimate. It serves visual-inertial and LiDAR-inertial odometry,
+computer-vision refinement steps, and calibration. This book teaches it the way the other
 books in the family teach their crates: from the problem, through the
 derivation, to the code that ships.
 

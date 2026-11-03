@@ -129,7 +129,7 @@ model whitens twice and silently over-weights the block.
   block layout and the reduction order are fixed, not hash-dependent.
 - `VarKey`/`FactorKey` are generational, so a key's identity is stable across
   a problem's lifetime and never aliases.
-- RANSAC-style sampling lives in the *consumers* (apex-cv, apex-vio), which
+- RANSAC-style sampling lives in the *consumers* (downstream crates), which
   seed it explicitly; the solver itself draws no random numbers.
 
 ## 8. What "the crate guarantees" means

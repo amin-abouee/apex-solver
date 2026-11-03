@@ -55,18 +55,13 @@ solver's correctness depends on it: the right-perturbation convention
 layouts (the same chapter), and the camera pose direction (chapter
 [Notation & Conventions](../conventions.md)).
 
-## 4. The two application books
+## 4. Books of the crates built on this one
 
-Above the solver sit two more books, in the sibling repositories:
-
-| Book | Covers |
-|---|---|
-| **The Apex VIO Cookbook** (`apex-vio`) | visual-inertial and LiDAR-inertial odometry: front ends, back ends, the window, the marginalization policy, the SLAM layer, and the accuracy results |
-| **The Apex CV Cookbook** (`apex-cv`) | the computer-vision crate: feature detection, tracking, multi-view geometry, mapping, registration, photometric estimation, and detection |
-
-They are the natural place to read how the solver's factors are *used*: what
-the residuals mean in the context of a camera rig, which noise model a
-particular measurement deserves, and what the system's own conventions are.
+Crates built on the solver (odometry, computer vision, calibration) keep their
+own books in their own repositories. They are the natural place to read how the
+solver's factors are *used*: what the residuals mean in the context of a camera
+rig, which noise model a particular measurement deserves, and what the
+system's own conventions are.
 
 ## 5. A note on duplication
 
