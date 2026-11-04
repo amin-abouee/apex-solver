@@ -81,8 +81,8 @@ and `slerp` falls back to the same linear blend.
 ## Example
 
 ```rust
-use apex_solver::manifold::rn::{Rn, RnTangent};
-use apex_solver::manifold::{LieGroup, Tangent};
+use apex_manifolds::rn::{Rn, RnTangent};
+use apex_manifolds::{LieGroup, Tangent};
 use nalgebra::DVector;
 
 let p = Rn::from_vec(vec![1.0, 2.0, 3.0]);

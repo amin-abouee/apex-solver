@@ -46,8 +46,8 @@
 //!
 //! ```
 //! use apex_solver::core::variable::Variable;
-//! use apex_solver::manifold::se2::{SE2, SE2Tangent};
-//! use apex_solver::manifold::Tangent;
+//! use apex_solver::apex_manifolds::se2::{SE2, SE2Tangent};
+//! use apex_solver::apex_manifolds::Tangent;
 //! use nalgebra::DVector;
 //!
 //! // Create a 2D pose variable
@@ -64,7 +64,7 @@
 //!
 //! ```
 //! use apex_solver::core::variable::Variable;
-//! use apex_solver::manifold::rn::Rn;
+//! use apex_solver::apex_manifolds::rn::Rn;
 //! use nalgebra::DVector;
 //!
 //! // Create a 3D point variable
@@ -107,8 +107,8 @@ use crate::error::ErrorLogging;
 /// # Examples
 /// ```
 /// use apex_solver::core::variable::Variable;
-/// use apex_solver::manifold::se2::SE2;
-/// use apex_solver::manifold::rn::Rn;
+/// use apex_solver::apex_manifolds::se2::SE2;
+/// use apex_solver::apex_manifolds::rn::Rn;
 ///
 /// // Create a Variable for SE2 manifold
 /// let se2_value = SE2::from_xy_angle(1.0, 2.0, 0.5);
@@ -157,7 +157,7 @@ where
     /// # Examples
     /// ```
     /// use apex_solver::core::variable::Variable;
-    /// use apex_solver::manifold::se2::SE2;
+    /// use apex_solver::apex_manifolds::se2::SE2;
     ///
     /// let se2_value = SE2::from_xy_angle(1.0, 2.0, 0.5);
     /// let variable = Variable::new(se2_value);
@@ -205,8 +205,8 @@ where
     /// # Examples
     /// ```
     /// use apex_solver::core::variable::Variable;
-    /// use apex_solver::manifold::se2::{SE2, SE2Tangent};
-    /// use apex_solver::manifold::Tangent;
+    /// use apex_solver::apex_manifolds::se2::{SE2, SE2Tangent};
+    /// use apex_solver::apex_manifolds::Tangent;
     /// use nalgebra as na;
     ///
     /// let se2_value = SE2::from_xy_angle(1.0, 2.0, 0.0);
@@ -235,7 +235,7 @@ where
     /// # Examples
     /// ```
     /// use apex_solver::core::variable::Variable;
-    /// use apex_solver::manifold::se2::SE2;
+    /// use apex_solver::apex_manifolds::se2::SE2;
     ///
     /// let se2_1 = SE2::from_xy_angle(2.0, 3.0, 0.5);
     /// let se2_2 = SE2::from_xy_angle(1.0, 2.0, 0.0);

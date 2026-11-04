@@ -28,15 +28,6 @@ pub use apex_camera_models;
 pub use apex_io;
 pub use apex_manifolds;
 
-// Create module aliases for backward compatibility
-pub mod manifold {
-    pub use apex_manifolds::*;
-}
-
-pub mod camera_models {
-    pub use apex_camera_models::*;
-}
-
 // Re-export commonly used types from workspace crates
 pub use apex_camera_models::{
     CameraModel, CameraModelError, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera,

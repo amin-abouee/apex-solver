@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **Breaking:** the `rosbag::ReaderResult` and `rosbag::ReaderError` aliases; use `BagResult` and
+  `BagError`.
+
 ### Changed (error propagation)
 - **Breaking:** `IoError` is now the crate root wrapping one error per module: `GraphError` (the old
   pose-graph `IoError`), `BalError`, `TrajectoryError`, `AslError`, `LamariaError`, `DatasetError`,

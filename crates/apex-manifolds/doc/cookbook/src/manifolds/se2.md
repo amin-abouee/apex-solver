@@ -103,8 +103,8 @@ $$
 ## Example
 
 ```rust
-use apex_solver::manifold::se2::{SE2, SE2Tangent};
-use apex_solver::manifold::{LieGroup, Tangent};
+use apex_manifolds::se2::{SE2, SE2Tangent};
+use apex_manifolds::{LieGroup, Tangent};
 
 let pose = SE2::from_xy_angle(1.0, 2.0, 0.5);
 let delta = SE2Tangent::new(0.1, 0.0, 0.05);   // (ρx, ρy, θ)

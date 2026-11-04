@@ -170,7 +170,7 @@ where
     /// # use apex_solver::factors::visual::projection::ProjectionFactor;
     /// # use apex_solver::factors::BundleAdjustment;
     /// # use apex_camera_models::PinholeCamera;
-    /// # use apex_solver::manifold::se3::SE3;
+    /// # use apex_solver::apex_manifolds::se3::SE3;
     /// # use nalgebra::{Matrix2xX, Vector2};
     /// # let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
     /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);

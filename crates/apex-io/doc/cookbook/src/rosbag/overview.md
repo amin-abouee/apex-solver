@@ -12,7 +12,7 @@ specifics live in [ROS1](./ros1.md), [ROS2](./ros2.md), and [DDS](./dds.md).
 | Path | Contents |
 |---|---|
 | `rosbag::types` | Shared `Connection`, `Message`, `RawMessage`, QoS, compression & storage enums |
-| `rosbag::error` | `BagError` + `Result`/`ReaderResult`/`WriterResult` aliases |
+| `rosbag::error` | `BagError` + `Result`/`WriterResult` aliases |
 | `rosbag::ros1` | ROS1 `.bag` reader/writer + CDR-free ROS1 (de)serializer |
 | `rosbag::ros2` | ROS2 reader/writer, CDR, metadata, storage plugins, message types |
 | `rosbag::ros2::dds` | Live DDS subscription (feature `dds`) |
@@ -107,5 +107,5 @@ each failure class:
 `cdr_deserialization`, `message_type_not_found`, `schema_validation`,
 `connection_not_found`, `connection_already_exists`, `invalid_qos_profile`.
 
-Aliases: `Result<T>`, `ReaderResult<T>`, `WriterResult<T>` (all
-`= Result<T, BagError>`); `ReaderError = BagError`.
+Aliases: `Result<T>`, `BagResult<T>`, `WriterResult<T>` (all
+`= Result<T, BagError>`).

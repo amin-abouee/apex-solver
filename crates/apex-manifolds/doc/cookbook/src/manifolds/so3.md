@@ -118,8 +118,8 @@ The geodesic distance is `distance()` $= \lVert \mathbf{R}_1 \ominus \mathbf{R}_
 ## Example
 
 ```rust
-use apex_solver::manifold::so3::{SO3, SO3Tangent};
-use apex_solver::manifold::{LieGroup, Tangent};
+use apex_manifolds::so3::{SO3, SO3Tangent};
+use apex_manifolds::{LieGroup, Tangent};
 use nalgebra::Vector3;
 
 // Build from Euler angles and retract by an axis–angle tangent.

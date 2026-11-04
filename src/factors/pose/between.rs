@@ -71,7 +71,7 @@ type BetweenBlocks<T> = (
 /// ```
 /// use apex_solver::factors::Factor;
 /// use apex_solver::factors::pose::BetweenFactor;
-/// use apex_solver::manifold::se3::SE3;
+/// use apex_solver::apex_manifolds::se3::SE3;
 /// use nalgebra::{Vector3, Quaternion, DVector};
 ///
 /// let relative_pose = SE3::from_translation_quaternion(
@@ -95,7 +95,7 @@ type BetweenBlocks<T> = (
 /// ```
 /// use apex_solver::factors::Factor;
 /// use apex_solver::factors::pose::BetweenFactor;
-/// use apex_solver::manifold::se2::SE2;
+/// use apex_solver::apex_manifolds::se2::SE2;
 /// use nalgebra::DVector;
 ///
 /// let relative_pose = SE2::from_xy_angle(1.0, 0.0, 0.1);
@@ -147,7 +147,7 @@ where
     ///
     /// ```
     /// use apex_solver::factors::pose::BetweenFactor;
-    /// use apex_solver::manifold::se3::SE3;
+    /// use apex_solver::apex_manifolds::se3::SE3;
     ///
     /// // Create relative pose: move 2m in x, rotate 90° around z-axis
     /// let relative = SE3::from_translation_euler(
@@ -163,7 +163,7 @@ where
     ///
     /// ```
     /// use apex_solver::factors::pose::BetweenFactor;
-    /// use apex_solver::manifold::se2::SE2;
+    /// use apex_solver::apex_manifolds::se2::SE2;
     ///
     /// // Create relative 2D pose
     /// let relative = SE2::from_xy_angle(1.0, 0.5, 0.1);

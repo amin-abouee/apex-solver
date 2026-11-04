@@ -39,7 +39,7 @@
 //! use apex_solver::factors::pose::BetweenFactor;
 //! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! use apex_solver::core::variable::Variable;
-//! use apex_solver::manifold::se2::SE2;
+//! use apex_solver::apex_manifolds::se2::SE2;
 //! use slotmap::SlotMap;
 //! # use apex_solver::core::CoreResult;
 //! # fn main() -> CoreResult<()> {
@@ -162,7 +162,7 @@ impl ResidualBlock {
     /// use apex_solver::factors::Factor;
     /// use apex_solver::factors::pose::BetweenFactor;
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
-    /// use apex_solver::manifold::se2::SE2;
+    /// use apex_solver::apex_manifolds::se2::SE2;
     /// use slotmap::SlotMap;
     /// # use apex_solver::core::CoreResult;
     /// # fn main() -> CoreResult<()> {
@@ -254,7 +254,7 @@ impl ResidualBlock {
     /// use apex_solver::factors::Factor;
     /// use apex_solver::factors::pose::BetweenFactor;
     /// use apex_solver::core::variable::Variable;
-    /// use apex_solver::manifold::se2::SE2;
+    /// use apex_solver::apex_manifolds::se2::SE2;
     /// use slotmap::SlotMap;
     ///
     /// let mut var_sm: SlotMap<VarKey, ()> = SlotMap::with_key();

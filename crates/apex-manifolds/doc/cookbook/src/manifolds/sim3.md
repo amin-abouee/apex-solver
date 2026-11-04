@@ -107,8 +107,8 @@ $$
 ## Example
 
 ```rust
-use apex_solver::manifold::sim3::{Sim3, Sim3Tangent};
-use apex_solver::manifold::{LieGroup, Tangent};
+use apex_manifolds::sim3::{Sim3, Sim3Tangent};
+use apex_manifolds::{LieGroup, Tangent};
 use nalgebra::{Vector3, UnitQuaternion};
 
 let sim = Sim3::new(

@@ -20,7 +20,7 @@
 //! ```no_run
 //! # #[cfg(feature = "visualization")]
 //! # {
-//! use apex_solver::manifold::se3::SE3;
+//! use apex_solver::apex_manifolds::se3::SE3;
 //! use apex_solver::observers::RerunConvert3D;
 //!
 //! let pose = SE3::identity();
@@ -33,7 +33,7 @@
 //! ```no_run
 //! # #[cfg(feature = "visualization")]
 //! # {
-//! use apex_solver::manifold::se3::SE3;
+//! use apex_solver::apex_manifolds::se3::SE3;
 //! use apex_solver::observers::CollectRerun3D;
 //!
 //! let poses = vec![SE3::identity(), SE3::identity()];
