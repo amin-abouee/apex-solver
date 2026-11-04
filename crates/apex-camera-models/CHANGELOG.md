@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `DistortionModel` gains the variants `Fisheye62 { k, p }` and `Fisheye624 { k, p, s }`, so an exhaustive
   `match` on it needs two more arms.
 
+### Documentation
+- Cookbook sections on the error hierarchy (`CameraModelError` over `ParamError`, `ProjectionError`,
+  `UnprojectionError`, `EstimationError`, `ConversionError`) and on `projection_deficit`.
+
 ## [0.4.0] - 2026-09-29
 
 ### Changed
