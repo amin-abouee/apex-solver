@@ -119,9 +119,12 @@ left out. Delete the branch once this item is decided.
   private items). docs.rs tolerates them. Fix them and add
   `RUSTDOCFLAGS="-D warnings" cargo doc` to CI so they stay fixed. (Two in
   apex-manifolds were fixed in 1.6.0.)
-- **`mdbook build`** is only run in CI (`docs.yml`); it was not run locally for
-  1.6.0 because `mdbook` is not installed on the release machine (`mdbook-katex`
-  and `mdbook-admonish` are).
+- **Cookbook warnings**: all four books build with `mdbook` 0.5.4 (exit 0, no errors),
+  but the solver book prints ~130 `unexpected HTML end tag </span>` warnings from math
+  spans in `core/corrector.md`, `linalg/covariance.md`, `core/noise.md` and
+  `factors/lidar.md` (181 across more chapters at 1.5.0). They come from `mdbook-katex`,
+  which is built against mdbook 0.5.1 while 0.5.4 runs, and do not affect the output.
+  Pin or upgrade `mdbook-katex` and they should go.
 - **Slow convergence on `intel`**: Levenberg-Marquardt (all three presets) and
   Dog Leg are still short of the optimum after 300 iterations where Gauss-Newton
   converges in 5; M3500, mit and sphere2500 are fine. See the `optimizers`
