@@ -537,7 +537,7 @@ pub fn compute_parameter_norm(variables: &SlotMap<VarKey, Box<dyn ManifoldVariab
 /// the running offset. Fixed tangent coordinates never occupy a column: they
 /// must be eliminated before the linear solve rather than solved for and
 /// zeroed afterward, since free and fixed columns generally couple through
-/// `JᵀJ` (see `codex/issues/ISSUE-0003-fixed-dofs-solved-as-free.md`).
+/// `JᵀJ`.
 ///
 /// Returns `(free-column offset per variable, variable keys in column order,
 /// total free DOF)`.
@@ -574,7 +574,7 @@ pub(crate) fn build_variable_index_map(
 ///
 /// `Problem::set_variable_bounds` is validated and stored, but no optimizer
 /// step here enforces it — solving anyway would silently return the
-/// unconstrained answer (see `codex/issues/ISSUE-0004-variable-bounds-ignored.md`).
+/// unconstrained answer.
 /// Until bounded optimization is implemented, any variable carrying a
 /// non-trivial bound (`lower > -inf` or `upper < inf`) is rejected here with
 /// a typed error rather than silently ignored.

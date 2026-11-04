@@ -1836,9 +1836,9 @@ mod regularized_inverse_tests {
 /// differential geometry). These build their own finite-difference oracle
 /// from `exp()`/`matrix()`/`inverse()` alone — never from `log()`,
 /// `right_jacobian_inv()`, `left_jacobian_inv()`, or `v_matrix()` — so a bug
-/// shared between an analytic Jacobian and its "inverse" cannot hide here
-/// (see `codex/issues/ISSUE-0002-sim3-differentials.md`, "Do not validate an
-/// analytic Jacobian solely with an inverse built from that same Jacobian.").
+/// shared between an analytic Jacobian and its "inverse" cannot hide here.
+/// That is the lesson of the Sim(3) differentials audit: do not validate an
+/// analytic Jacobian solely with an inverse built from that same Jacobian.
 #[cfg(test)]
 mod sim3_jacobian_fd_tests {
     use super::*;

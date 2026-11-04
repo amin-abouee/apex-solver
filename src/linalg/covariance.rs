@@ -201,8 +201,9 @@ pub type CovarianceResult<T> = Result<T, CovarianceError>;
 /// Blocks are in **tangent space**: a variable with `dof() == d` has a `d × d`
 /// covariance block, regardless of its ambient parameterization. For an `SE3`
 /// pose this is `6 × 6`, even though the variable stores 7 numbers. Fixed
-/// tangent coordinates are excluded from `H` before inversion (see
-/// `codex/issues/ISSUE-0003-fixed-dofs-solved-as-free.md`) and appear as
+/// tangent coordinates are excluded from `H` before inversion (solving them
+/// as free and zeroing them afterwards is wrong, because free and fixed
+/// columns couple through `JᵀJ`) and appear as
 /// exact `0.0` rows/columns in [`block`](Covariance::block)/
 /// [`block_pair`](Covariance::block_pair) — a fixed coordinate is held at a
 /// known constant, so it has zero variance and zero covariance with
