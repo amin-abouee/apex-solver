@@ -133,24 +133,69 @@ name = "bundle_adjustment"
 path = "bin/bundle_adjustment.rs"
 required-features = ["cli", "apex-io/download"]
 
+# Examples: a learning path, read in order (see examples/README.md).
+
+# Part 1 — fundamentals (synthetic, no download)
 [[example]]
-name = "compare_solvers"
-required-features = ["cli"]
+name = "curve_fitting"
+path = "examples/fundamentals/curve_fitting.rs"
 
 [[example]]
-name = "compare_optimizers"
-required-features = ["cli"]
+name = "pose_graph_2d"
+path = "examples/fundamentals/pose_graph_2d.rs"
 
 [[example]]
-name = "loss_function_comparison"
-required-features = ["cli"]
+name = "robust_losses"
+path = "examples/fundamentals/robust_losses.rs"
 
 [[example]]
-name = "visualize_graph_file"
+name = "uncertainty"
+path = "examples/fundamentals/uncertainty.rs"
+
+# Part 2 — choosing an optimizer and a linear solver
+[[example]]
+name = "optimizers"
+path = "examples/solver_choices/optimizers.rs"
+
+[[example]]
+name = "linear_solvers"
+path = "examples/solver_choices/linear_solvers.rs"
+
+# Part 3 — bundle adjustment
+[[example]]
+name = "ba_synthetic"
+path = "examples/bundle_adjustment/ba_synthetic.rs"
+
+[[example]]
+name = "ba_parameterizations"
+path = "examples/bundle_adjustment/ba_parameterizations.rs"
+
+[[example]]
+name = "bal_dataset"
+path = "examples/bundle_adjustment/bal_dataset.rs"
+
+# Part 4 — incremental and sliding-window estimation
+[[example]]
+name = "incremental_pose_graph"
+path = "examples/incremental/incremental_pose_graph.rs"
+
+[[example]]
+name = "fixed_lag_smoother"
+path = "examples/incremental/fixed_lag_smoother.rs"
+
+[[example]]
+name = "sliding_window_ba"
+path = "examples/incremental/sliding_window_ba.rs"
+
+# Tools — Rerun visualization
+[[example]]
+name = "visualize_optimization"
+path = "examples/visualization/visualize_optimization.rs"
 required-features = ["visualization", "cli"]
 
 [[example]]
-name = "visualize_optimization"
+name = "visualize_graph_file"
+path = "examples/visualization/visualize_graph_file.rs"
 required-features = ["visualization", "cli"]
 
 [features]
