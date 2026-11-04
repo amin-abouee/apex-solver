@@ -49,6 +49,33 @@ A high-performance Rust-based nonlinear least squares optimization library desig
 
 Apex Solver is a comprehensive optimization library that bridges the gap between theoretical robotics and practical implementation. It provides manifold-aware optimization for Lie groups commonly used in computer vision, multiple optimization algorithms with unified interfaces, flexible linear algebra backends supporting both sparse Cholesky and QR decompositions, and industry-standard file format support for seamless integration with existing workflows.
 
+## What's new in 1.6.0
+
+- **Sliding-window and fixed-lag estimation.** `Marginalizer` turns the states a
+  window drops into an exact Gaussian prior (`MarginalPriorFactor`,
+  `MarginalPriorFactorT`); first-estimate Jacobians
+  (`Problem::set_jacobian_evaluation`, `freeze_linearization_point`) keep that
+  prior consistent; `Problem` removes variables and residual blocks and writes a
+  solve back (`update_values_from`); `AggregateFactor` compresses many factors
+  into their exact normal equations. The `incremental_pose_graph`,
+  `fixed_lag_smoother` and `sliding_window_ba` examples show the three patterns
+  end to end, and `benches/window_kernels.rs` times the kernels.
+- **~20 new factors**: scan-to-map and multi-frame LiDAR plane factors, OKVIS2-X
+  submap fields, photometric and inverse-range visual factors, estimated-gravity
+  and scale IMU factors, a 4-DoF relative-pose factor, and the `HeldBlocks`,
+  `RightOffset` and `ProjectedFactor` wrappers — see the [factor list](doc/factors.md).
+- **Twelve examples as a learning path**, from a custom factor to a windowed
+  bundle adjustment on a real dataset: [`examples/README.md`](examples/README.md).
+- **Workspace crates**: apex-manifolds 0.5 (capability traits, checked
+  constructors, SGal(3) fix), apex-camera-models 0.5 (Project Aria `Fisheye62` /
+  `Fisheye624`, `convert_camera`), apex-io 0.5 (VRS, format-agnostic bag
+  reader/writer, ROS1 ↔ CDR transcoder, `bag_merge`).
+- **Faster and more robust solves**: cheaper `JᵀJ` and Schur setup, allocation-free
+  dense Cholesky, LM that survives a failed linear solve, and hierarchical
+  errors with the source chain preserved.
+- **Cleaner API**: the back-compatibility aliases and deprecated items are removed
+  (below), and every crate has its own icon and README.
+
 ## ⚠️ Upgrading to 1.6.0 — removed aliases and deprecated API
 
 `1.6.0` removes the back-compatibility aliases and the remaining deprecated API (versioned
@@ -96,8 +123,13 @@ every problem.
 
 ## Key Features (v1.6.0)
 
-- **Factor Library (~40 factors)**: IMU (SE₂(3)/SGal(3)), visual, LiDAR, GNSS/navigation,
-  range & bearing, motion models and marginalization — see [Factors](#factors) below.
+- **Factor Library (~60 factors)**: IMU (SE₂(3)/SGal(3)), visual (geometric and photometric),
+  LiDAR (scan-to-map, multi-frame planes, submap fields), GNSS/navigation, range & bearing,
+  motion models and marginalization — see [Factors](#factors) below.
+- **Sliding-Window & Fixed-Lag Estimation**: `Marginalizer` (exact Gaussian priors),
+  first-estimate Jacobians, variable/block removal on `Problem`, and `AggregateFactor`
+  compose into a bounded-cost smoother; see the `fixed_lag_smoother` and `sliding_window_ba`
+  [examples](examples/README.md).
 - **Noise Models**: per-residual-block measurement uncertainty (`NoiseModel`: Null /
   Diagonal / Dense) whitened upstream of the robust-loss corrector.
 - **Slot-Map Problem Structure (faster)**: Variables and factors are stored in a
@@ -106,7 +138,7 @@ every problem.
   hashing or per-key allocation on the hot path, and keeps manifold parameters in contiguous
   `nalgebra` storage that `faer` views **without copying** — minimizing data movement between
   the two linear-algebra backends. See [Performance](#performance--data-structure).
-- **Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (9 camera models via apex-camera-models crate) [apex-camera-models](crates/apex-camera-models/README.md)
+- **Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (12 camera models via apex-camera-models crate, including Project Aria fisheye) [apex-camera-models](crates/apex-camera-models/README.md)
 - **Explicit & Implicit Schur Complement Solvers**: Memory-efficient matrix-free PCG for large-scale problems (10,000+ cameras) alongside traditional explicit formulation
 - **15 Robust Loss Functions**: Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
 - **Manifold-Aware**: Full Lie group support (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic Jacobians [apex-manifolds](crates/apex-manifolds/README.md)
@@ -122,10 +154,12 @@ every problem.
 ## Factors
 
 `1.6.0` ships a broad factor library grouped by sensor modality — pose & priors, IMU
-(SE₂(3) and SGal(3) preintegration), visual (projection, stereo, inverse-depth, essential
-matrix, smart projection), LiDAR (point/point, point-to-plane, GICP, LOAM edge), GNSS &
-navigation (GPS, pseudorange, Doppler, barometric, attitude), range & bearing, motion
-models, and marginalization.
+(SE₂(3) and SGal(3) preintegration, with estimated gravity and scale), visual (projection,
+stereo, inverse-depth and inverse-range, essential matrix, smart projection, photometric),
+LiDAR (point/point, point-to-plane, scan-to-map, multi-frame plane bundles, GICP, LOAM edge,
+submap occupancy fields), GNSS & navigation (GPS, pseudorange, Doppler, barometric,
+attitude), range & bearing, motion models, marginalization, and the `Aggregate` / `Held` /
+`Offset` / `Projected` wrappers that compose with any of them.
 
 → **[Full factor list](doc/factors.md)** — every factor with its connected variables,
 residual dimension, and weighting rules. Derivations in the
@@ -225,8 +259,8 @@ apex-solver/                # workspace root = apex-solver crate
 ├── doc/                    # Extended documentation
 └── crates/
     ├── apex-manifolds/     # Lie groups: SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn
-    ├── apex-io/            # File I/O: G2O, TORO, BAL formats
-    └── apex-camera-models/ # 9 camera projection models
+    ├── apex-io/            # File I/O: pose graphs, ROS bags, VRS, trajectories
+    └── apex-camera-models/ # 12 camera projection models
 ```
 
 **Core Modules** (in `src/`):
@@ -237,8 +271,8 @@ apex-solver/                # workspace root = apex-solver crate
 
 **Workspace Sub-crates** (in `crates/`):
 - **`apex-manifolds`**: Lie group implementations (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic Jacobians
-- **`apex-io`**: File format parsers for G2O, TORO, and BAL formats
-- **`apex-camera-models`**: Camera projection models with analytic Jacobians (9 models)
+- **`apex-io`**: Pose graphs (G2O, TORO, BAL), ROS1/ROS2 bags (SQLite3, MCAP), Meta VRS, trajectories (TUM, ASL, LaMAria) and the dataset downloader
+- **`apex-camera-models`**: Camera projection models with analytic Jacobians (12 models)
 
 **Low-level Dependencies**:
 - **`faer`** / **`nalgebra`**: High-performance linear algebra backends
@@ -308,8 +342,8 @@ Apex Solver is organized as a Cargo workspace with specialized sub-crates that c
 | Crate | Description | Docs | Cookbook |
 |-------|-------------|------|----------|
 | **[apex-manifolds](crates/apex-manifolds)** | Lie group manifolds (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic Jacobians | [README](crates/apex-manifolds/README.md) | [Cookbook](crates/apex-manifolds/doc/cookbook/src/introduction.md) |
-| **[apex-camera-models](crates/apex-camera-models)** | 9 camera projection models for bundle adjustment and SLAM | [README](crates/apex-camera-models/README.md) | [Cookbook](crates/apex-camera-models/doc/cookbook/src/introduction.md) |
-| **[apex-io](crates/apex-io)** | File I/O utilities for G2O, TORO, and BAL formats | [README](crates/apex-io/README.md) | [Cookbook](crates/apex-io/doc/cookbook/src/introduction.md) |
+| **[apex-camera-models](crates/apex-camera-models)** | 12 camera projection models for bundle adjustment and SLAM | [README](crates/apex-camera-models/README.md) | [Cookbook](crates/apex-camera-models/doc/cookbook/src/introduction.md) |
+| **[apex-io](crates/apex-io)** | File I/O: pose graphs (G2O, TORO, BAL), ROS bags, VRS and trajectories | [README](crates/apex-io/README.md) | [Cookbook](crates/apex-io/doc/cookbook/src/introduction.md) |
 
 ### Cookbooks
 

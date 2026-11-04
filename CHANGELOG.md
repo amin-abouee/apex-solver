@@ -24,11 +24,79 @@ apex-io 0.5.0 (each has its own changelog).
   whose snippets predated the 1.5 factor API. The two Rerun examples moved to
   `examples/visualization/`.
 
+### Added
+
+- **Sliding-window and fixed-lag estimation.** The building blocks for a window
+  that keeps a bounded number of states and summarizes what it drops:
+  - `Marginalizer` (`compute` / `apply`) eliminates variables exactly into a
+    Gaussian prior over their Markov blanket, `MarginalPriorFactor` and the
+    typed `MarginalPriorFactorT` (one group) carry it, and the `Marginal` /
+    `AppliedMarginal` reports say what was absorbed and the rank kept.
+  - **First-estimate Jacobians**: `Problem::set_jacobian_evaluation`
+    (`JacobianEvaluation::FirstEstimate`) with
+    `freeze_linearization_point` / `set_linearization_point` /
+    `clear_linearization_point`, so a prior and the factors around it agree on
+    where they were linearized; the points survive a value write-back.
+  - `Problem` can now remove variables (`try_remove_variable`) and residual
+    blocks (`remove_residual_block`, `remove_residual_blocks`), compacts its
+    rows, and reads and writes values (`variable_params`,
+    `set_variable_params`, `update_values_from` for writing a solve back).
+  - `AggregateFactor` compresses many factors into their exact normal
+    equations (parts summed in parallel, reproducible), and the wrappers
+    `HeldBlocks` (fix some blocks to given values), `RightOffset` (evaluate a
+    block at `X·Δ`) and `ProjectedFactor` (drop degenerate directions) compose
+    with any factor.
+  - Three runnable examples, `incremental_pose_graph`, `fixed_lag_smoother`
+    and `sliding_window_ba`, and the `window_kernels` benchmark (IMU
+    preintegration, LiDAR factors, the window solve, marginalization). There is
+    no single "smoother" type: the examples show how the pieces fit.
+- **LiDAR factors**: `LidarMapPlaneFactor` (scan-to-map point-to-plane, the
+  FAST-LIO2 residual), `LidarMapPlanesFactor` (a whole sweep on one pose),
+  `LidarPlaneBundleFactor` and `LidarPlaneMomentFactor` (one plane over several
+  frames, BALM's eigenvalue cost and Voxel-SLAM's window cost), and the OKVIS2-X
+  submap occupancy-field factors `LidarSubmapFieldFactor` and
+  `SubmapAlignmentFactor`.
+- **Visual factors**: photometric factors (`PhotometricInverseRangeFactor` with
+  `AffinePriorFactor`, `PhotometricTwoViewFactor`, `PhotometricPatchFactor`),
+  inverse-range reprojection (`InverseDepthBearingFactor`,
+  `InverseDepthPlaneFactor`, `InverseRangeProjectionFactor`,
+  `StereoInverseRangeFactor`); `ProjectionFactor` is generic over the pose group.
+- **IMU**: `GravityFrameImuFactor` (gravity direction estimated, for maps that
+  start tilted) and `ScaleGravityImuFactor` (visual-frame scale and gravity as
+  variables, DM-VIO).
+- **Pose graphs**: `Relative4DofFactor`, relative position and yaw on `Rn(4)`
+  nodes.
+- A finite-difference conformance harness for factors, and capability traits in
+  `apex-manifolds` (`ActsOnPoints3`, `RigidPose`, `HasVelocity`, `ConstDoF`) so
+  factors are generic over the pose group instead of locked to `SE3`/`SE23`.
+- Workspace crates: the Project Aria `Fisheye62` / `Fisheye624` camera models
+  and `convert_camera` (apex-camera-models), the VRS reader/writer, the
+  format-agnostic `BagReader` / `BagWriter`, the ROS1 ↔ CDR transcoder,
+  LaMAria readers and `bag_merge` (apex-io), and checked constructors with
+  hierarchical `ManifoldError` (apex-manifolds). See each crate's changelog.
+
+### Changed (performance)
+
+- `JᵀJ` is formed with a column kernel that skips zero factors; the sparsity
+  pattern is hashed in parallel and `H` is fingerprinted once per structure; the
+  Schur pattern is built once per structure and its update skips all-zero
+  coupling rows.
+- The dense Cholesky solver keeps its normal equations, factor and scratch
+  between solves instead of allocating them every step; wrappers and the LiDAR
+  chain no longer allocate per call.
+- `Marginal::to_factor` copies only the parts the prior keeps, and the
+  aggregate factor reuses its buffers, sums in parallel and skips `JᵀJ` on
+  cost-only calls.
+
 ### Breaking Changes
 
 - **Released as 1.6.0, not 2.0.0.** The removals below are breaking; the
   version is set by hand so release-plz's semver check does not turn the
   release into a major one.
+- `StereoFactor` is generic over the pose group, like `ProjectionFactor`:
+  `StereoFactor::<SE3>::new(..)`. The default parameter keeps the type name valid
+  in a signature, but a constructor call needs the group named. Its Jacobian is
+  checked against finite differences for `SE3`, `SE23`, `Sim3` and `SO3`.
 - The back-compatibility module aliases are removed: `apex_solver::manifold`
   and `apex_solver::camera_models` (use `apex_solver::apex_manifolds` /
   `apex_solver::apex_camera_models`, or the crates directly) and
@@ -63,6 +131,15 @@ apex-io 0.5.0 (each has its own changelog).
 
 ### Fixed
 
+- **IMU and SGal(3) correctness.** The SGal(3) group law (`compose`, `adjoint`,
+  `exp`) had the time-velocity coupling backwards, and the IMU factor's use of it
+  is corrected with it; the preintegration double-integral coefficient, the
+  accelerometer scale and IMU extrinsic, and the preintegrated covariance (pinned
+  to its closed form in all three blocks) are fixed.
+- Levenberg-Marquardt treats a numerically failed linear solve as a rejected
+  trial: it raises its damping and retries until the iteration budget or the
+  damping bound is hit. A non-finite Jacobian entry or step is an error for
+  every optimizer and linear solver, never an `Ok` result.
 - Linear-solve and Schur-setup errors are logged once where they occur, not
   again by the optimizers; the observers no longer re-log their errors.
 - A numerical factorization failure (non-positive pivot, singular `H_ee`
