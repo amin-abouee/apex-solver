@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per type; an MCAP or SQLite message on an unknown channel is an error or uses its own channel record,
   never a blank connection.
 
+### Fixed (dataset downloads)
+- `utils::download_file` could block forever on a server that accepted the connection and then stopped
+  sending, which wedged any test or CI job that fetched a dataset. Connecting is now bounded to 30 s and a
+  read to 60 s without data; a dropped connection, a timeout, a `408`/`429`/`5xx`, or a body shorter than its
+  `Content-Length` is retried twice. A `404` or other client error is returned at once.
+- The body is streamed into `<name>.part` and renamed onto the destination when complete, instead of being
+  held in memory, so a failed download never replaces an existing file.
+
 ### Added (LaMAria)
 - **`lamaria::Calibration`**: a typed reader for the dataset's `aria_calibrations/<sequence>.json` (two
   `RAD_TAN_THIN_PRISM_FISHEYE` cameras and the IMU: intrinsics, `T_body_sensor`, noise and saturation). All 86 files parse.
