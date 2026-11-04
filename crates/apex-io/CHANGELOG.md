@@ -188,6 +188,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/hilti_mcap.rs`: env-gated (`APEX_HILTI_MCAP`) integration test
   decoding a real ROS1-profile dataset bag end to end.
 
+### Documentation
+- Cookbook chapters *One Reader and Writer* (`BagReader`, `BagWriter`, `Selection`) and *Trajectories*; the CLI chapter
+  covers all twelve binaries (`bag_merge`, `bag_verify` and the three `vrs_*` tools were missing, and the
+  `bag_filter` and `extract_topic_data` usage was wrong); the transcoder has a section; the pose-graph pages describe
+  `GraphError`; three broken cross-book links are fixed.
+
 ## [0.4.0] - 2026-09-29
 
 ### Breaking

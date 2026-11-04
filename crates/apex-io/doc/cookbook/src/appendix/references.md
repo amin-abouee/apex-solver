@@ -34,7 +34,7 @@
 
 ## Related Apex Solver books
 
-- [Apex Camera Models Cookbook](../../../../apex-camera-models/doc/cookbook/src/introduction.md)
+- [Apex Camera Models Cookbook](../../../../../apex-camera-models/doc/cookbook/src/introduction.md)
   — projection models (incl. the BAL Pinhole chapter).
-- [Apex Manifolds Cookbook](../../../../apex-manifolds/doc/cookbook/src/manifolds/conventions.md)
+- [Apex Manifolds Cookbook](../../../../../apex-manifolds/doc/cookbook/src/manifolds/conventions.md)
   — the `SE2` / `SE3` pose types that graph vertices hold.

@@ -88,6 +88,18 @@ ROS1 additionally supports `bz2` and `lz4` chunk compression via
 `Duration`, `StartingTime`, and `QosTime` carry nanosecond-resolution ROS time.
 Readers expose `start_time()`, `end_time()`, `duration()`, and `message_count()`.
 
+## Converting between ROS1 and ROS2 (`transcode`)
+
+`rosbag::transcode` converts message payloads between ROS1 and ROS2 (CDR) without
+hand-written per-type code. A `Transcoder` is compiled from the message *definition*:
+the one the bag carries (the ROS1 connection header, an MCAP schema), or — for ROS2
+sqlite bags, which store none — a built-in catalog of the standard interface packages
+(`catalog_definition`, `catalog_md5`). That is why user-defined message types convert
+too, and why large byte arrays (images, point clouds) are copied without touching their
+elements. `plan_topic` / `plan_connections` decide, per topic, whether the bytes can be
+copied verbatim (same encoding) or must be re-encoded, and report topics that cannot be
+converted (`Unsupported`). `bag_convert` and `bag_verify` are built on it.
+
 ## Fast metadata
 
 ```rust

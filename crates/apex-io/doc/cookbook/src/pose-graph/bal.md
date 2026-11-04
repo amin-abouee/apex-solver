@@ -37,7 +37,7 @@ pub struct BalCamera {
 ```
 
 Rotation is the compact **axis-angle** representation (Bundler / `-Z` looking
-camera — see the camera cookbook's [BAL Pinhole](../../../../apex-camera-models/doc/cookbook/src/bal-pinhole.md) chapter for the projection math).
+camera — see the camera cookbook's [BAL Pinhole](../../../../../apex-camera-models/doc/cookbook/src/bal-pinhole.md) chapter for the projection math).
 
 ### `BalPoint`
 

@@ -13,10 +13,12 @@
 
 - [ASL / EuRoC](./datasets/asl.md)
 - [VRS and LaMAria](./datasets/lamaria.md)
+- [Trajectories](./datasets/trajectories.md)
 
 # ROS Bags
 
 - [Overview & Shared Types](./rosbag/overview.md)
+- [One Reader and Writer](./rosbag/bag.md)
 - [ROS1 Bags](./rosbag/ros1.md)
 - [ROS2 Bags](./rosbag/ros2.md)
 - [DDS Live Subscription](./rosbag/dds.md)
