@@ -680,4 +680,66 @@ mod tests {
         assert!(csc_from_triples(vec![(7, 0, 0)], total_dof).is_err());
         Ok(())
     }
+
+    /// Two-block factor over `[x, x]` — the same variable registered twice in
+    /// one residual block makes both Jacobian blocks write the same CSC
+    /// entry, which is exactly the duplicate-scatter case: the plan must
+    /// *accumulate* the second write instead of overwriting it.
+    struct PairLinearFactor {
+        target: f64,
+    }
+
+    impl factors::Factor for PairLinearFactor {
+        fn linearize(
+            &self,
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0] + params[1][0] - self.target;
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = 2.0;
+                *jac.rb_mut().get_mut(0, 1) = 3.0;
+            }
+        }
+        fn residual_dim(&self) -> usize {
+            1
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 2)
+        }
+    }
+
+    /// The duplicate-scatter path: when one residual block registers the same
+    /// variable twice, both Jacobian blocks target the same CSC entry and the
+    /// second write must accumulate (`2 + 3 = 5`), not overwrite.
+    #[test]
+    fn test_assemble_sparse_duplicate_variable_accumulates() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let x = problem.add_variable(ManifoldType::RN, dvector![5.0]);
+        problem.add_residual_block(&[x, x], Box::new(PairLinearFactor { target: 0.0 }), None);
+
+        let (index_map, total_dof) = build_index_map(&problem);
+        let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
+        assert_eq!(total_dof, 1);
+        assert!(
+            sym.scatter_has_duplicates,
+            "the same (row, col) pair is written twice by one block"
+        );
+        let (residual, jacobian) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
+        assert_eq!(jacobian.as_ref().compute_nnz(), 1);
+        let val = jacobian.as_ref().val_of_col(0)[0];
+        assert!(
+            (val - 5.0).abs() < 1e-12,
+            "duplicate writes must sum (2 + 3), got {val}"
+        );
+        assert!((residual[(0, 0)] - 10.0).abs() < 1e-12);
+        Ok(())
+    }
 }

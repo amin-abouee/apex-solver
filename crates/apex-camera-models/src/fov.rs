@@ -752,4 +752,29 @@ mod tests {
         assert_eq!(jac_intr.ncols(), 5); // FovCamera::INTRINSIC_DIM = 5
         Ok(())
     }
+
+    /// The FOV domain is `z ≥ GEOMETRIC_PRECISION`, so the deficit is
+    /// measured from that plane — the trait default (`-z`) would go
+    /// non-positive for a point that is invalid but slightly in front of
+    /// `z = 0`, collapsing to a constant, gradient-less barrier.
+    #[test]
+    fn test_projection_deficit_measures_from_domain_plane() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let camera = FovCamera::new(pinhole, DistortionModel::FOV { w: 1.5 })?;
+
+        // Invalid yet slightly in front of z = 0: deficit must stay positive.
+        let z = 0.5 * crate::GEOMETRIC_PRECISION;
+        let (deficit, grad) = camera.projection_deficit(&Vector3::new(0.1, 0.2, z));
+        assert!(
+            (deficit - (crate::GEOMETRIC_PRECISION - z)).abs() < 1e-18,
+            "deficit must be measured from the domain plane"
+        );
+        assert!(deficit > 0.0);
+        assert_eq!(grad, Vector3::new(0.0, 0.0, -1.0));
+
+        // Inside the domain there is no deficit.
+        let (deficit_in, _) = camera.projection_deficit(&Vector3::new(0.1, 0.2, 2.0));
+        assert!(deficit_in <= 0.0);
+        Ok(())
+    }
 }

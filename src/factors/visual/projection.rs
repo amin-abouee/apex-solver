@@ -1196,4 +1196,41 @@ mod tests {
 
         Ok(())
     }
+
+    /// A non-positive deficit takes `write_projection_barrier`'s early
+    /// return: both residual rows get the constant base penalty and the
+    /// Jacobian is left untouched.
+    #[test]
+    fn test_projection_barrier_non_positive_deficit_skips_jacobian() -> TestResult {
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
+        let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
+        let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
+            ProjectionFactor::new(observations, camera);
+        let pose = SE3::from_translation_euler(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let p_world = Vector3::new(0.2, -0.1, 3.0);
+
+        let moved = act_point(&pose, &p_world);
+        let mut residual = vec![0.0; 2];
+        // Sentinel-filled Jacobian: any write would show.
+        let mut buffer = vec![7.0; 2 * 9];
+        let mut jacobian = faer::mat::MatMut::from_column_major_slice_mut(&mut buffer, 2, 9);
+        factor.write_projection_barrier(
+            0,
+            -1.0,
+            &Vector3::new(0.0, 0.0, -1.0),
+            &moved,
+            &mut residual,
+            Some(&mut jacobian),
+        );
+        assert_eq!(
+            residual,
+            [CHEIRALITY_BASE_PENALTY, CHEIRALITY_BASE_PENALTY],
+            "non-positive deficit writes only the base penalty"
+        );
+        assert!(
+            buffer.iter().all(|entry| *entry == 7.0),
+            "a non-positive deficit must leave the Jacobian untouched"
+        );
+        Ok(())
+    }
 }

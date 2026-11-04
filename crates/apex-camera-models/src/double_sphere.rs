@@ -897,4 +897,49 @@ mod tests {
         );
         Ok(())
     }
+
+    /// The double-sphere domain is the cone `z > -w₂·‖p_cam‖`, so the deficit
+    /// follows the cone boundary (not the `z = 0` plane) and its gradient
+    /// follows `‖p_cam‖`; at the origin the gradient falls back to `-e_z`
+    /// instead of propagating a NaN.
+    #[test]
+    fn test_projection_deficit_follows_cone_boundary() -> TestResult {
+        let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: 0.3,
+            alpha: 0.9,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
+        let w2 = camera.cone_ratio();
+
+        let p = Vector3::new(0.3, -0.4, -2.0);
+        let (deficit, grad) = camera.projection_deficit(&p);
+        let d1 = p.norm();
+        assert!(
+            (deficit - -(p.z + w2 * d1)).abs() < 1e-12,
+            "deficit must be the distance to the cone boundary"
+        );
+        assert!(deficit > 0.0, "the sample point sits outside the cone");
+
+        // Finite-difference check of the cone gradient.
+        let eps = 1e-7;
+        for k in 0..3 {
+            let mut pp = p;
+            pp[k] += eps;
+            let mut pm = p;
+            pm[k] -= eps;
+            let fd =
+                (camera.projection_deficit(&pp).0 - camera.projection_deficit(&pm).0) / (2.0 * eps);
+            assert!(
+                (fd - grad[k]).abs() < 1e-6,
+                "gradient component {k}: FD {fd} vs analytic {}",
+                grad[k]
+            );
+        }
+
+        // Origin: ‖p‖ derivative undefined — gradient falls back to -e_z.
+        let (_, grad_origin) = camera.projection_deficit(&Vector3::zeros());
+        assert_eq!(grad_origin, Vector3::new(0.0, 0.0, -1.0));
+        Ok(())
+    }
 }
