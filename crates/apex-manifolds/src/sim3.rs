@@ -762,7 +762,7 @@ impl Tangent<Sim3> for Sim3Tangent {
     ///
     /// Computed from the general Lie-group identity `Jr(ξ) = ∫₀¹ Ad(Exp(-tξ)) dt`
     /// (e.g. Solà, "A micro Lie theory for state estimation in robotics", eq. 146),
-    /// evaluated by [`integrate_adjoint_of_negated_exp`]. Unlike SE(3)'s `Q`
+    /// evaluated by `integrate_adjoint_of_negated_exp`. Unlike SE(3)'s `Q`
     /// block, Sim(3)'s exact translation/rotation/scale coupling does not
     /// reduce to a compact closed form; this identity sidesteps re-deriving
     /// one by hand and is verified against central differences of `Exp` in
