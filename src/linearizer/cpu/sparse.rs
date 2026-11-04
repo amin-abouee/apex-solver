@@ -717,7 +717,7 @@ mod tests {
     fn test_assemble_sparse_duplicate_variable_accumulates() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x = problem.add_variable(ManifoldType::RN, dvector![5.0]);
-        problem.add_residual_block(&[x, x], Box::new(PairLinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&[x, x], Box::new(PairLinearFactor { target: 0.0 }), None)?;
 
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
