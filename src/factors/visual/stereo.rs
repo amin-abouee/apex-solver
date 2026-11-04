@@ -7,13 +7,16 @@
 //! uL = cx + fx·x/z     uR = cx + fx·(x−b)/z     v = cy + fy·y/z
 //! ```
 //!
-//! Parameter blocks: `[pose (7), landmark (3)]` — 9 minimal DOF, 3D residual
-//! `[uL, uR, v]`. Calibration is fixed at construction. Cheirality violations
+//! Parameter blocks: `[pose X ∈ G, landmark (3)]` — `G::DOF + 3` minimal DOF, 3D
+//! residual `[uL, uR, v]`. `G` is any group that moves points ([`ActsOnPoints3`]:
+//! `SE3` by default, `SE23`, `Sim3`, …); the pose is world-to-camera. Calibration is fixed at construction. Cheirality violations
 //! (`z ≤ 0`) are handled with the same smooth penalty as the monocular
 //! [`ProjectionFactor`](crate::factors::visual::projection::ProjectionFactor).
 
 use apex_camera_models::{ProjectionError, ProjectionResult};
-use apex_manifolds::LieGroup;
+use std::marker::PhantomData;
+
+use apex_manifolds::capability::ActsOnPoints3;
 use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
@@ -21,6 +24,7 @@ use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
+use crate::factors::common::group_point::{MAX_ACT_DOF, act_point, expect_state_and_point};
 use crate::factors::{Factor, FactorResult};
 
 /// Rectified stereo calibration: focal lengths, principal point, baseline.
@@ -78,22 +82,24 @@ impl StereoCalibration {
 
 /// Rectified stereo reprojection factor over `[pose, landmark]`.
 #[derive(Clone)]
-pub struct StereoFactor {
+pub struct StereoFactor<G: ActsOnPoints3 = SE3> {
     /// Measured `(uL, uR, v)` in the rectified stereo pair.
     pub measurement: Vector3<f64>,
     /// Fixed stereo calibration.
     pub calibration: StereoCalibration,
     /// Log warnings for cheirality violations.
     pub verbose_cheirality: bool,
+    group: PhantomData<fn() -> G>,
 }
 
-impl StereoFactor {
+impl<G: ActsOnPoints3> StereoFactor<G> {
     /// Create a stereo factor from a `(uL, uR, v)` measurement and calibration.
     pub fn new(measurement: Vector3<f64>, calibration: StereoCalibration) -> Self {
         Self {
             measurement,
             calibration,
             verbose_cheirality: false,
+            group: PhantomData,
         }
     }
 
@@ -104,23 +110,22 @@ impl StereoFactor {
     }
 
     /// World-to-camera projection Jacobians shared by the valid and cheirality
-    /// paths.
+    /// paths: `(∂p_cam/∂pose_tangent (3 × G::DOF), ∂p_cam/∂p_world (3×3))` for
+    /// the world-to-camera pose convention with right-plus retractions.
     ///
-    /// Returns `(∂p_cam/∂pose_tangent (3×6), ∂p_cam/∂p_world = R (3×3))` for
-    /// the world-to-camera pose convention `p_cam = R·p_world + t` with
-    /// right-plus retractions.
-    /// `(∂p_cam/∂(δρ, δθ), ∂p_cam/∂p_world)`, taken straight from SE(3)'s own
-    /// `act` so this factor uses the group's right-perturbation convention
-    /// rather than a second, hand-derived copy of it.
-    fn point_jacobians(pose: &SE3, p_world: &Vector3<f64>) -> (SMatrix<f64, 3, 6>, Matrix3<f64>) {
-        let mut j_pose = SE3::zero_jacobian();
-        let mut j_point = Matrix3::zeros();
-        let _ = pose.act(p_world, Some(&mut j_pose), Some(&mut j_point));
-        (j_pose.fixed_view::<3, 6>(0, 0).into_owned(), j_point)
+    /// Taken straight from the group's own `act`, so this factor uses the
+    /// group's right-perturbation convention rather than a second,
+    /// hand-derived copy of it.
+    fn point_jacobians(
+        pose: &G,
+        p_world: &Vector3<f64>,
+    ) -> (SMatrix<f64, 3, MAX_ACT_DOF>, Matrix3<f64>) {
+        let moved = act_point(pose, p_world);
+        (moved.d_state, moved.d_point)
     }
 }
 
-impl Factor for StereoFactor {
+impl<G: ActsOnPoints3> Factor for StereoFactor<G> {
     fn linearize(
         &self,
         params: &[&[f64]],
@@ -128,10 +133,9 @@ impl Factor for StereoFactor {
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
         debug_assert_eq!(params.len(), 2, "StereoFactor expects [pose, landmark]");
-        debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
         debug_assert_eq!(params[1].len(), 3, "params[1] must be a 3D point");
 
-        let pose = SE3::from_param_slice(params[0]);
+        let pose = G::from_param_slice(params[0]);
         let p_world = Vector3::new(params[1][0], params[1][1], params[1][2]);
         let cal = &self.calibration;
 
@@ -154,7 +158,7 @@ impl Factor for StereoFactor {
                 if let Some(mut jac) = jacobian {
                     let d_pen_d_zcam = -CHEIRALITY_DEPTH_SCALE;
                     let (d_pc_d_pose, rotation) = Self::point_jacobians(&pose, &p_world);
-                    for c in 0..6 {
+                    for c in 0..G::DOF {
                         let d = d_pen_d_zcam * d_pc_d_pose[(2, c)];
                         for r in 0..3 {
                             *jac.rb_mut().get_mut(r, c) = d;
@@ -163,7 +167,7 @@ impl Factor for StereoFactor {
                     for c in 0..3 {
                         let d = d_pen_d_zcam * rotation[(2, c)];
                         for r in 0..3 {
-                            *jac.rb_mut().get_mut(r, 6 + c) = d;
+                            *jac.rb_mut().get_mut(r, G::DOF + c) = d;
                         }
                     }
                 }
@@ -212,11 +216,11 @@ impl Factor for StereoFactor {
         let d_uv_d_landmark = d_uv_d_pc * rotation;
 
         for r in 0..3 {
-            for c in 0..6 {
+            for c in 0..G::DOF {
                 *jac.rb_mut().get_mut(r, c) = d_uv_d_pose[(r, c)];
             }
             for c in 0..3 {
-                *jac.rb_mut().get_mut(r, 6 + c) = d_uv_d_landmark[(r, c)];
+                *jac.rb_mut().get_mut(r, G::DOF + c) = d_uv_d_landmark[(r, c)];
             }
         }
     }
@@ -226,15 +230,11 @@ impl Factor for StereoFactor {
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (3, 9)
+        (3, G::DOF + 3)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> FactorResult<()> {
-        crate::factors::common::validate::expect_block_sizes(
-            variables,
-            &[SE3::REP_SIZE, 3],
-            "StereoFactor",
-        )
+        expect_state_and_point::<G>(variables, "StereoFactor")
     }
 }
 
@@ -244,8 +244,12 @@ pub type StereoPoint2 = SVector<f64, 3>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_manifolds::Tangent;
+    use crate::factors::common::conformance::{Block, finite_diff_jacobian_parity};
     use apex_manifolds::se3::SE3Tangent;
+    use apex_manifolds::se23::SE23;
+    use apex_manifolds::sim3::Sim3;
+    use apex_manifolds::so3::SO3;
+    use apex_manifolds::{LieGroup, Tangent};
 
     fn stereo_cal() -> StereoCalibration {
         StereoCalibration::new(500.0, 450.0, 320.0, 240.0, 0.2).unwrap_or_else(|e| panic!("{e}"))
@@ -285,12 +289,10 @@ mod tests {
         // Evaluate the Jacobian at a state with a large non-zero residual:
         // the measurement is offset from the truth projection.
         let (factor0, pose, landmark) = truth_setup();
-        let offset_factor = StereoFactor {
-            measurement: factor0.measurement + Vector3::new(1.0, -0.5, 0.3),
-            calibration: factor0.calibration.clone(),
-            verbose_cheirality: false,
-        };
-        let factor = offset_factor;
+        let factor = StereoFactor::<SE3>::new(
+            factor0.measurement + Vector3::new(1.0, -0.5, 0.3),
+            factor0.calibration.clone(),
+        );
         let pose_vec: Vec<f64> = pose.as_param_slice().to_vec();
         let lm_vec = [landmark.x, landmark.y, landmark.z];
 
@@ -342,11 +344,43 @@ mod tests {
         }
     }
 
+    /// A pose of group `G` a little away from the identity, on every axis.
+    fn offset_pose<G: ActsOnPoints3>() -> G {
+        let step: Vec<f64> = (0..G::DOF)
+            .map(|axis| 0.02 * (axis as f64 + 1.0) * if axis % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        <G::TangentVector as Tangent<G>>::from_slice(&step).exp(None)
+    }
+
+    /// The analytic Jacobian matches a central difference for group `G`, both
+    /// on the valid path and with the point behind the camera (cheirality).
+    fn parity_for<G: ActsOnPoints3 + 'static>() -> Result<(), String> {
+        let pose = offset_pose::<G>();
+        for landmark in [Vector3::new(0.5, 0.2, 4.0), Vector3::new(0.3, -0.1, -1.5)] {
+            let measurement = stereo_cal()
+                .project(&pose.act(&landmark, None, None))
+                .unwrap_or_else(|_| Vector3::new(330.0, 300.0, 250.0));
+            let factor =
+                StereoFactor::<G>::new(measurement + Vector3::new(1.0, -0.5, 0.3), stereo_cal());
+            let blocks = [Block::lie(&pose), Block::euclidean(landmark.as_slice())];
+            finite_diff_jacobian_parity(&factor, &blocks, 1e-4)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn jacobian_matches_finite_differences_for_every_point_group() -> Result<(), String> {
+        parity_for::<SE3>()?;
+        parity_for::<SE23>()?;
+        parity_for::<Sim3>()?;
+        parity_for::<SO3>()
+    }
+
     #[test]
     fn cheirality_violation_gets_penalty() {
         let cal = stereo_cal();
-        let factor =
-            StereoFactor::new(Vector3::new(320.0, 320.0, 240.0), cal).with_verbose_cheirality();
+        let factor = StereoFactor::<SE3>::new(Vector3::new(320.0, 320.0, 240.0), cal)
+            .with_verbose_cheirality();
         let pose = SE3::identity();
         let pose_vec: Vec<f64> = pose.as_param_slice().to_vec();
 
