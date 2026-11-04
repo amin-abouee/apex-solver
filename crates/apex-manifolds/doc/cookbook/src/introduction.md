@@ -54,6 +54,14 @@ Start with the [**Conventions**](./manifolds/conventions.md) page — it defines
 notation, storage layout (quaternion order, twist order), the `⊞`/`⊟` operators,
 and the shared SO(3) Jacobians that every other chapter reuses.
 
+## Using the Groups
+
+Two chapters cover using the groups from generic code rather than deriving them:
+[Capabilities](./manifolds/capabilities.md) (the `ActsOnPoints3`, `RigidPose`,
+`HasVelocity` and `ConstDoF` traits that let a factor be written once for several groups)
+and [Errors and Checked Constructors](./manifolds/errors.md) (the typed error hierarchy and
+the `try_*` constructors for data that arrives from outside).
+
 ## Build the Book
 
 ```bash

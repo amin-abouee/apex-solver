@@ -13,3 +13,8 @@
 - [SGal(3) - Galilean Group](./manifolds/sgal3.md)
 - [Sim(3) - Similarity Transforms](./manifolds/sim3.md)
 - [Rn - Euclidean Vectors](./manifolds/rn.md)
+
+# Using the Groups
+
+- [Capabilities: What a Group Can Do](./manifolds/capabilities.md)
+- [Errors and Checked Constructors](./manifolds/errors.md)

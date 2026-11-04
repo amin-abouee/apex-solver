@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Sim(3) and SGal(3) singular-Jacobian fallbacks are logged on the first hit and then
   on each power of ten, instead of on every call.
 
+### Documentation
+- Cookbook chapters *Capabilities* (the `ActsOnPoints3`, `RigidPose`, `HasVelocity` and `ConstDoF` traits) and
+  *Errors and Checked Constructors* (the `ManifoldError` hierarchy and every `try_*` constructor).
+
 ## [0.4.0] - 2026-09-29
 
 ### Added
