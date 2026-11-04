@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
+- **Released as 1.6.0, not 2.0.0.** The removals below are breaking; the
+  version is set by hand so release-plz's semver check does not turn the
+  release into a major one.
+- The back-compatibility module aliases are removed: `apex_solver::manifold`
+  and `apex_solver::camera_models` (use `apex_solver::apex_manifolds` /
+  `apex_solver::apex_camera_models`, or the crates directly) and
+  `apex_solver::factors::camera` (use `apex_camera_models`).
+- The remaining deprecated API is removed: `Problem::mark_as_schur_landmark`
+  (use `mark_for_elimination`), and the no-op
+  `LevenbergMarquardtConfig::with_trust_region` (use `with_step_quality`) and
+  `with_min_trust_region_radius` (use `with_damping_bounds`).
+
 - Errors are hierarchical and structured: `CoreError`, `FactorError`,
   `LinearizerError`, `LinAlgError`, `CovarianceError`, `OptimizerError`,
   `MarginalizationError` and `ObserverError` carry named fields instead of

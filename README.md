@@ -121,7 +121,7 @@ residual dimension, and weighting rules. Derivations in the
 
 ```toml
 [dependencies]
-apex-solver = "1.5.0"
+apex-solver = "1.6.0"
 ```
 
 ```rust
