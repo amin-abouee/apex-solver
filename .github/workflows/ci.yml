@@ -16,7 +16,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, macos-latest, windows-latest]
+        # `macos-latest` points at the arm64 image, whose hosted-runner pool is
+        # routinely exhausted ("job was not acquired by Runner"). Pin the Intel
+        # image so the macOS leg actually runs; Apple Silicon is covered locally.
+        os: [ubuntu-22.04, ubuntu-24.04, macos-15-intel, windows-latest]
 
     steps:
       - name: Checkout repository

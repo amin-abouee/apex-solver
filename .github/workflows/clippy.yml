@@ -17,7 +17,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest]
+        # See ci.yml: the arm64 macOS pool is capacity-constrained, so use the
+        # Intel image rather than leave Clippy queued indefinitely.
+        os: [ubuntu-22.04, macos-15-intel]
 
     steps:
       - name: Checkout repository
