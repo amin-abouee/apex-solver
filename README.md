@@ -3,7 +3,7 @@
   <table>
     <tr>
       <td align="left" width="150">
-        <img src="assets/logo.png" alt="Apex Solver Logo" width="130" />
+        <img src="assets/apex_solver.png" alt="Apex Solver Logo" width="130" />
       </td>
       <td align="left" valign="middle">
         <h1>Apex Solver</h1>
