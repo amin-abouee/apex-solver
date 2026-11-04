@@ -140,7 +140,7 @@ in one step.
 <span class="apx-title">Warning — there are two documentation surfaces</span>
 
 The cookbook is the book, but the repository also carries `doc/factors.md`,
-`doc/factor-catalog.md`, `doc/examples.md` and `doc/performance.md` beside
+`doc/factor-catalog.md` and `doc/performance.md` beside
 it. They are *not* part of the book and they can drift: the cookbook is
 written against the crate, while those pages are a separate, older set of
 notes. When the two disagree, the cookbook and the code win — and the

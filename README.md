@@ -344,10 +344,21 @@ tiny-solver on 8 pose-graph datasets (SE2/SE3) and 4 BAL bundle-adjustment datas
 
 ## Examples
 
-Usage examples covering pose graph optimization, custom factor implementation, and
-self-calibration bundle adjustment.
+Twelve examples form a learning path, from a custom factor to a sliding-window bundle
+adjustment on a real dataset:
 
-→ **[Full examples](doc/examples.md)**
+| Part | Examples |
+|---|---|
+| Fundamentals | `curve_fitting`, `pose_graph_2d`, `robust_losses`, `uncertainty` |
+| Choosing the solver | `optimizers`, `linear_solvers` |
+| Bundle adjustment | `ba_synthetic`, `ba_parameterizations`, `bal_dataset` |
+| Incremental and windowed | `incremental_pose_graph`, `fixed_lag_smoother`, `sliding_window_ba` |
+
+```bash
+cargo run --release --example curve_fitting
+```
+
+→ **[The learning path](examples/README.md)**
 
 ---
 

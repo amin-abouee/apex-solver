@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - MSRV is now 1.95 (was 1.93).
+- **The examples are a learning path.** Twelve examples in four parts
+  (`examples/README.md`): fundamentals (`curve_fitting`, `pose_graph_2d`,
+  `robust_losses`, `uncertainty`), solver choices (`optimizers`,
+  `linear_solvers`), bundle adjustment (`ba_synthetic`,
+  `ba_parameterizations`, `bal_dataset`) and incremental estimation
+  (`incremental_pose_graph`, `fixed_lag_smoother`, `sliding_window_ba`). They
+  replace `compare_optimizers`, `compare_solvers`, `covariance_estimation`,
+  `load_graph_file` and `loss_function_comparison`, and `doc/examples.md`,
+  whose snippets predated the 1.5 factor API. The two Rerun examples moved to
+  `examples/visualization/`.
 
 ### Breaking Changes
 
