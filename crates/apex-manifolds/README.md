@@ -1,7 +1,14 @@
-# apex-manifolds
-
-Lie group manifolds (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic
-Jacobians for nonlinear optimization.
+<table>
+  <tr>
+    <td align="left" width="150">
+      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/assets/apex_manifolds.png" alt="apex-manifolds logo" width="130" />
+    </td>
+    <td align="left" valign="middle">
+      <h1>apex-manifolds</h1>
+      <b>Lie group manifolds (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic Jacobians for nonlinear optimization.</b>
+    </td>
+  </tr>
+</table>
 
 ## What's new in 0.5.0
 

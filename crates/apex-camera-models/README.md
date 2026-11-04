@@ -1,6 +1,14 @@
-# apex-camera-models
-
-Comprehensive camera projection models for bundle adjustment, SLAM, and Structure-from-Motion.
+<table>
+  <tr>
+    <td align="left" width="150">
+      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/assets/apex_camera_models.png" alt="apex-camera-models logo" width="130" />
+    </td>
+    <td align="left" valign="middle">
+      <h1>apex-camera-models</h1>
+      <b>Comprehensive camera projection models for bundle adjustment, SLAM, and Structure-from-Motion.</b>
+    </td>
+  </tr>
+</table>
 
 ## What's new in 0.5.0 — hierarchical errors, Aria fisheye models, conversion
 

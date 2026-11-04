@@ -1,6 +1,14 @@
-# apex-io
-
-High-performance file I/O for robotics data — pose graphs (G2O, TORO, BAL) and ROS2 bag files (SQLite3 and MCAP), with optional live DDS topic subscription.
+<table>
+  <tr>
+    <td align="left" width="150">
+      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/assets/apex_io.png" alt="apex-io logo" width="130" />
+    </td>
+    <td align="left" valign="middle">
+      <h1>apex-io</h1>
+      <b>High-performance file I/O for robotics data — pose graphs (G2O, TORO, BAL) and ROS2 bag files (SQLite3 and MCAP), with optional live DDS topic subscription.</b>
+    </td>
+  </tr>
+</table>
 
 ## What's new in 0.5.0 — bags, VRS, error propagation
 
