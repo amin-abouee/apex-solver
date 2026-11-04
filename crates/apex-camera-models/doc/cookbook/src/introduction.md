@@ -157,8 +157,8 @@ convention, and the double sphere's cone `z > −w₂·‖p‖`.
 
 The deficit is *defined and tested* but deliberately **not charged** by the solver's
 `ProjectionFactor`: an experiment that added it as a barrier made the benchmarks worse and
-was reverted (see `doc/optimization/experiment_007_projection_domain_barrier_REJECTED.md` in
-the repository). It is there for a barrier formulation that survives the bundle-adjustment
+was reverted (at BAL t257 it charged 3.29e12 against a 6.86e4 golden cost at the initial
+guess, and the solve stopped making progress). It is there for a barrier formulation that survives the bundle-adjustment
 benchmarks.
 
 ## Number of Parameters

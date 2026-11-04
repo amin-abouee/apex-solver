@@ -473,8 +473,7 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// and 2.20e10 against 6.86e4 / 1.89e5 goldens) and the solve stopped
     /// making progress. The per-model definitions below stay: they are the
     /// correct domain geometry, unit-tested here, ready for a formulation that
-    /// survives those benchmarks. See
-    /// `benchmarking_results/experiment_007_projection_domain_barrier_REJECTED.md`.
+    /// survives those benchmarks.
     ///
     /// # Examples
     ///

@@ -294,9 +294,7 @@ where
                     // regressed, 1 improved, 2 were unchanged. Halving the
                     // penalty 1000x did not help, so it is not a
                     // conditioning artifact but an irreducible barrier cost
-                    // at the initial guess. See
-                    // `benchmarking_results/experiment_007_projection_domain_barrier_REJECTED.md`
-                    // and scenario S12 in `docs/factor_correctness_audit.md`.
+                    // at the initial guess.
                     //
                     // Consequence: `fov`, `bal_pinhole` and `double_sphere`
                     // report their cheirality failure as
@@ -380,9 +378,8 @@ where
     /// [`CameraModel::projection_deficit`] — which describes that model's
     /// domain (the FOV plane, the BAL `z < -MIN_DEPTH` half-space, the
     /// double-sphere cone, …) instead of a z-forward one — was implemented,
-    /// measured and then reverted; the call site records the numbers, and
-    /// `benchmarking_results/experiment_007_projection_domain_barrier_REJECTED.md`
-    /// has the full per-dataset table. Only the cheirality arm charges here.
+    /// measured and then reverted; the call site records the numbers. Only the
+    /// cheirality arm charges here.
     ///
     /// # Why not zero
     ///

@@ -120,8 +120,7 @@ tiny-solver show the 2026-09-27 session means ± std recorded in the tables belo
   factrs and tiny-solver are faster there but end at 300× apex's cost). **GTSAM 4.3 is
   fastest on the three remaining 3D sets**: sphere2500 (89 vs 141 ms), parking-garage
   (28 vs 41 ms) and torus3D (403 ms vs 1.94 s — apex needs 38 iterations to GTSAM's 10).
-  (Exp 009 removed a per-solve setup cost Exp 004 had introduced; see
-  `benchmarking_results/experiment_009_odometry_assembly_regression.md`.)
+  (Exp 009 removed a per-solve setup cost Exp 004 had introduced.)
 - **Cost**: GTSAM 4.3 reaches the lowest `cost/(m−n)` on **all 8** datasets (tied with
   g2o on M3500 and ring). apex's final cost is within 1 % of it on M3500 (1.5238 vs
   1.5109) and parking-garage (0.6281 vs 0.6246), within 4 % on city10000 (+1.6 %) and

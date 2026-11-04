@@ -114,7 +114,6 @@ exclude = [
     ".github/",
     "scripts/",
     "plan/",
-    "doc/optimization/",
     "deny.toml",
     "clippy.toml",
     "release-plz.toml",
