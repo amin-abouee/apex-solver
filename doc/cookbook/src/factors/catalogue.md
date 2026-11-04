@@ -31,7 +31,7 @@ plus the companion types they need and the four decorators.
 | `EssentialMatrixFactor` | two poses | the epipolar constraint |
 | `ExtrinsicProjectionFactor<CAM>` | extrinsic, point | the extrinsic, calibrated by the projections it appears in |
 | `TimeOffsetProjectionFactor` | offset, point | a camera–IMU time offset, calibrated the same way |
-| `StereoFactor` | two poses, calibration | a stereo pair's relative pose, calibration in the state |
+| `StereoFactor<G>` | pose, point | a rectified stereo `(u_L, u_R, v)` reprojection; the calibration is fixed, `G` is any group that moves points |
 
 Companions: `EssentialMatrixConstraint`, `StereoCalibration`, `RegularDepthFactor`
 / `OneSidedDepthFactor` (the `DepthFactor` aliases), `StereoPoint2`.

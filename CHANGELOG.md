@@ -160,6 +160,15 @@ apex-io 0.5.0 (each has its own changelog).
 - Singular preconditioner blocks replaced by the identity are warned about
   at a rate limit.
 
+### Documentation
+
+- **Cookbook for 1.6.** A chapter on [the examples](doc/cookbook/src/tools/examples.md) mapping each of the twelve
+  examples to the chapter that explains it; the `StereoFactor` and `InverseDepthPlaneFactor` entries describe what the
+  factors do (a pose and a landmark, generic over the pose group). The migration chapter lists every 1.6 removal.
+- New in the repository: `doc/roadmap.md` (deferred work), `doc/optimization/` (the 2026-09 solver experiment record,
+  including two rejected experiments), and `plan/quality/` (the quality audit, with `STATUS.md` saying which findings
+  are fixed, open or not re-checked). The last two are kept out of the published crate.
+
 ## [1.5.0] - 2026-09-29
 
 ### Breaking Changes

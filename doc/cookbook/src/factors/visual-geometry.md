@@ -18,7 +18,7 @@ changes the geometry of the residual:
 |---|---|---|
 | `HomogeneousPointFactor` | a 3-D point | unconstrained scenes; the classic formulation |
 | `InverseDepthFactor` | $\rho = 1/z$ along the optical axis | points in front of the camera, where $z$ is positive and $\rho$ varies smoothly |
-| `InverseDepthPlaneFactor`, `InverseDepthBearingFactor` | $\rho$ in an `SE23` frame | visual-inertial graphs, where the point's frame follows the body |
+| `InverseDepthPlaneFactor`, `InverseDepthBearingFactor` | $\rho$ anchored in a host keyframe of a rigid pose group `G` (`SE23` in visual-inertial graphs) | visual-inertial graphs, where the point's frame follows the body |
 
 </div>
 
@@ -56,11 +56,11 @@ Three representations coexist, and the crate is explicit about which is which:
 | `HomogeneousPointFactor` | a homogeneous 3-D point, with the projection and the depth folded together |
 | `DepthFactor` | a point's depth along the ray, against a measured depth |
 | `InverseDepthFactor` | a point's inverse depth, against an inverse-depth measurement |
-| `InverseDepthPlaneFactor` | a point in an `SE23` (body-anchored) frame, with a bearing measurement |
+| `InverseDepthPlaneFactor<G>` | an inverse-depth point anchored in a host keyframe of any rigid pose group (`SE23` in visual-inertial graphs) |
 | `InverseDepthBearingFactor` | the same, with the residual on the bearing's tangent plane |
 | `EssentialMatrixFactor` | the epipolar constraint between two views, as a factor over the two poses |
 | `EssentialMatrixConstraint` | the same constraint, packaged for a pose-graph edge |
-| `StereoFactor` (+ `StereoCalibration`) | a stereo pair's relative pose, with the calibration as part of the state |
+| `StereoFactor<G>` (+ `StereoCalibration`) | a landmark seen by a rectified stereo pair: residual `(u_L, u_R, v)` over `[pose, point]`, calibration fixed at construction; generic over any group that moves points (`SE3`, `SE23`, `Sim3`, `SO3`) |
 | `InverseRangeProjectionFactor` | a point seen by camera 1, with the rig's baseline in the chain |
 | `StereoInverseRangeFactor` | a point seen by both cameras of a rig, with the body state cancelling |
 | `ExtrinsicProjectionFactor` | the camera-to-body extrinsic, calibrated by the projections it appears in |
