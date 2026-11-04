@@ -49,7 +49,24 @@ A high-performance Rust-based nonlinear least squares optimization library desig
 
 Apex Solver is a comprehensive optimization library that bridges the gap between theoretical robotics and practical implementation. It provides manifold-aware optimization for Lie groups commonly used in computer vision, multiple optimization algorithms with unified interfaces, flexible linear algebra backends supporting both sparse Cholesky and QR decompositions, and industry-standard file format support for seamless integration with existing workflows.
 
-## ⚠️ Upgrading to 1.5.0 — breaking API changes
+## ⚠️ Upgrading to 1.6.0 — removed aliases and deprecated API
+
+`1.6.0` removes the back-compatibility aliases and the remaining deprecated API (versioned
+`1.6`, not `2.0`, on purpose — see the [changelog](CHANGELOG.md)). Code on `1.5.x` needs:
+
+- `apex_solver::manifold` → `apex_solver::apex_manifolds`, `apex_solver::camera_models` →
+  `apex_solver::apex_camera_models`, `factors::camera` → `apex_camera_models`.
+- `Problem::mark_as_schur_landmark` → `mark_for_elimination`.
+- `LevenbergMarquardtConfig::with_trust_region` → `with_step_quality`;
+  `with_min_trust_region_radius` → `with_damping_bounds` (both did nothing).
+- apex-io: `ReaderResult` / `ReaderError` → `BagResult` / `BagError`; `IoError` is now the crate
+  root over one error per module. apex-manifolds 0.5 and apex-camera-models 0.5 also change
+  their error types — see their changelogs.
+
+The [migration chapter](doc/cookbook/src/tools/migration.md) lists every item with its
+replacement.
+
+## Upgrading from 1.4 to 1.5 — breaking API changes
 
 `1.5.0` changes the public API. Code written against `1.4.0` will not compile until you make
 the edits below. Full detail in the [changelog](CHANGELOG.md) and the
@@ -77,7 +94,7 @@ bins/examples moved behind `cli`. Bag I/O users add `features = ["rosbag"]`.
 for the exact reduced solve. LM also damps with `λ·D` (Ceres-style) — iterates change on
 every problem.
 
-## Key Features (v1.5.0)
+## Key Features (v1.6.0)
 
 - **Factor Library (~40 factors)**: IMU (SE₂(3)/SGal(3)), visual, LiDAR, GNSS/navigation,
   range & bearing, motion models and marginalization — see [Factors](#factors) below.
@@ -104,7 +121,7 @@ every problem.
 
 ## Factors
 
-`1.5.0` ships a broad factor library grouped by sensor modality — pose & priors, IMU
+`1.6.0` ships a broad factor library grouped by sensor modality — pose & priors, IMU
 (SE₂(3) and SGal(3) preintegration), visual (projection, stereo, inverse-depth, essential
 matrix, smart projection), LiDAR (point/point, point-to-plane, GICP, LOAM edge), GNSS &
 navigation (GPS, pseudorange, Doppler, barometric, attitude), range & bearing, motion
@@ -322,13 +339,13 @@ mdbook build crates/apex-manifolds/doc/cookbook      # then open book/index.html
 
 ```toml
 [dependencies]
-apex-manifolds = "0.4.0"
+apex-manifolds = "0.5.0"
 
 [dependencies]
-apex-camera-models = "0.4.0"
+apex-camera-models = "0.5.0"
 
 [dependencies]
-apex-io = "0.4.0"
+apex-io = "0.5.0"
 ```
 
 ---

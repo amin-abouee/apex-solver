@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-04
+
+Workspace crates released together: apex-manifolds 0.5.0, apex-camera-models 0.5.0 and
+apex-io 0.5.0 (each has its own changelog).
+
 - MSRV is now 1.95 (was 1.93).
 - **The examples are a learning path.** Twelve examples in four parts
   (`examples/README.md`): fundamentals (`curve_fitting`, `pose_graph_2d`,

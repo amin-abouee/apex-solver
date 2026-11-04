@@ -108,8 +108,7 @@ the code.
 <div class="apx-note">
 <span class="apx-title">Note — the version pins</span>
 
-This book describes the tree at `apex-solver` **1.5.0**, with the 1.6
-deprecations already staged in the source. The three sibling crates are at
-0.4.0. The migration chapter lists what changed and when.
+This book describes the tree at `apex-solver` **1.6.0**. The three sibling
+crates are at apex-manifolds 0.5.0, apex-camera-models 0.5.0 and apex-io 0.5.0. The migration chapter lists what changed and when.
 
 </div>
