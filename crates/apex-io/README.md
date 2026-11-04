@@ -1,7 +1,7 @@
 <table>
   <tr>
     <td align="left" width="150">
-      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/assets/apex_io.png" alt="apex-io logo" width="130" />
+      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/crates/apex-io/assets/apex_io.png" alt="apex-io logo" width="130" />
     </td>
     <td align="left" valign="middle">
       <h1>apex-io</h1>
@@ -585,7 +585,7 @@ let frame = rec.image_nearest(AriaSensor::SlamLeft, t0 + 10.0)?;
 * **Tools**: `vrs_info` (streams, rates, tags, `--verify-index`), `vrs_copy` (trim by stream/time, re-compress),
   `vrs_dump` (CSV for IMU/baro/GPS, JPEG extraction for cameras).
 
-Validated against Meta's own reader (`projectaria-tools`) with `scripts/vrs_crosscheck.py`: decoded IMU/barometer
+Validated against Meta's own reader (`projectaria-tools`) with a one-off cross-check: decoded IMU/barometer
 values match and Meta reads files written by `VrsWriter` identically to the originals. Format notes (derived from real
 files; the upstream header comments are partly outdated): file header 80 B, record header 32 B, index entries 19 B
 `{ts, size, type, stream}` with offsets implied by cumulative sizes, var-size layout pieces stored as `(offset, length)` pairs.

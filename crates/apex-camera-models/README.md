@@ -1,7 +1,7 @@
 <table>
   <tr>
     <td align="left" width="150">
-      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/assets/apex_camera_models.png" alt="apex-camera-models logo" width="130" />
+      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/crates/apex-camera-models/assets/apex_camera_models.png" alt="apex-camera-models logo" width="130" />
     </td>
     <td align="left" valign="middle">
       <h1>apex-camera-models</h1>

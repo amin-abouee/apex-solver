@@ -13,7 +13,7 @@ readme = "README.md"
 keywords = ["lie-group", "manifold", "robotics", "computer-vision", "optimization"]
 categories = ["algorithms", "mathematics", "science"]
 
-exclude = ["benches/"]
+exclude = ["benches/", "assets/"]
 
 [dependencies]
 nalgebra.workspace = true

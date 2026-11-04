@@ -1,7 +1,7 @@
 <table>
   <tr>
     <td align="left" width="150">
-      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/assets/apex_manifolds.png" alt="apex-manifolds logo" width="130" />
+      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/crates/apex-manifolds/assets/apex_manifolds.png" alt="apex-manifolds logo" width="130" />
     </td>
     <td align="left" valign="middle">
       <h1>apex-manifolds</h1>
