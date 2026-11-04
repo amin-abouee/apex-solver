@@ -5,7 +5,7 @@ All notable changes to `apex-camera-models` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-11-04
 
 ### Changed
 - **Hierarchical errors**: `CameraModelError` is now a root over `ParamError`, `ProjectionError`,
@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Kannala-Brandt → Fisheye62 / Fisheye624, Fisheye62 → Fisheye624; `TryFrom` back, only when no term is dropped.
 - Cookbook chapters *Fisheye62*, *Fisheye624* and *Conversion*.
 
-### Changed
+### Breaking
 - **Breaking:** `DistortionModel` gains the variants `Fisheye62 { k, p }` and `Fisheye624 { k, p, s }`, so an exhaustive
   `match` on it needs two more arms.
 

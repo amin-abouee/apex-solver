@@ -2,6 +2,18 @@
 
 High-performance file I/O for robotics data — pose graphs (G2O, TORO, BAL) and ROS2 bag files (SQLite3 and MCAP), with optional live DDS topic subscription.
 
+## What's new in 0.5.0 — bags, VRS, error propagation
+
+- **One bag API** — `BagReader` / `BagWriter` over ROS1 `.bag`, ROS2 sqlite3 and MCAP, with a
+  pull iterator over every message, a schema-driven ROS1 ↔ CDR transcoder, a real MCAP writer
+  with parallel chunk compression, and a much faster ROS1 reader (open 2.8 ms → 0.05 ms).
+- **`vrs` feature** — a Meta VRS / Project Aria reader and writer in safe Rust.
+- **LaMAria** — typed calibration reader and `TumNanosLoader` for integer-nanosecond TUM rows.
+- **Hierarchical errors** — **breaking:** `IoError` is the crate root over `GraphError`,
+  `BalError`, `TrajectoryError`, `AslError`, `LamariaError`, `DatasetError`, `VrsError` and
+  `BagError`; the `ReaderResult` / `ReaderError` aliases are removed (use `BagResult` /
+  `BagError`). See the [changelog](CHANGELOG.md).
+
 ## What's new in 0.4.0 — feature flags & trajectories
 
 - **`rosbag` is now an opt-in feature** (was built unconditionally); `download` and `clap`
@@ -69,19 +81,19 @@ the `ros2 bag` CLI.
 ```toml
 # Core: pose graphs + dataset registry (no bag I/O, no network)
 [dependencies]
-apex-io = "0.4.0"
+apex-io = "0.5.0"
 
 # With ROS1/ROS2 bag reading & writing (SQLite3 + MCAP, CDR, message types)
-apex-io = { version = "0.4.0", features = ["rosbag"] }
+apex-io = { version = "0.5.0", features = ["rosbag"] }
 
 # Without dataset auto-download (offline builds)
-apex-io = { version = "0.4.0", default-features = false }
+apex-io = { version = "0.5.0", default-features = false }
 
 # With Rerun visualization helpers
-apex-io = { version = "0.4.0", features = ["visualization"] }
+apex-io = { version = "0.5.0", features = ["visualization"] }
 
 # With live DDS topic subscription (requires a DDS runtime)
-apex-io = { version = "0.4.0", features = ["dds"] }
+apex-io = { version = "0.5.0", features = ["dds"] }
 ```
 
 | Feature | Default | Enables | Extra dependencies |
@@ -323,7 +335,7 @@ writer.close()?;
 Enable the `dds` feature and have a running ROS2 node on the same DDS domain.
 
 ```toml
-apex-io = { version = "0.4.0", features = ["dds"] }
+apex-io = { version = "0.5.0", features = ["dds"] }
 ```
 
 ### Subscribe to a single topic
@@ -799,7 +811,7 @@ logged by the caller that gives up on a read.
 ## Visualization Feature
 
 ```toml
-apex-io = { version = "0.4.0", features = ["visualization"] }
+apex-io = { version = "0.5.0", features = ["visualization"] }
 ```
 
 ```rust
