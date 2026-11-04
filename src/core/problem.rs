@@ -89,15 +89,6 @@ impl Problem {
         self.schur_landmark_keys.insert(key);
     }
 
-    /// Bundle-adjustment-flavoured alias for [`Self::mark_for_elimination`].
-    #[deprecated(
-        since = "1.6.0",
-        note = "renamed to `mark_for_elimination`: elimination is not restricted to landmarks"
-    )]
-    pub fn mark_as_schur_landmark(&mut self, key: VarKey) {
-        self.mark_for_elimination(key);
-    }
-
     /// Add a variable with a given manifold type and initial parameter vector.
     ///
     /// Returns a stable `VarKey` handle for use in `add_residual_block`, `fix_variable`, etc.
