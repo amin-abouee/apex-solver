@@ -853,7 +853,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     let start = Instant::now();
 
     // Use Levenberg-Marquardt optimizer with default Cholesky solver
-    let mut opt: LevenMarquardt = LevenMarquardt::new(graph.clone());
+    let mut opt: LevenMarquardt = LevenMarquardt::new(Default::default(), graph.clone());
     let result = black_box(opt.optimize(init));
 
     // Stop timing
