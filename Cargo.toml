@@ -51,7 +51,7 @@ byteorder  = "1.5"
 bytes      = "1.12"
 hex        = "0.4"
 image      = "0.25"
-rusqlite   = { version = "0.31", features = ["bundled"] }
+rusqlite   = { version = "0.41", features = ["bundled"] }
 zstd       = "0.14"
 mcap       = "0.26"
 md5        = "0.8"
