@@ -29,7 +29,7 @@ faer = { version = "0.24", features = ["sparse"] }
 dyn-stack = "0.13"
 rayon = "1.12"
 thiserror = "2.0.18"
-rand = "0.9.4"
+rand = "0.10.2"
 smallvec = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
