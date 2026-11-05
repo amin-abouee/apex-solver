@@ -68,7 +68,7 @@ futures = "0.3"
 criterion = "0.6.0"
 tempfile = "3.27"
 factrs = "0.2.0"
-tiny-solver = "0.17"
+tiny-solver = "0.18"
 csv = "1.4"
 
 [workspace.lints.rust]

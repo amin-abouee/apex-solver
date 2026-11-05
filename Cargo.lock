@@ -282,7 +282,7 @@ name = "apex-camera-models"
 version = "0.5.0"
 dependencies = [
  "apex-manifolds",
- "nalgebra",
+ "nalgebra 0.33.3",
  "thiserror 2.0.19",
  "tracing",
 ]
@@ -306,7 +306,7 @@ dependencies = [
  "lz4_flex",
  "mcap",
  "md5",
- "nalgebra",
+ "nalgebra 0.33.3",
  "rayon",
  "rerun",
  "rusqlite",
@@ -329,7 +329,7 @@ dependencies = [
 name = "apex-manifolds"
 version = "0.5.0"
 dependencies = [
- "nalgebra",
+ "nalgebra 0.33.3",
  "rand 0.9.5",
  "thiserror 2.0.19",
  "tracing",
@@ -350,7 +350,7 @@ dependencies = [
  "dyn-stack 0.13.2",
  "factrs",
  "faer 0.24.4",
- "nalgebra",
+ "nalgebra 0.33.3",
  "rand 0.9.5",
  "rayon",
  "rerun",
@@ -3625,8 +3625,8 @@ dependencies = [
  "foldhash 0.1.5",
  "log",
  "matrixcompare",
- "nalgebra",
- "num-dual",
+ "nalgebra 0.33.3",
+ "num-dual 0.11.2",
  "pad-adapter",
  "paste",
  "simba",
@@ -3670,15 +3670,15 @@ dependencies = [
 
 [[package]]
 name = "faer"
-version = "0.22.6"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49fce40ad65c366fbc6cd70a99d09d1008f075280bf2455e558e163c82913a9f"
+checksum = "3cb922206162d9405f9fc059052b3f997bdc92745da7bfd620645f5092df20d1"
 dependencies = [
  "bytemuck",
  "dyn-stack 0.13.2",
  "equator 0.4.2",
  "faer-macros",
- "faer-traits 0.22.1",
+ "faer-traits 0.23.2",
  "gemm 0.18.2",
  "generativity",
  "libm",
@@ -3688,10 +3688,11 @@ dependencies = [
  "num-traits",
  "private-gemm-x86",
  "pulp 0.21.5",
- "rand 0.8.7",
- "rand_distr 0.4.3",
+ "rand 0.9.5",
+ "rand_distr",
  "rayon",
  "reborrow",
+ "spindle",
 ]
 
 [[package]]
@@ -3714,7 +3715,7 @@ dependencies = [
  "private-gemm-x86",
  "pulp 0.22.3",
  "rand 0.9.5",
- "rand_distr 0.5.1",
+ "rand_distr",
  "rayon",
  "reborrow",
  "spindle",
@@ -3742,26 +3743,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f92bf75258e2a62712ca6d058e8ce2e70c7837ea931612d31a96ec696736976"
 dependencies = [
  "faer 0.20.2",
- "nalgebra",
+ "nalgebra 0.33.3",
  "num-complex",
 ]
 
 [[package]]
 name = "faer-ext"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d06294a67ba2c7573369db56fcc3dc97e1ee27f6658eaf35f398b845081cc012"
+checksum = "aa4d037166f25435671ecc6054ae76b964f17da513353f1617690470680efdf0"
 dependencies = [
- "faer 0.22.6",
- "nalgebra",
+ "faer 0.23.2",
+ "nalgebra 0.34.2",
  "num-complex",
 ]
 
 [[package]]
 name = "faer-macros"
-version = "0.21.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d0a255d1442b5825c61812a7eafda9034ec53d969c98555251085e148428e6a"
+checksum = "2cc4b8cd876795d3b19ddfd59b03faa303c0b8adb9af6e188e81fc647c485bb9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3770,9 +3771,9 @@ dependencies = [
 
 [[package]]
 name = "faer-traits"
-version = "0.22.1"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54febfcbb90edaab562d85447a94d500f1601f11db0b30d27da87ed6542c8f91"
+checksum = "24b69235b5f54416286c485fb047f2f499fc935a4eee2caadf4757f3c94c7b62"
 dependencies = [
  "bytemuck",
  "dyn-stack 0.13.2",
@@ -4472,6 +4473,96 @@ dependencies = [
 
 [[package]]
 name = "glam"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "333928d5eb103c5d4050533cec0384302db6be8ef7d3cebd30ec6a35350353da"
+
+[[package]]
+name = "glam"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3abb554f8ee44336b72d522e0a7fe86a29e09f839a36022fa869a7dfe941a54b"
+
+[[package]]
+name = "glam"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4126c0479ccf7e8664c36a2d719f5f2c140fbb4f9090008098d2c291fa5b3f16"
+
+[[package]]
+name = "glam"
+version = "0.17.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01732b97afd8508eee3333a541b9f7610f454bb818669e66e90f5f57c93a776"
+
+[[package]]
+name = "glam"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525a3e490ba77b8e326fb67d4b44b4bd2f920f44d4cc73ccec50adc68e3bee34"
+
+[[package]]
+name = "glam"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b8509e6791516e81c1a630d0bd7fbac36d2fa8712a9da8662e716b52d5051ca"
+
+[[package]]
+name = "glam"
+version = "0.20.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f43e957e744be03f5801a55472f593d43fabdebf25a4585db250f04d86b1675f"
+
+[[package]]
+name = "glam"
+version = "0.21.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "518faa5064866338b013ff9b2350dc318e14cc4fcd6cb8206d7e7c9886c98815"
+
+[[package]]
+name = "glam"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12f597d56c1bd55a811a1be189459e8fad2bbc272616375602443bdfb37fa774"
+
+[[package]]
+name = "glam"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e4afd9ad95555081e109fe1d21f2a30c691b5f0919c67dfa690a2e1eb6bd51c"
+
+[[package]]
+name = "glam"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5418c17512bdf42730f9032c74e1ae39afc408745ebb2acf72fbc4691c17945"
+
+[[package]]
+name = "glam"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "151665d9be52f9bb40fc7966565d39666f2d1e69233571b71b87791c7e0528b3"
+
+[[package]]
+name = "glam"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e05e7e6723e3455f4818c7b26e855439f7546cf617ef669d1adedb8669e5cb9"
+
+[[package]]
+name = "glam"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "779ae4bf7e8421cf91c0b3b64e7e8b40b862fba4d393f59150042de7c4965a94"
+
+[[package]]
+name = "glam"
+version = "0.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8babf46d4c1c9d92deac9f7be466f76dfc4482b6452fc5024b5e8daf6ffeb3ee"
+
+[[package]]
+name = "glam"
 version = "0.30.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
@@ -4479,6 +4570,18 @@ dependencies = [
  "bytemuck",
  "serde_core",
 ]
+
+[[package]]
+name = "glam"
+version = "0.31.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "556f6b2ea90b8d15a74e0e7bb41671c9bdf38cd9f78c284d750b9ce58a2b5be7"
+
+[[package]]
+name = "glam"
+version = "0.32.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f70749695b063ecbf6b62949ccccde2e733ec3ecbbd71d467dca4e5c6c97cca0"
 
 [[package]]
 name = "glob"
@@ -4785,7 +4888,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29a164ceff4500f2a72b1d21beaa8aa8ad83aec2b641844c659b190cb3ea2e0b"
 dependencies = [
  "constgebra",
- "glam",
+ "glam 0.30.10",
  "tinyvec",
 ]
 
@@ -5829,7 +5932,7 @@ version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c96b82556b0d4aa25cd4771b64ef9bde7c120afb588a083fcb242bf01e4a09b"
 dependencies = [
- "glam",
+ "glam 0.30.10",
  "num-traits",
  "serde",
 ]
@@ -6172,7 +6275,41 @@ dependencies = [
  "approx",
  "matrixcompare-core",
  "matrixmultiply",
- "nalgebra-macros",
+ "nalgebra-macros 0.2.2",
+ "num-complex",
+ "num-rational",
+ "num-traits",
+ "simba",
+ "typenum",
+]
+
+[[package]]
+name = "nalgebra"
+version = "0.34.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df76ea0ff5c7e6b88689085804d6132ded0ddb9de5ca5b8aeb9eeadc0508a70a"
+dependencies = [
+ "approx",
+ "glam 0.14.0",
+ "glam 0.15.2",
+ "glam 0.16.0",
+ "glam 0.17.3",
+ "glam 0.18.0",
+ "glam 0.19.0",
+ "glam 0.20.5",
+ "glam 0.21.3",
+ "glam 0.22.0",
+ "glam 0.23.0",
+ "glam 0.24.2",
+ "glam 0.25.0",
+ "glam 0.27.0",
+ "glam 0.28.0",
+ "glam 0.29.3",
+ "glam 0.30.10",
+ "glam 0.31.1",
+ "glam 0.32.1",
+ "matrixmultiply",
+ "nalgebra-macros 0.3.0",
  "num-complex",
  "num-rational",
  "num-traits",
@@ -6185,6 +6322,17 @@ name = "nalgebra-macros"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "254a5372af8fc138e36684761d3c0cdb758a4410e938babcff1c860ce14ddbfc"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "nalgebra-macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "973e7178a678cfd059ccec50887658d482ce16b0aa9da3888ddeab5cd5eb4889"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6590,7 +6738,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff71f0acbaa027dd8481a79484243ec050255d9174dd955cdd9475a321b48d2d"
 dependencies = [
  "approx",
- "nalgebra",
+ "nalgebra 0.33.3",
+ "num-traits",
+ "simba",
+]
+
+[[package]]
+name = "num-dual"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58ef374bb34978304bf541752bdaa948891c2d3cc787e91b9b11b429ef8f77f2"
+dependencies = [
+ "approx",
+ "nalgebra 0.34.2",
  "num-traits",
  "simba",
 ]
@@ -8035,16 +8195,6 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rand_distr"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
-dependencies = [
- "num-traits",
- "rand 0.8.7",
-]
-
-[[package]]
-name = "rand_distr"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a8615d50dcf34fa31f7ab52692afec947c4dd0ab803cc87cb3b0b4570ff7463"
@@ -9096,7 +9246,7 @@ dependencies = [
  "ecolor",
  "enumset",
  "getrandom 0.3.4",
- "glam",
+ "glam 0.30.10",
  "gltf",
  "half",
  "itertools 0.14.0",
@@ -9275,7 +9425,7 @@ checksum = "081470522eb3faae78a2a671f2840fed4876d141749c845db29b79d9b8b22405"
 dependencies = [
  "ahash",
  "bitflags 2.13.1",
- "glam",
+ "glam 0.30.10",
  "itertools 0.14.0",
  "nohash-hasher",
  "re_chunk_store",
@@ -9356,7 +9506,7 @@ dependencies = [
  "ecolor",
  "egui_plot",
  "emath",
- "glam",
+ "glam 0.30.10",
  "half",
  "image",
  "infer",
@@ -9534,7 +9684,7 @@ checksum = "0e9db996bc458af938f48fdf002050777b857963f0b38db93b317c0636d4c905"
 dependencies = [
  "ahash",
  "egui",
- "glam",
+ "glam 0.30.10",
  "itertools 0.14.0",
  "nohash-hasher",
  "re_chunk_store",
@@ -9635,7 +9785,7 @@ checksum = "3e21c12cbca9d47c60d12ee1303a51b9a9d5c235a0b4bec52cb6ac5741de06cb"
 dependencies = [
  "bytemuck",
  "egui",
- "glam",
+ "glam 0.30.10",
  "itertools 0.14.0",
  "macaw",
  "re_data_ui",
@@ -9665,7 +9815,7 @@ dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
  "egui",
- "glam",
+ "glam 0.30.10",
  "hexasphere",
  "image",
  "itertools 0.14.0",
@@ -9808,7 +9958,7 @@ dependencies = [
  "egui_plot",
  "ehttp 0.5.0",
  "emath",
- "glam",
+ "glam 0.30.10",
  "image",
  "itertools 0.14.0",
  "jiff",
@@ -9899,7 +10049,7 @@ dependencies = [
  "egui-wgpu",
  "egui_tiles",
  "emath",
- "glam",
+ "glam 0.30.10",
  "half",
  "home",
  "image",
@@ -11250,7 +11400,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -11423,15 +11573,15 @@ dependencies = [
 
 [[package]]
 name = "tiny-solver"
-version = "0.17.1"
+version = "0.18.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa3a705e229132ec2b5bd79892fae48fe4e0c6cea731d420020840942909d54d"
+checksum = "3f3cad252b83a87dfcd5ced1881638188d782466307ac28c08820cfdfe3ed2e9"
 dependencies = [
- "faer 0.22.6",
- "faer-ext 0.6.0",
+ "faer 0.23.2",
+ "faer-ext 0.7.1",
  "log",
- "nalgebra",
- "num-dual",
+ "nalgebra 0.34.2",
+ "num-dual 0.12.1",
  "num-traits",
  "rayon",
  "simba",
