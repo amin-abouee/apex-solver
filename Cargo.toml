@@ -53,7 +53,7 @@ hex        = "0.4"
 image      = "0.25"
 rusqlite   = { version = "0.31", features = ["bundled"] }
 zstd       = "0.14"
-mcap       = "0.23"
+mcap       = "0.26"
 md5        = "0.8"
 crc32fast  = "1.5"
 lz4_flex   = { version = "0.14", default-features = false, features = ["std", "safe-decode", "safe-encode", "frame"] }
