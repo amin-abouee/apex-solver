@@ -303,7 +303,7 @@ dependencies = [
  "futures",
  "hex",
  "image",
- "lz4_flex",
+ "lz4_flex 0.14.0",
  "mcap",
  "md5 0.8.1",
  "nalgebra 0.33.3",
@@ -559,7 +559,7 @@ dependencies = [
  "arrow-data",
  "arrow-schema",
  "flatbuffers",
- "lz4_flex",
+ "lz4_flex 0.11.6",
  "zstd 0.13.4",
 ]
 
@@ -5926,6 +5926,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "macaw"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7917,7 +7926,7 @@ dependencies = [
  "byteorder",
  "cfg-if 1.0.5",
  "itertools 0.10.5",
- "lz4_flex",
+ "lz4_flex 0.11.6",
  "once_cell",
  "parking_lot",
  "serde",
@@ -9011,7 +9020,7 @@ dependencies = [
  "bytes",
  "ehttp 0.5.0",
  "js-sys",
- "lz4_flex",
+ "lz4_flex 0.11.6",
  "parking_lot",
  "re_build_info",
  "re_chunk",
