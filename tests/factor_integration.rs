@@ -392,7 +392,7 @@ fn stereo_vo_recovers_pose_and_points() -> Result<(), Box<dyn std::error::Error>
             .unwrap_or_else(|e| panic!("truth point must project: {e}"));
         problem.add_residual_block(
             &[pose_key, key],
-            Box::new(StereoFactor::new(meas, cal.clone())),
+            Box::new(StereoFactor::<SE3>::new(meas, cal.clone())),
             None,
         )?;
     }
@@ -420,7 +420,7 @@ fn stereo_vo_recovers_pose_and_points() -> Result<(), Box<dyn std::error::Error>
         );
         let mut cost = 0.0f64;
         for (p, key) in points.iter().zip(point_keys.iter()) {
-            let factor = StereoFactor::new(
+            let factor = StereoFactor::<SE3>::new(
                 cal.project(&pose_true.act(p, None, None))
                     .unwrap_or_else(|e| panic!("{e}")),
                 cal.clone(),

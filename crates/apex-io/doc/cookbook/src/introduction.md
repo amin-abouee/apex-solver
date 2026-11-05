@@ -17,13 +17,16 @@ organised by domain.
 | **ROS2 bags** | SQLite3 & MCAP | [`Reader`, `Writer`](./rosbag/ros2.md) |
 | **Live DDS** | ROS2 over the wire (feature `dds`) | [`DdsSubscriber`, `DdsListener`](./rosbag/dds.md) |
 | **Datasets** | download + registry | [`DatasetRegistry`, `ensure_*_dataset`](./utils/datasets.md) |
-| **Tooling** | 7 CLI binaries | [CLI Tools](./utils/cli.md) |
+| **VRS** | Meta VRS / Project Aria (feature `vrs`) | [VRS and LaMAria](./datasets/lamaria.md) |
+| **Tooling** | 12 CLI binaries | [CLI Tools](./utils/cli.md) |
 
 ## Design conventions
 
-- **Fallible everywhere.** Public reads/writes return `Result<_, IoError>` (graph
-  formats) or `Result<_, BagError>` / `Result<_, AslError>` (bags, datasets). No
-  panics on malformed input — see [The Graph Model](./pose-graph/graph-model.md#error-model).
+- **Fallible everywhere.** Every module has its own typed error — `GraphError`,
+  `BalError`, `BagError`, `AslError`, `TrajectoryError`, `VrsError`, … — and the crate
+  root `IoError` wraps them all, so `?` converts at the boundary and `source()` keeps the
+  whole chain. No panics on malformed input — see
+  [The Graph Model](./pose-graph/graph-model.md#error-model).
 - **Pose types come from `apex-manifolds`.** Graph vertices hold `SE2` / `SE3`
   values, not raw arrays. Quaternions follow the crate-wide $w$-first convention.
 - **Streaming where it matters.** Large sources (ROS2 bags, ASL images) expose

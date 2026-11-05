@@ -1,6 +1,29 @@
-# apex-camera-models
+<table>
+  <tr>
+    <td align="left" width="150">
+      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/crates/apex-camera-models/assets/apex_camera_models.png" alt="apex-camera-models logo" width="130" />
+    </td>
+    <td align="left" valign="middle">
+      <h1>apex-camera-models</h1>
+      <b>Comprehensive camera projection models for bundle adjustment, SLAM, and Structure-from-Motion.</b>
+    </td>
+  </tr>
+</table>
 
-Comprehensive camera projection models for bundle adjustment, SLAM, and Structure-from-Motion.
+## What's new in 0.5.0 — hierarchical errors, Aria fisheye models, conversion
+
+- **`Fisheye62Camera` and `Fisheye624Camera`** — Project Aria's fisheye models (12 and 16
+  parameters, the latter being LaMAria's `RAD_TAN_THIN_PRISM_FISHEYE`), with analytic
+  Jacobians and Newton unprojection; Aria's single-focal-length vectors convert with
+  `from_aria_params` / `to_aria_params`.
+- **`convert_camera`** fits a camera of any model to another's rays and reports the residual
+  in pixels; exact `From` embeddings Kannala-Brandt → Fisheye62 → Fisheye624.
+- **Hierarchical errors** — `CameraModelError` wraps `ParamError`, `ProjectionError`,
+  `UnprojectionError`, `EstimationError` and `ConversionError`; `project_batch` returns one
+  result per point instead of `(1e6, 1e6)` sentinels.
+- **Breaking:** `DistortionModel` gains the `Fisheye62` and `Fisheye624` variants (an
+  exhaustive `match` needs two more arms), and the error types above replace the old ones.
+  See the [changelog](CHANGELOG.md).
 
 ## What's new in 0.4.0 — validation & domain geometry
 
@@ -261,7 +284,7 @@ blocks with it on every linearization.
 
 ```toml
 [dependencies]
-apex-camera-models = "0.4.0"
+apex-camera-models = "0.5.0"
 ```
 
 ## Usage

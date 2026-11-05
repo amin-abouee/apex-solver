@@ -111,8 +111,7 @@ spelling.
 
 ## 3. 1.5 → 1.6 — the staged deprecations
 
-The 1.6 cycle has not cut a release yet, but the tree already carries its
-deprecations, annotated `since = "1.6.0"`. Ten items are marked, and they
+The 1.6 cycle staged its deprecations in the tree before the release, annotated `since = "1.6.0"`. Ten items are marked, and they
 cluster into three groups.
 
 <div class="apx-table">
@@ -142,6 +141,17 @@ itself still had to silence with `#[allow(deprecated)]`: `linalg::utils`,
 Gauss-Newton and Dog Leg configs, and `DogLegConfig::min_step_quality`
 (`with_step_quality_thresholds` now takes the poor and good thresholds only).
 
+1.6.0 removes the rest, so the release carries no deprecated solver API:
+`Problem::mark_as_schur_landmark` (use `mark_for_elimination`),
+`LevenbergMarquardtConfig::with_trust_region` (use `with_step_quality` for the
+two quality thresholds; the radius never did anything) and
+`with_min_trust_region_radius` (use `with_damping_bounds`). The
+back-compatibility module aliases go too: `apex_solver::manifold` and
+`apex_solver::camera_models` are `apex_solver::apex_manifolds` and
+`apex_solver::apex_camera_models` (or the crates themselves),
+`factors::camera` is `apex_camera_models`, and apex-io's `ReaderResult` /
+`ReaderError` are `BagResult` / `BagError`.
+
 <div class="apx-table">
 <span class="apx-title">The error-propagation changes</span>
 
@@ -169,7 +179,8 @@ Gauss-Newton and Dog Leg configs, and `DogLegConfig::min_step_quality`
 4. Move from `lambda: f64` to `&Damping` (`Damping::identity(λ)` for the old
    behaviour).
 5. Rename the Schur solvers; there are no aliases, so the compiler finds
-   every one.
+   every one. The same goes for `mark_as_schur_landmark` and the
+   `manifold` / `camera_models` module paths, removed in 1.6.
 6. Re-check every "inert" configuration field — the eleven that became live
    in 1.5 are the ones most likely to change your iterates.
 7. Decide whether the bundle-adjustment default change (implicit Schur) is
@@ -185,13 +196,11 @@ Gauss-Newton and Dog Leg configs, and `DogLegConfig::min_step_quality`
 <div class="apx-warning">
 <span class="apx-title">Warning — a deprecation is a promise about the future, not the present</span>
 
-The 1.6 deprecations are annotated `since = "1.6.0"` while the crate's
-version is still `1.5.0`. That is intentional staging — the deprecations
-land in the tree first, and the release that removes the items will be 1.6 —
-but it means a `1.5.0` build already carries warnings about a version that
-does not exist yet. A consumer that treats warnings as errors should expect
-them, and a consumer that pins 1.5 must know that 1.6 will remove those
-items rather than merely warn about them.
+The deprecations were annotated `since = "1.6.0"` while the crate was still
+`1.5.0`: they landed in the tree first, so a `1.5.0` build already carried
+warnings about a version that did not exist yet. 1.6.0 is that version, and it
+removes those items rather than merely warning about them — a consumer that
+pins 1.5 sees the warnings, a consumer on 1.6 sees the removal.
 
 </div>
 

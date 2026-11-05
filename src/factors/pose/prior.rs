@@ -55,7 +55,7 @@ use nalgebra::DVector;
 ///
 /// ```
 /// # use apex_solver::factors::pose::PriorFactor;
-/// # use apex_solver::manifold::se3::SE3;
+/// # use apex_solver::apex_manifolds::se3::SE3;
 /// # use nalgebra::Vector3;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let prior = SE3::from_translation_quaternion(

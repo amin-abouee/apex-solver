@@ -1,6 +1,6 @@
 [package]
 name = "apex-camera-models"
-version = "0.4.0"
+version = "0.5.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,7 +13,7 @@ readme = "README.md"
 keywords = ["camera-model", "computer-vision", "bundle-adjustment", "projection", "calibration"]
 categories = ["computer-vision", "algorithms", "mathematics"]
 
-exclude = ["tests/", "benches/"]
+exclude = ["tests/", "benches/", "assets/"]
 
 [dependencies]
 apex-manifolds.workspace = true

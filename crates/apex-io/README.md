@@ -1,6 +1,26 @@
-# apex-io
+<table>
+  <tr>
+    <td align="left" width="150">
+      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/crates/apex-io/assets/apex_io.png" alt="apex-io logo" width="130" />
+    </td>
+    <td align="left" valign="middle">
+      <h1>apex-io</h1>
+      <b>High-performance file I/O for robotics data — pose graphs (G2O, TORO, BAL) and ROS2 bag files (SQLite3 and MCAP), with optional live DDS topic subscription.</b>
+    </td>
+  </tr>
+</table>
 
-High-performance file I/O for robotics data — pose graphs (G2O, TORO, BAL) and ROS2 bag files (SQLite3 and MCAP), with optional live DDS topic subscription.
+## What's new in 0.5.0 — bags, VRS, error propagation
+
+- **One bag API** — `BagReader` / `BagWriter` over ROS1 `.bag`, ROS2 sqlite3 and MCAP, with a
+  pull iterator over every message, a schema-driven ROS1 ↔ CDR transcoder, a real MCAP writer
+  with parallel chunk compression, and a much faster ROS1 reader (open 2.8 ms → 0.05 ms).
+- **`vrs` feature** — a Meta VRS / Project Aria reader and writer in safe Rust.
+- **LaMAria** — typed calibration reader and `TumNanosLoader` for integer-nanosecond TUM rows.
+- **Hierarchical errors** — **breaking:** `IoError` is the crate root over `GraphError`,
+  `BalError`, `TrajectoryError`, `AslError`, `LamariaError`, `DatasetError`, `VrsError` and
+  `BagError`; the `ReaderResult` / `ReaderError` aliases are removed (use `BagResult` /
+  `BagError`). See the [changelog](CHANGELOG.md).
 
 ## What's new in 0.4.0 — feature flags & trajectories
 
@@ -69,19 +89,19 @@ the `ros2 bag` CLI.
 ```toml
 # Core: pose graphs + dataset registry (no bag I/O, no network)
 [dependencies]
-apex-io = "0.4.0"
+apex-io = "0.5.0"
 
 # With ROS1/ROS2 bag reading & writing (SQLite3 + MCAP, CDR, message types)
-apex-io = { version = "0.4.0", features = ["rosbag"] }
+apex-io = { version = "0.5.0", features = ["rosbag"] }
 
 # Without dataset auto-download (offline builds)
-apex-io = { version = "0.4.0", default-features = false }
+apex-io = { version = "0.5.0", default-features = false }
 
 # With Rerun visualization helpers
-apex-io = { version = "0.4.0", features = ["visualization"] }
+apex-io = { version = "0.5.0", features = ["visualization"] }
 
 # With live DDS topic subscription (requires a DDS runtime)
-apex-io = { version = "0.4.0", features = ["dds"] }
+apex-io = { version = "0.5.0", features = ["dds"] }
 ```
 
 | Feature | Default | Enables | Extra dependencies |
@@ -323,7 +343,7 @@ writer.close()?;
 Enable the `dds` feature and have a running ROS2 node on the same DDS domain.
 
 ```toml
-apex-io = { version = "0.4.0", features = ["dds"] }
+apex-io = { version = "0.5.0", features = ["dds"] }
 ```
 
 ### Subscribe to a single topic
@@ -565,7 +585,7 @@ let frame = rec.image_nearest(AriaSensor::SlamLeft, t0 + 10.0)?;
 * **Tools**: `vrs_info` (streams, rates, tags, `--verify-index`), `vrs_copy` (trim by stream/time, re-compress),
   `vrs_dump` (CSV for IMU/baro/GPS, JPEG extraction for cameras).
 
-Validated against Meta's own reader (`projectaria-tools`) with `scripts/vrs_crosscheck.py`: decoded IMU/barometer
+Validated against Meta's own reader (`projectaria-tools`) with a one-off cross-check: decoded IMU/barometer
 values match and Meta reads files written by `VrsWriter` identically to the originals. Format notes (derived from real
 files; the upstream header comments are partly outdated): file header 80 B, record header 32 B, index entries 19 B
 `{ts, size, type, stream}` with offsets implied by cumulative sizes, var-size layout pieces stored as `(offset, length)` pairs.
@@ -799,7 +819,7 @@ logged by the caller that gives up on a read.
 ## Visualization Feature
 
 ```toml
-apex-io = { version = "0.4.0", features = ["visualization"] }
+apex-io = { version = "0.5.0", features = ["visualization"] }
 ```
 
 ```rust

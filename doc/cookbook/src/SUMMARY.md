@@ -63,6 +63,7 @@
 # Part V — Tools and Appendices
 
 - [Observers: Rerun](./tools/observers.md)
+- [The Examples](./tools/examples.md)
 - [Errors, Logging and the Prelude](./tools/errors-and-logging.md)
 - [Benchmarks and Performance](./tools/benchmarks.md)
 - [Migrating 1.4 → 1.5 → 1.6](./tools/migration.md)

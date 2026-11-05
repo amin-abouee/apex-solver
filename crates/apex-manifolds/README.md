@@ -1,7 +1,26 @@
-# apex-manifolds
+<table>
+  <tr>
+    <td align="left" width="150">
+      <img src="https://raw.githubusercontent.com/amin-abouee/apex-solver/main/crates/apex-manifolds/assets/apex_manifolds.png" alt="apex-manifolds logo" width="130" />
+    </td>
+    <td align="left" valign="middle">
+      <h1>apex-manifolds</h1>
+      <b>Lie group manifolds (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic Jacobians for nonlinear optimization.</b>
+    </td>
+  </tr>
+</table>
 
-Lie group manifolds (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic
-Jacobians for nonlinear optimization.
+## What's new in 0.5.0
+
+- **Hierarchical errors** — `ManifoldError` wraps `ElementError`, `TangentError`, `RnError`
+  and `ManifoldTypeError`; checked constructors (`try_from_axis_angle`, `Sim3::try_new`, ...)
+  and fallible `Rn` operations report a bad input instead of panicking or returning NaN.
+- **Capability traits** (`ActsOnPoints3`, `RigidPose`, `HasVelocity`, `ConstDoF`) replace the
+  runtime group whitelist, so generic code is bounded by what a group can do.
+- **SGal(3) group law fixed** (`compose`, `adjoint`, `exp`) and the `act` Jacobian's time
+  column; `util::skew` is the one public skew-matrix helper.
+- **Breaking:** `SO3::try_from_quaternion_wxyz` returns a `Result`; `SE23::from_components`
+  and `SGal3::from_components` take an array. See the [changelog](CHANGELOG.md).
 
 ## What's new in 0.4.0
 
@@ -76,7 +95,7 @@ Sim(3)      | 7   | 8   | (R,t,λ), R∈SO(3), λ∈ℝ>0     | ξ ∈ ℝ⁷   
 
 ```toml
 [dependencies]
-apex-manifolds = "0.4.0"
+apex-manifolds = "0.5.0"
 ```
 
 ## Usage

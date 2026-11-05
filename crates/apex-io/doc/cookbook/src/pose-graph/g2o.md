@@ -19,8 +19,9 @@ impl GraphLoader for G2oLoader { /* load, write */ }
 | `EDGE_SE2` | `from to dx dy dθ` + 6 info values | `EdgeSE2` |
 | `EDGE_SE3:QUAT` | `from to dx dy dz qx qy qz qw` + 21 info values | `EdgeSE3` |
 
-Lines beginning with `#` and empty lines are skipped. Unknown tags raise
-`IoError::UnsupportedVertexType` / `UnsupportedEdgeType`.
+Lines beginning with `#` and empty lines are skipped. Records of a type the
+loader does not read (g2o has many) are **skipped, not rejected**: the loader counts
+them per tag and logs one warning, so a file with extra record types still loads.
 
 ## Information matrices (upper triangle)
 

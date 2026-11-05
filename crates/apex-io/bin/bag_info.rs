@@ -16,7 +16,7 @@
 //! Usage: cargo run -p apex-io --features rosbag --bin bag_info -- <bag_path>
 
 use apex_io::rosbag::transcode::{Dialect, dialect_of, plan_connections};
-use apex_io::rosbag::{BagKind, BagReader, ReaderError};
+use apex_io::rosbag::{BagError, BagKind, BagReader};
 use chrono::TimeZone;
 use std::env;
 use std::io::Write as _;
@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn calculate_total_size(bag_path: &Path) -> Result<u64, ReaderError> {
+fn calculate_total_size(bag_path: &Path) -> Result<u64, BagError> {
     let mut total_size = 0u64;
     if bag_path.is_file() {
         if let Ok(meta) = std::fs::metadata(bag_path) {

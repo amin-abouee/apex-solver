@@ -147,8 +147,8 @@ pub use ros2::storage;
 
 // Re-export main types for convenience
 pub use error::{
-    BagError, BagResult, CdrError, CdrErrorKind, McapError, PointCloudError, ReaderError, Result,
-    Ros1Error, Ros2BagError, TranscodeError, WriterResult,
+    BagError, BagResult, CdrError, CdrErrorKind, McapError, PointCloudError, Result, Ros1Error,
+    Ros2BagError, TranscodeError, WriterResult,
 };
 pub use ros2::metadata::{BagMetadata, TopicMetadata};
 pub use ros2::reader::Reader;

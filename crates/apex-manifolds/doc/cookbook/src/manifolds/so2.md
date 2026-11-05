@@ -75,8 +75,8 @@ $$
 ## Example
 
 ```rust
-use apex_solver::manifold::so2::{SO2, SO2Tangent};
-use apex_solver::manifold::{LieGroup, Tangent};
+use apex_manifolds::so2::{SO2, SO2Tangent};
+use apex_manifolds::{LieGroup, Tangent};
 
 let r = SO2::from_angle(0.5);
 let delta = SO2Tangent::new(0.1);

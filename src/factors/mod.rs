@@ -108,12 +108,6 @@ pub type PoseAndIntrinsics = OptimizeParams<true, false, true>;
 /// Landmarks and Intrinsics: optimize landmarks + intrinsics (pose fixed).
 pub type LandmarksAndIntrinsics = OptimizeParams<false, true, true>;
 
-// Camera module alias for backward compatibility
-// Re-exports the apex-camera-models crate as `camera` module
-pub mod camera {
-    pub use apex_camera_models::*;
-}
-
 /// Errors of factor construction and registration.
 ///
 /// Constructors reject bad measurements and parameters; registration

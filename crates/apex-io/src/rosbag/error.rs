@@ -31,14 +31,8 @@ pub type Result<T> = std::result::Result<T, BagError>;
 /// Result type alias for rosbag operations, named like the other module aliases.
 pub type BagResult<T> = Result<T>;
 
-/// Result type alias for reader operations (backwards compatibility)
-pub type ReaderResult<T> = Result<T>;
-
 /// Result type alias for writer operations
 pub type WriterResult<T> = Result<T>;
-
-/// Type alias for backwards compatibility
-pub type ReaderError = BagError;
 
 /// Root error of the rosbag module.
 #[derive(Debug, thiserror::Error)]

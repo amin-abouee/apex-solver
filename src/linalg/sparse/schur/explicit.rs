@@ -3264,4 +3264,70 @@ mod tests {
         assert!((damped[0][1] - 2.0).abs() < 1e-12, "off-diagonal changed");
         Ok(())
     }
+
+    /// Solving twice on an unchanged Hessian pattern reuses the dense
+    /// occupancy bitmap that seeds the sparse `S` output; the second solve
+    /// must be bit-identical to the first.
+    #[test]
+    fn repeated_solve_reuses_s_bitmap_bit_identically() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
+        let mut solver = ExplicitSparseSchur::new();
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
+
+        let first =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let second =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        assert_eq!(first.nrows(), second.nrows());
+        for i in 0..first.nrows() {
+            assert_eq!(
+                first[(i, 0)].to_bits(),
+                second[(i, 0)].to_bits(),
+                "row {i} differs between the fresh and bitmap-reuse solves"
+            );
+        }
+        Ok(())
+    }
+
+    /// When the cached symbolic disagrees with the matrix — numerically
+    /// singular values on an unchanged pattern — the cached factorization
+    /// plan is dropped and rebuilt, and the regularized retry still produces
+    /// the same solution as the uncached path.
+    #[test]
+    fn solve_with_cholesky_discards_disagreeing_cached_symbolic() -> TestResult {
+        let mut solver = ExplicitSparseSchur::new();
+        // Rank-1 singular "S": same pattern every call, but no Cholesky
+        // factorization of it exists, so every attempt falls back to the
+        // regularized retry.
+        let a = SparseColMat::try_new_from_triplets(
+            2,
+            2,
+            &[
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(1, 0, 1.0),
+                Triplet::new(1, 1, 1.0),
+            ],
+        )?;
+        let b = Mat::from_fn(2, 1, |i, _| 1.0 + i as f64);
+
+        let first = solver.solve_with_cholesky(&a, &b, Some(42))?;
+        // Second call: the cached symbolic's hash matches, but the matrix is
+        // still singular, so the cached plan fails to factor and is discarded.
+        let second = solver.solve_with_cholesky(&a, &b, Some(42))?;
+        assert!(
+            solver.s_llt_cache.is_some(),
+            "the fallback must rebuild the symbolic cache"
+        );
+        for i in 0..2 {
+            assert_eq!(
+                first[(i, 0)].to_bits(),
+                second[(i, 0)].to_bits(),
+                "row {i}: cached and rebuilt solves disagree"
+            );
+        }
+        Ok(())
+    }
 }

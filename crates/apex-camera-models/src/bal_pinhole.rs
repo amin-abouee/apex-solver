@@ -566,4 +566,41 @@ mod tests {
         }
         Ok(())
     }
+
+    /// The BAL convention is z-backward (`project` accepts `z < -MIN_DEPTH`),
+    /// so the deficit must grow with `+z` and point along `+e_z` — the trait
+    /// default (`-z`, `-e_z`) would push points further behind the camera.
+    #[test]
+    fn test_projection_deficit_grows_with_z_for_backward_convention() -> TestResult {
+        let camera = BALPinholeCameraStrict::new_no_distortion(500.0)?;
+
+        // In-domain: z = -5 < -MIN_DEPTH, no deficit.
+        let (deficit, grad) = camera.projection_deficit(&Vector3::new(0.3, -0.2, -5.0));
+        assert!(deficit <= 0.0, "in-domain point must carry no deficit");
+        assert_eq!(grad, Vector3::new(0.0, 0.0, 1.0));
+
+        // Outside: z = 2·MIN_DEPTH ≥ -MIN_DEPTH; deficit = z + MIN_DEPTH.
+        let z = 2.0 * crate::MIN_DEPTH;
+        let (deficit_bad, grad_bad) = camera.projection_deficit(&Vector3::new(0.3, -0.2, z));
+        assert!((deficit_bad - (z + crate::MIN_DEPTH)).abs() < 1e-18);
+        assert!(deficit_bad > 0.0);
+        assert_eq!(grad_bad, Vector3::new(0.0, 0.0, 1.0));
+
+        // Finite-difference check: ∂deficit/∂p = +e_z everywhere.
+        let eps = 1e-7;
+        for k in 0..3 {
+            let mut pp = Vector3::new(0.3, -0.2, z);
+            pp[k] += eps;
+            let mut pm = Vector3::new(0.3, -0.2, z);
+            pm[k] -= eps;
+            let fd =
+                (camera.projection_deficit(&pp).0 - camera.projection_deficit(&pm).0) / (2.0 * eps);
+            assert!(
+                (fd - grad_bad[k]).abs() < 1e-6,
+                "gradient component {k}: FD {fd} vs analytic {}",
+                grad_bad[k]
+            );
+        }
+        Ok(())
+    }
 }

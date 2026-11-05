@@ -55,18 +55,13 @@ solver's correctness depends on it: the right-perturbation convention
 layouts (the same chapter), and the camera pose direction (chapter
 [Notation & Conventions](../conventions.md)).
 
-## 4. The two application books
+## 4. Books of the crates built on this one
 
-Above the solver sit two more books, in the sibling repositories:
-
-| Book | Covers |
-|---|---|
-| **The Apex VIO Cookbook** (`apex-vio`) | visual-inertial and LiDAR-inertial odometry: front ends, back ends, the window, the marginalization policy, the SLAM layer, and the accuracy results |
-| **The Apex CV Cookbook** (`apex-cv`) | the computer-vision crate: feature detection, tracking, multi-view geometry, mapping, registration, photometric estimation, and detection |
-
-They are the natural place to read how the solver's factors are *used*: what
-the residuals mean in the context of a camera rig, which noise model a
-particular measurement deserves, and what the system's own conventions are.
+Crates built on the solver (odometry, computer vision, calibration) keep their
+own books in their own repositories. They are the natural place to read how the
+solver's factors are *used*: what the residuals mean in the context of a camera
+rig, which noise model a particular measurement deserves, and what the
+system's own conventions are.
 
 ## 5. A note on duplication
 
@@ -113,8 +108,7 @@ the code.
 <div class="apx-note">
 <span class="apx-title">Note — the version pins</span>
 
-This book describes the tree at `apex-solver` **1.5.0**, with the 1.6
-deprecations already staged in the source. The three sibling crates are at
-0.4.0. The migration chapter lists what changed and when.
+This book describes the tree at `apex-solver` **1.6.0**. The three sibling
+crates are at apex-manifolds 0.5.0, apex-camera-models 0.5.0 and apex-io 0.5.0. The migration chapter lists what changed and when.
 
 </div>

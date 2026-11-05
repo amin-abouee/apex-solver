@@ -46,6 +46,9 @@ use tracing::{info, warn};
 
 use crate::{BUNDLE_ADJUSTMENT_DATA_DIR, ODOMETRY_DATA_DIR, SENSOR_DATA_DIR};
 
+#[cfg(feature = "download")]
+mod download;
+
 // Compile-time embed of the dataset registry.
 const DATASETS_TOML: &str = include_str!("../datasets.toml");
 
@@ -436,39 +439,20 @@ pub fn ensure_sensor_dataset(name: &str) -> DatasetResult<PathBuf> {
 
 /// Download a URL to a local file, creating parent directories as needed.
 ///
+/// Every wait is bounded (30 s to connect, 60 s without receiving a byte) and a
+/// transient failure (a dropped connection, a timeout, a 5xx) is retried twice
+/// before the error is returned. The body is staged in `<dest>.part` and
+/// renamed onto `dest` only when complete, so `dest` never holds a partial file
+/// and an existing one survives a failed download.
+///
 /// Requires the `download` feature.
 ///
 /// # Errors
-/// Returns an error if the HTTP request fails or the file cannot be written.
+/// Returns an error if the HTTP request fails on every attempt, the body is cut
+/// short, or the file cannot be written.
 #[cfg(feature = "download")]
 pub fn download_file(url: &str, dest: &Path) -> DatasetResult<()> {
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| DatasetError::write(parent, e).log())?;
-    }
-
-    let response = ureq::get(url).call().map_err(|e| {
-        DatasetError::Request {
-            url: url.to_string(),
-            source: Box::new(e),
-        }
-        .log()
-    })?;
-
-    let mut buf = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut buf)
-        .map_err(|source| {
-            DatasetError::ResponseBody {
-                url: url.to_string(),
-                source,
-            }
-            .log()
-        })?;
-
-    fs::File::create(dest)
-        .and_then(|mut file| file.write_all(&buf))
-        .map_err(|e| DatasetError::write(dest, e).log())
+    download::download(url, dest, &download::Policy::default())
 }
 
 /// Unpack a `.tar.gz` archive into `dest_dir`.

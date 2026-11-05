@@ -107,8 +107,8 @@ $\{3,4,5\}$ freezes rotation (the tangent order is $[\boldsymbol{\rho}, \boldsym
 ## Example
 
 ```rust
-use apex_solver::manifold::se3::{SE3, SE3Tangent};
-use apex_solver::manifold::{LieGroup, Tangent};
+use apex_manifolds::se3::{SE3, SE3Tangent};
+use apex_manifolds::{LieGroup, Tangent};
 use nalgebra::{Vector3, Quaternion, UnitQuaternion};
 
 let pose = SE3::from_translation_quaternion(

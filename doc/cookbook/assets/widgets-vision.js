@@ -1,5 +1,5 @@
 /* ==========================================================================
- * The Apex VIO Cookbook — vision widgets
+ * The Apex Solver Cookbook — vision widgets
  * epipolar · triangulation · plane homography · Schur · LM · PnP
  * ========================================================================== */
 (function () {

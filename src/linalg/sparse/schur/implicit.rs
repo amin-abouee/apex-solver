@@ -1721,44 +1721,92 @@ mod tests {
             .gather_from_jacobian(&jacobian, &partition);
         solver.eliminated.invert_in_place(&partition)?;
 
-        let v = Mat::from_fn(partition.kept_dof(), 1, |i, _| {
+        let v_dense = Mat::from_fn(partition.kept_dof(), 1, |i, _| {
             (i as f64 * 0.37).cos() - 0.2
         });
-        let want = column_scatter_reference(&solver, &partition, &jacobian, &v);
+        // Sparse and all-zero inputs exercise the exact-zero skip in both the
+        // row-chunked operator and the reference: the skip must not change a
+        // single bit of the result.
+        let v_sparse = Mat::from_fn(partition.kept_dof(), 1, |i, _| {
+            if i % 2 == 0 {
+                0.0
+            } else {
+                (i as f64 * 0.37).cos() - 0.2
+            }
+        });
+        let v_zero = Mat::zeros(partition.kept_dof(), 1);
 
-        for chunk_rows in [1usize, 2, 3, 5, 7, row, row + 4] {
-            let spans = RowSpans::build(&jacobian, &partition, chunk_rows)?;
-            solver.structure.chunk_rows = chunk_rows;
-            solver.structure.kept_spans = spans.kept;
-            solver.structure.eliminated_spans = spans.eliminated;
-            solver.structure.eliminated_block_of = spans.block_of;
+        for (label, v) in [("dense", v_dense), ("sparse", v_sparse), ("zero", v_zero)] {
+            let want = column_scatter_reference(&solver, &partition, &jacobian, &v);
 
-            let mut out = Mat::zeros(partition.kept_dof(), 1);
-            let mut out_buf = vec![0.0; partition.kept_dof()];
-            let mut rows = vec![0.0; jacobian.nrows()];
-            let mut temp_lm = vec![0.0; partition.eliminated_dof()];
-            let mut scratch = vec![0.0; partition.eliminated_dof()];
-            let system = OperatorSystem {
-                partition: &partition,
-                jacobian: &jacobian,
-                damp_kept: &[],
-            };
-            let buffers = OperatorBuffers {
-                out_buf: &mut out_buf,
-                rows: &mut rows,
-                temp_lm: &mut temp_lm,
-                scratch: &mut scratch,
-            };
-            solver.apply_schur_operator(&system, &v, &mut out, buffers);
-            for (i, w) in want.iter().enumerate() {
-                assert_eq!(
-                    out[(i, 0)].to_bits(),
-                    w.to_bits(),
-                    "chunk_rows={chunk_rows}, entry {i}: {} vs {w}",
-                    out[(i, 0)]
-                );
+            for chunk_rows in [1usize, 2, 3, 5, 7, row, row + 4] {
+                let spans = RowSpans::build(&jacobian, &partition, chunk_rows)?;
+                solver.structure.chunk_rows = chunk_rows;
+                solver.structure.kept_spans = spans.kept;
+                solver.structure.eliminated_spans = spans.eliminated;
+                solver.structure.eliminated_block_of = spans.block_of;
+
+                let mut out = Mat::zeros(partition.kept_dof(), 1);
+                let mut out_buf = vec![0.0; partition.kept_dof()];
+                let mut rows = vec![0.0; jacobian.nrows()];
+                let mut temp_lm = vec![0.0; partition.eliminated_dof()];
+                let mut scratch = vec![0.0; partition.eliminated_dof()];
+                let system = OperatorSystem {
+                    partition: &partition,
+                    jacobian: &jacobian,
+                    damp_kept: &[],
+                };
+                let buffers = OperatorBuffers {
+                    out_buf: &mut out_buf,
+                    rows: &mut rows,
+                    temp_lm: &mut temp_lm,
+                    scratch: &mut scratch,
+                };
+                solver.apply_schur_operator(&system, &v, &mut out, buffers);
+                for (i, w) in want.iter().enumerate() {
+                    assert_eq!(
+                        out[(i, 0)].to_bits(),
+                        w.to_bits(),
+                        "{label} input, chunk_rows={chunk_rows}, entry {i}: {} vs {w}",
+                        out[(i, 0)]
+                    );
+                }
             }
         }
+        Ok(())
+    }
+
+    /// `push_column_spans` rejects an index outside the u32 range and a row
+    /// whose chunk is missing from the supplied span array — the two
+    /// defensive arms of its index bookkeeping.
+    #[test]
+    fn push_column_spans_rejects_out_of_range_inputs() -> TestResult {
+        let jacobian = SparseColMat::try_new_from_triplets(
+            4,
+            2,
+            &[
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(1, 0, 2.0),
+                Triplet::new(2, 1, 3.0),
+            ],
+        )?;
+
+        // Column 0 spans rows 0..=1 → chunk 0 for chunk_rows = 2.
+        let mut spans: Vec<Vec<ColumnSpan>> = vec![Vec::new(); 2];
+        let err = push_column_spans(&jacobian, 0, 1usize << 32, 2, &mut spans)
+            .err()
+            .ok_or("u32 overflow in the local index must be rejected")?;
+        assert!(matches!(err, LinAlgError::IndexOverflow { .. }), "{err:?}");
+
+        // Column 1 has row 2 → chunk 1, which the single-slot array lacks.
+        let mut one_chunk: Vec<Vec<ColumnSpan>> = vec![Vec::new()];
+        let err = push_column_spans(&jacobian, 1, 0, 2, &mut one_chunk)
+            .err()
+            .ok_or("row outside the span array must be rejected")?;
+        assert!(
+            matches!(err, LinAlgError::IndexOutOfRange { .. }),
+            "{err:?}"
+        );
         Ok(())
     }
 }

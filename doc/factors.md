@@ -29,6 +29,7 @@ why) see the [Factor Catalog](factor-catalog.md).
 | `BetweenFactor<T>` | 2 manifolds `(T_i, T_j)` | `dof(T)` | Relative constraint — odometry, loop closure (pair with a robust loss) |
 | `PoseRotationPrior` | 1 `SE3` | 3 | Rotation-only anchor on a pose |
 | `PoseTranslationPrior` | 1 `SE3` | 3 | World-frame translation-only anchor |
+| `Relative4DofFactor` | 2 `Rn(4)` nodes `[x, y, z, ψ]` | — | Relative position and yaw between two keyframes; roll and pitch are constants of the factor (VINS-Mono's 4-DoF graph) |
 
 ## IMU — [`src/factors/imu/`](../src/factors/imu/) · [derivation](cookbook/src/factors/imu.md)
 
@@ -45,6 +46,11 @@ takes a bias per keyframe and embeds the random walk in its trailing rows).
 | `imu::sgal3::ImuFactor` | `(SGal3_i, SGal3_j, bias)` | 10 |
 | `imu::sgal3::CombinedImuFactor` | `(SGal3_i, bias_i, SGal3_j, bias_j)` | 16 |
 
+Two further `se23` factors keep the same residual but make more of the frame
+unknown: `GravityFrameImuFactor` estimates the gravity direction (maps that
+start tilted) and `ScaleGravityImuFactor` estimates a visual frame's scale and
+gravity direction (DM-VIO).
+
 Helpers: `bias::bias_random_walk()` builds the `BetweenFactor<Rn>` bias-evolution
 edge; `bias::bias_random_walk_noise()` builds its `NoiseModel` from
 `ImuParameters` and `Δt`.
@@ -56,13 +62,27 @@ edge; `bias::bias_random_walk_noise()` builds its `NoiseModel` from
 | `ProjectionFactor<CAM, OP>` | `(pose, landmark)` + intrinsics per the `OP` config | `2·N` obs | Standard reprojection; `OP` toggles which of pose/landmark/intrinsics are optimized |
 | `ExtrinsicProjectionFactor<CAM>` | `(T_WB, T_BC, p_world)` | 2 | Reprojection with estimated camera extrinsics |
 | `TimeOffsetProjectionFactor<CAM>` | `(SE23 state, T_BC, p_world, t_d)` | 2 | Reprojection with an estimated camera-to-IMU time offset |
-| `StereoFactor` | `(pose, landmark)` | 3 | Rectified stereo `(u_L, u_R, v)` reprojection |
+| `StereoFactor<G>` | `(pose, landmark)` | 3 | Rectified stereo `(u_L, u_R, v)` reprojection; `G` is any group that moves points (`SE3` default, `SE23`, `Sim3`, `SO3`) |
 | `InverseDepthFactor<CAM>` | `(pose_i, anchor, pose_j)` | 2 | Inverse-depth landmark anchored at a pixel in the first view |
 | `SmartProjectionFactor<CAM>` | `N` poses (no landmark) | `2·N` | Structure-less multi-view factor; triangulates internally, self-whitening |
 | `EssentialMatrixFactor` | 1 relative pose `T_21` | `N` pairs | 2D–2D epipolar residual per normalized point pair |
 | `EssentialMatrixConstraint` | 1 relative pose `T_21` | 6 | Pose realizes a measured essential matrix (up to scale) |
 | `DepthFactor<ONESIDED>` | `(T_WS, homogeneous point, T_SC)` | 1 | RGB-D-style depth reading; `ONESIDED` penalizes only too-close points; self-whitening |
 | `HomogeneousPointFactor` | 1 homogeneous 4D point | 3 | Unary prior on a dehomogenized position; self-whitening |
+
+### Photometric and inverse-range factors
+
+Generic over the pose group `G` (and the camera model where one is involved).
+
+| Factor | What it does |
+|---|---|
+| `PhotometricInverseRangeFactor<G>` | Photometric residual of one inverse-range point in one target frame, with affine brightness; paired with `AffinePriorFactor` (DSO's `λ_a·a² + λ_b·b²`) |
+| `PhotometricTwoViewFactor<G, CAM>` | Photometric residual between two views of a plane, with the camera extrinsic in both; self-whitening |
+| `PhotometricPatchFactor<G, CAM>` | FAST-LIVO2 photometric patch residual of one map point in one image |
+| `InverseDepthBearingFactor<G>` | Reprojection of an inverse-range landmark anchored in a host keyframe, measured in the tangent plane of the unit sphere |
+| `InverseDepthPlaneFactor<G>` | Reprojection of an inverse-depth landmark anchored in a host keyframe |
+| `InverseRangeProjectionFactor<G, CAM>` | A camera-0-anchored landmark observed by camera 1 at another keyframe |
+| `StereoInverseRangeFactor<CAM>` | A camera-0-anchored landmark observed by camera 1 at the same instant |
 
 ## LiDAR — [`src/factors/lidar/`](../src/factors/lidar/) · [derivation](cookbook/src/factors/lidar.md)
 
@@ -76,6 +96,19 @@ variable block (hold it fixed to treat it as a measurement).
 | `GicpFactor` | 3 | Plane-to-plane via combined-covariance whitening; self-whitening |
 | `LidarEdgeFactor` | 3 | LOAM point-to-edge (point-to-line) against a matched edge; self-whitening |
 | `IcpFactor<F: DistanceField>` | 1 | Point against a distance field in frame A; self-whitening |
+
+### Scan-to-map, multi-frame and submap factors
+
+Generic over the pose group `G`; the LiDAR-to-body extrinsic `T_SL` is an `SE3` block.
+
+| Factor | What it does |
+|---|---|
+| `LidarMapPlaneFactor<G>` | Point-to-plane, scan-to-map: a LiDAR point against a fixed map plane (the FAST-LIO2 / FAST-LIVO2 residual) |
+| `LidarMapPlanesFactor<G>` | Many point-to-plane matches on one pose, one residual block per sweep; self-whitening |
+| `LidarPlaneBundleFactor<G>` | One plane over several frames with the plane eliminated (BALM's eigenvalue cost) |
+| `LidarPlaneMomentFactor<G>` | The same plane cost from per-frame point moments (Voxel-SLAM's window cost) |
+| `LidarSubmapFieldFactor<G, F>` | Frame-to-submap: a scan point against a submap's occupancy field (OKVIS2-X) |
+| `SubmapAlignmentFactor<G, F>` | Submap-to-submap: a point of submap B against the field of submap A |
 
 ## GNSS & navigation — [`src/factors/navigation/`](../src/factors/navigation/) · [derivation](cookbook/src/factors/navigation.md)
 
@@ -112,6 +145,21 @@ variable block (hold it fixed to treat it as a measurement).
 | Factor | Variables | Residual | What it does |
 |---|---|---|---|
 | `MarginalPriorFactor` | `k` blocks (any manifolds) | prior rank | Gaussian marginal over eliminated variables (iSAM2 `LinearContainerFactor` analogue); manifold-agnostic via a caller-supplied local-log closure; self-whitening |
+
+`MarginalPriorFactorT<G>` is the same prior for blocks that all live on one
+group `G`, with the local chart `θ(x ⊟ x₀)` taken from `G::right_minus`.
+
+## Wrappers — [`src/factors/`](../src/factors/) · [derivation](cookbook/src/factors/decorators.md)
+
+Wrappers compose with any factor and keep its residual; they change what the
+solver sees.
+
+| Wrapper | What it does |
+|---|---|
+| `AggregateFactor` | Many factors compressed into their exact normal equations; parts summed in parallel, reproducibly |
+| `HeldBlocks<F>` | Fixes some of `F`'s parameter blocks to given values |
+| `RightOffset<F, G>` | Evaluates one block of `F` at `X·Δ` for a fixed motion `Δ` |
+| `ProjectedFactor<F>` | Right-multiplies `F`'s Jacobian by a projection, removing degenerate directions |
 
 ---
 

@@ -100,9 +100,9 @@ over-weighting the block forever.
 
 Three structural operations the problem supports directly:
 
-- `mark_for_elimination(key)` — opt a variable into the Schur path
-  (`mark_as_schur_landmark` is the deprecated spelling; the new name says
-  what it does, because elimination is not restricted to landmarks);
+- `mark_for_elimination(key)` — opt a variable into the Schur path (it was
+  `mark_as_schur_landmark` before 1.6; the new name says what it does,
+  because elimination is not restricted to landmarks);
 - `set_jacobian_evaluation(policy)` — choose the linearization policy
   (`JacobianEvaluation`, chapter [The First-Estimate
   Policy](./first-estimate.md));
@@ -149,7 +149,7 @@ standard deviations; the loss then thresholds the *whitened* residual, so the
 | constraining | `fix_variable`, `unfix_variable`, `set_variable_bounds`, `remove_variable_bounds`, `apply_constraints_to_variables` |
 | the policy | `jacobian_evaluation`, `set_jacobian_evaluation` |
 | the FEJ points | `freeze_linearization_point`, `set_linearization_point`, `clear_linearization_point`, `is_linearization_point_frozen` |
-| the elimination | `mark_for_elimination` (`mark_as_schur_landmark` is the deprecated spelling) |
+| the elimination | `mark_for_elimination` |
 | solving products | `compute_residual_sparse`, `compute_residual_and_cost_sparse`, `compute_residual_and_jacobian_sparse`, `compute_residual_and_jacobian_dense` |
 | dumping | `log_residual_to_file`, `log_sparse_jacobian_to_file`, `log_variables_to_file` |
 | uncertainty | `compute_and_set_covariances` |

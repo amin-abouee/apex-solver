@@ -125,6 +125,42 @@ chapter states the exact inequality and the error it raises:
 | `UnprojectionError::RadiusOutOfDomain { radius, max }` | the pixel lies beyond the fisheye's field of view |
 | `UnprojectionError::NotConverged { .. }` / `Diverged { .. }` | an iterative inverse fails to converge |
 
+## The Error Hierarchy
+
+`CameraModelError` is the crate's root error. Each variant transparently wraps one
+per-concern enum, so `?` lifts a leaf error to the root with no wrapper text and
+`source()` walks down to the leaf; every enum is `#[non_exhaustive]` with typed fields.
+
+| Enum | Returned by | Examples |
+|---|---|---|
+| `ParamError` | constructors, `validate_params`, `TryFrom<&[f64]>` | `FocalLengthNotPositive`, `PrincipalPointNotFinite`, `ParameterOutOfRange { param, min, max, value }`, `ParamCount { model, expected, actual }`, `DistortionVariant`, `ThinPrismNotZero` |
+| `ProjectionError` | `project` | the variants in the table above |
+| `UnprojectionError` | `unproject` | the variants in the table above |
+| `EstimationError` | `linear_estimation` | `PointCountMismatch`, `TooFewPoints`, `DegenerateFocalLength`, `SvdSolve`, `InvalidEstimate` |
+| `ConversionError` | `convert_camera` | `TooFewRays`, `InvalidInitial`, `InitialCannotProject` |
+
+Each has a result alias (`ParamResult`, `ProjectionResult`, …). Constructors,
+`linear_estimation` and `convert_camera` log their error once, where it is found;
+`project` and `unproject` do **not** log, because the solver calls them per observation and a
+failure there is data, not an event. `TryFrom<&[f64]>` checks the exact length and validates
+the values, and does not log for the same reason. `project_batch` returns one
+`ProjectionResult` per point; it no longer encodes a failed point as a `(1e6, 1e6)` sentinel.
+
+## The Projection Deficit
+
+`CameraModel::projection_deficit(&p_cam)` returns `(deficit, ∂deficit/∂p_cam)`: the signed
+depth by which a camera-frame point lies outside the model's projection domain, and its
+gradient. A point two metres behind a pinhole camera has a deficit of `2` and a gradient of
+`(0, 0, −1)`, pointing toward validity; inside the domain the deficit is non-positive.
+Each model states its own domain geometry: the default z-forward test, the BAL `-Z`
+convention, and the double sphere's cone `z > −w₂·‖p‖`.
+
+The deficit is *defined and tested* but deliberately **not charged** by the solver's
+`ProjectionFactor`: an experiment that added it as a barrier made the benchmarks worse and
+was reverted (at BAL t257 it charged 3.29e12 against a 6.86e4 golden cost at the initial
+guess, and the solve stopped making progress). It is there for a barrier formulation that survives the bundle-adjustment
+benchmarks.
+
 ## Number of Parameters
 
 | Model | Linear $K$ | Distortion | Total |

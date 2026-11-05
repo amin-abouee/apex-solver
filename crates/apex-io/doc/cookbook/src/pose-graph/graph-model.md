@@ -97,38 +97,41 @@ Implementors: [`G2oLoader`](./g2o.md), [`ToroLoader`](./toro.md).
 `load_graph` picks the loader from the file extension:
 
 ```rust
-pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<Graph, IoError>;
+pub fn load_graph<P: AsRef<Path>>(path: P) -> GraphResult<Graph>;
 ```
 
 | Extension | Loader |
 |---|---|
 | `.g2o` | `G2oLoader` |
 | `.graph` | `ToroLoader` |
-| _other_ | `IoError::UnsupportedFormat` |
+| _other_ | `GraphError::UnsupportedExtension` (`MissingExtension` when there is none) |
 
 <a id="error-model"></a>
 ## Error model
 
-All graph I/O returns `Result<_, IoError>`:
+All graph I/O returns `GraphResult<_>` = `Result<_, GraphError>`. `GraphError` is the
+pose-graph module's own error (`#[non_exhaustive]`, typed fields, no strings); the crate
+root `IoError` wraps it as `IoError::Graph`, next to one error per other module, so `?`
+converts automatically at the crate boundary.
 
 ```rust
-pub enum IoError {
-    Io(std::io::Error),
-    Parse { line, message },
-    UnsupportedVertexType(String),
-    UnsupportedEdgeType(String),
-    InvalidNumber { line, value },
-    MissingFields { line },
+pub enum GraphError {
+    Read { path, source },                   // the file could not be read
+    Write { path, source },                  // the file could not be written
+    MissingFields { line, record, actual, expected },
+    InvalidNumber { line, field, value },
     DuplicateVertex { id },
-    InvalidQuaternion { line, norm },
-    UnsupportedFormat(String),
-    FileCreationFailed { path, reason },
+    InvalidQuaternion { line, norm },        // not unit norm; rejected, not repaired
+    MissingExtension { path },
+    UnsupportedExtension { path, extension },
+    NoVertices { kind },
+    ToroSe3 { vertices, edges },             // TORO holds only SE2 graphs
 }
 ```
 
-Every variant carries context (line numbers, ids, offending values). Two helpers
-attach a `tracing::error!` log and return `self` for chaining:
-`err.log()` and `err.log_with_source(source)`.
+Every variant carries context (line numbers, ids, offending values) and keeps the
+underlying cause as `source()`. Errors are logged once, where they are found
+(`ErrorLogging::log`); `ErrorChainExt::chain()` prints the whole cause chain.
 
 ## Example
 

@@ -139,7 +139,7 @@ wrong: a pose that maps world to camera instead of camera to world, a bearing
 in the body frame instead of the camera frame, a point in the camera frame
 instead of the world frame. Such a factor compiles, converges, and produces a
 trajectory that is confidently wrong. Every factor in the crate documents the
-frame of its inputs, and the ecosystem books (apex-vio, apex-cv) document the
+frame of its inputs, and the books of the crates built on this one document the
 same conventions in the context of the systems that use them.
 
 </div>

@@ -78,7 +78,7 @@ the observer pattern replaced the ad-hoc hooks.
 `RerunObserver` lives behind the **`visualization` feature**:
 
 ```toml
-apex-solver = { version = "1.5", features = ["visualization"] }
+apex-solver = { version = "1.6", features = ["visualization"] }
 ```
 
 What it shows:

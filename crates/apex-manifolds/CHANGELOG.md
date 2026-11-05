@@ -5,6 +5,42 @@ All notable changes to `apex-manifolds` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-04
+
+### Breaking
+- **Hierarchical errors.** `ManifoldError` is now a root over `ElementError`, `TangentError`,
+  `RnError` and `ManifoldTypeError` (all with typed fields, no `String`), in the new `error`
+  module with the crate's own `ErrorLogging` / `ErrorChainExt`. `SO3::try_from_quaternion_wxyz`
+  returns a `ManifoldResult` instead of an `Option`.
+- **`SE23::from_components` and `SGal3::from_components` take one array** (`[f64; 9]` /
+  `[f64; 10]`) instead of a long argument list.
+- **Capability traits replace the runtime group whitelist.** `ActsOnPoints3`, `RigidPose`,
+  `HasVelocity` and `ConstDoF` (module `capability`) say what a group can do, so generic code
+  is bounded by a trait instead of matching on a fixed set of groups; `zero_jacobian_for` is
+  added. The SE₂(3) twins are generic over `RigidPose`.
+
+### Added
+- **Checked constructors** for parameter slices, tangent slices, quaternions, axes and the
+  Sim(3) scale (`try_from_axis_angle`, `Sim3::try_new` / `try_from_components` /
+  `try_normalize`, ...), and fallible `Rn` operations (`try_compose`, `try_right_plus`,
+  `try_right_minus`, `try_interp`, `try_act`) that report a dimension mismatch.
+  `ManifoldType::try_from_name` reports an unknown name as an error.
+- **`util::skew`**: the one public home of the skew-symmetric matrix, replacing three copies
+  in the solver crates.
+
+### Fixed
+- **SGal(3) group law** (`compose`, `adjoint`, `exp`): the time–velocity coupling was
+  backwards (`t1 + v1·s2` on translation, none on velocity is correct); `matrix()` follows.
+  The `act` Jacobian's time column is twice the velocity.
+- **No panics or NaN** in the tangent generators, `Rn` dimension mismatches, the SE(3)
+  tangent `normalize` and the SE(2) Jacobian inverses.
+- The Sim(3) and SGal(3) singular-Jacobian fallbacks are logged on the first hit and then
+  on each power of ten, instead of on every call.
+
+### Documentation
+- Cookbook chapters *Capabilities* (the `ActsOnPoints3`, `RigidPose`, `HasVelocity` and `ConstDoF` traits) and
+  *Errors and Checked Constructors* (the `ManifoldError` hierarchy and every `try_*` constructor).
+
 ## [0.4.0] - 2026-09-29
 
 ### Added

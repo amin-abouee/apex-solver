@@ -104,8 +104,8 @@ A consumer that maintains a sliding window does the following at each step:
 4. solve; the prior's block reports the Jacobian it was built with, and the
    other blocks report theirs.
 
-`apex-vio` does exactly this, and its marginalization chapter documents the
-consequences; this chapter documents the mechanism that makes it possible.
+Sliding-window estimators do exactly this, and the consequences are documented
+where they are used; this chapter documents the mechanism that makes it possible.
 
 ## 5. Worked example
 

@@ -762,7 +762,7 @@ impl Tangent<Sim3> for Sim3Tangent {
     ///
     /// Computed from the general Lie-group identity `Jr(ξ) = ∫₀¹ Ad(Exp(-tξ)) dt`
     /// (e.g. Solà, "A micro Lie theory for state estimation in robotics", eq. 146),
-    /// evaluated by [`integrate_adjoint_of_negated_exp`]. Unlike SE(3)'s `Q`
+    /// evaluated by `integrate_adjoint_of_negated_exp`. Unlike SE(3)'s `Q`
     /// block, Sim(3)'s exact translation/rotation/scale coupling does not
     /// reduce to a compact closed form; this identity sidesteps re-deriving
     /// one by hand and is verified against central differences of `Exp` in
@@ -1836,9 +1836,9 @@ mod regularized_inverse_tests {
 /// differential geometry). These build their own finite-difference oracle
 /// from `exp()`/`matrix()`/`inverse()` alone — never from `log()`,
 /// `right_jacobian_inv()`, `left_jacobian_inv()`, or `v_matrix()` — so a bug
-/// shared between an analytic Jacobian and its "inverse" cannot hide here
-/// (see `codex/issues/ISSUE-0002-sim3-differentials.md`, "Do not validate an
-/// analytic Jacobian solely with an inverse built from that same Jacobian.").
+/// shared between an analytic Jacobian and its "inverse" cannot hide here.
+/// That is the lesson of the Sim(3) differentials audit: do not validate an
+/// analytic Jacobian solely with an inverse built from that same Jacobian.
 #[cfg(test)]
 mod sim3_jacobian_fd_tests {
     use super::*;

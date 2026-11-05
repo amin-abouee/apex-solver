@@ -127,7 +127,7 @@ fn check_dim(expected: usize, actual: usize) -> RnResult<()> {
 
 impl Rn {
     /// Sentinel: Rⁿ has no compile-time ambient dimension. The runtime value
-    /// is the data length; gate any branch with [`Rn::is_dynamic`].
+    /// is the data length; gate any branch with [`Tangent::is_dynamic`].
     #[deprecated(
         note = "Rn is dynamic: this const is the 0 sentinel, not a dimension. Use is_dynamic() and tangent_dim()."
     )]

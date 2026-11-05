@@ -88,8 +88,8 @@ $$
 ## Example
 
 ```rust
-use apex_solver::manifold::sgal3::{SGal3, SGal3Tangent};
-use apex_solver::manifold::{LieGroup, Tangent};
+use apex_manifolds::sgal3::{SGal3, SGal3Tangent};
+use apex_manifolds::{LieGroup, Tangent};
 use nalgebra::{Vector3, UnitQuaternion};
 
 let state = SGal3::new(

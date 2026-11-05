@@ -473,8 +473,7 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// and 2.20e10 against 6.86e4 / 1.89e5 goldens) and the solve stopped
     /// making progress. The per-model definitions below stay: they are the
     /// correct domain geometry, unit-tested here, ready for a formulation that
-    /// survives those benchmarks. See
-    /// `benchmarking_results/experiment_007_projection_domain_barrier_REJECTED.md`.
+    /// survives those benchmarks.
     ///
     /// # Examples
     ///
@@ -1226,6 +1225,27 @@ mod tests {
                 points_2d: 2
             })
         );
+        Ok(())
+    }
+
+    /// Canonical test for the default `projection_deficit` (z-forward models:
+    /// deficit `-z`, gradient `-e_z`), mirroring the `jacobian_pose` default
+    /// test above with `PinholeCamera` as the representative model.
+    #[test]
+    fn test_projection_deficit_default_z_forward() -> TestResult {
+        let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::new(pinhole, DistortionModel::None)?;
+
+        // Behind the camera: positive deficit = depth below the z = 0 plane.
+        let (deficit, grad) = camera.projection_deficit(&Vector3::new(1.0, -2.0, -3.0));
+        assert!((deficit - 3.0).abs() < 1e-15);
+        assert_eq!(grad, Vector3::new(0.0, 0.0, -1.0));
+
+        // In front: no deficit.
+        let (deficit_in, grad_in) = camera.projection_deficit(&Vector3::new(0.3, -0.1, 2.0));
+        assert!((deficit_in + 2.0).abs() < 1e-15);
+        assert!(deficit_in <= 0.0);
+        assert_eq!(grad_in, Vector3::new(0.0, 0.0, -1.0));
         Ok(())
     }
 }

@@ -72,7 +72,7 @@ let config = LevenbergMarquardtConfig::default()
 | the budget | `with_max_iterations`, `with_timeout`, `with_min_cost_threshold` | the iteration cap, the wall-clock stop, the "good enough" exit |
 | the tolerances | `with_cost_tolerance`, `with_parameter_tolerance`, `with_gradient_tolerance` | the three convergence criteria |
 | the damping | `with_damping`, `with_damping_bounds`, `with_damping_factors`, `with_damping_update`, `with_diagonal_bounds` | LM; `with_damping_update` selects the `Nielsen` or `Marquardt` rule |
-| the trust region | `with_trust_region`, `with_min_trust_region_radius`, `with_mu_params` | Dog Leg |
+| the trust region | `with_trust_region_radius`, `with_trust_region_bounds`, `with_trust_region_factors`, `with_mu_params` | Dog Leg |
 | the step quality | `with_step_quality`, `with_step_quality_thresholds`, `with_min_relative_decrease` | the acceptance bands |
 | the conditioning | `with_max_condition_number` | a check on the Jacobian's conditioning |
 | the scaling | `with_jacobi_scaling` | column preconditioning |

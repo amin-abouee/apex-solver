@@ -12,7 +12,7 @@ specifics live in [ROS1](./ros1.md), [ROS2](./ros2.md), and [DDS](./dds.md).
 | Path | Contents |
 |---|---|
 | `rosbag::types` | Shared `Connection`, `Message`, `RawMessage`, QoS, compression & storage enums |
-| `rosbag::error` | `BagError` + `Result`/`ReaderResult`/`WriterResult` aliases |
+| `rosbag::error` | `BagError` + `Result`/`WriterResult` aliases |
 | `rosbag::ros1` | ROS1 `.bag` reader/writer + CDR-free ROS1 (de)serializer |
 | `rosbag::ros2` | ROS2 reader/writer, CDR, metadata, storage plugins, message types |
 | `rosbag::ros2::dds` | Live DDS subscription (feature `dds`) |
@@ -88,6 +88,18 @@ ROS1 additionally supports `bz2` and `lz4` chunk compression via
 `Duration`, `StartingTime`, and `QosTime` carry nanosecond-resolution ROS time.
 Readers expose `start_time()`, `end_time()`, `duration()`, and `message_count()`.
 
+## Converting between ROS1 and ROS2 (`transcode`)
+
+`rosbag::transcode` converts message payloads between ROS1 and ROS2 (CDR) without
+hand-written per-type code. A `Transcoder` is compiled from the message *definition*:
+the one the bag carries (the ROS1 connection header, an MCAP schema), or — for ROS2
+sqlite bags, which store none — a built-in catalog of the standard interface packages
+(`catalog_definition`, `catalog_md5`). That is why user-defined message types convert
+too, and why large byte arrays (images, point clouds) are copied without touching their
+elements. `plan_topic` / `plan_connections` decide, per topic, whether the bytes can be
+copied verbatim (same encoding) or must be re-encoded, and report topics that cannot be
+converted (`Unsupported`). `bag_convert` and `bag_verify` are built on it.
+
 ## Fast metadata
 
 ```rust
@@ -107,5 +119,5 @@ each failure class:
 `cdr_deserialization`, `message_type_not_found`, `schema_validation`,
 `connection_not_found`, `connection_already_exists`, `invalid_qos_profile`.
 
-Aliases: `Result<T>`, `ReaderResult<T>`, `WriterResult<T>` (all
-`= Result<T, BagError>`); `ReaderError = BagError`.
+Aliases: `Result<T>`, `BagResult<T>`, `WriterResult<T>` (all
+`= Result<T, BagError>`).

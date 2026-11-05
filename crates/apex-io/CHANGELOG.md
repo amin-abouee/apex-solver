@@ -5,7 +5,11 @@ All notable changes to `apex-io` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-11-04
+
+### Removed
+- **Breaking:** the `rosbag::ReaderResult` and `rosbag::ReaderError` aliases; use `BagResult` and
+  `BagError`.
 
 ### Changed (error propagation)
 - **Breaking:** `IoError` is now the crate root wrapping one error per module: `GraphError` (the old
@@ -28,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns an error instead of spinning when its worker dies; unknown G2O/TORO records are reported once
   per type; an MCAP or SQLite message on an unknown channel is an error or uses its own channel record,
   never a blank connection.
+
+### Fixed (dataset downloads)
+- `utils::download_file` could block forever on a server that accepted the connection and then stopped
+  sending, which wedged any test or CI job that fetched a dataset. Connecting is now bounded to 30 s and a
+  read to 60 s without data; a dropped connection, a timeout, a `408`/`429`/`5xx`, or a body shorter than its
+  `Content-Length` is retried twice. A `404` or other client error is returned at once.
+- The body is streamed into `<name>.part` and renamed onto the destination when complete, instead of being
+  held in memory, so a failed download never replaces an existing file.
 
 ### Added (LaMAria)
 - **`lamaria::Calibration`**: a typed reader for the dataset's `aria_calibrations/<sequence>.json` (two
@@ -183,6 +195,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validated when a chunk declares one).
 - `tests/hilti_mcap.rs`: env-gated (`APEX_HILTI_MCAP`) integration test
   decoding a real ROS1-profile dataset bag end to end.
+
+### Documentation
+- Cookbook chapters *One Reader and Writer* (`BagReader`, `BagWriter`, `Selection`) and *Trajectories*; the CLI chapter
+  covers all twelve binaries (`bag_merge`, `bag_verify` and the three `vrs_*` tools were missing, and the
+  `bag_filter` and `extract_topic_data` usage was wrong); the transcoder has a section; the pose-graph pages describe
+  `GraphError`; three broken cross-book links are fixed.
 
 ## [0.4.0] - 2026-09-29
 

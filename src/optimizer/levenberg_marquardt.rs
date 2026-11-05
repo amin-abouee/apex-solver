@@ -554,22 +554,6 @@ impl LevenbergMarquardtConfig {
         self
     }
 
-    /// Set the trust region parameters.
-    ///
-    /// `radius` is ignored: this Levenberg-Marquardt implementation controls step
-    /// size through `damping` (Nielsen's update rule), not through a trust-region
-    /// radius, and the radius was never read by the algorithm. See
-    /// <https://github.com/amin-abouee/apex-solver/issues/40>.
-    #[deprecated(
-        since = "1.5.0",
-        note = "the `radius` argument is ignored — Levenberg-Marquardt here is damping-controlled. \
-                Use `with_damping`/`with_damping_bounds` to control step size, and \
-                `with_step_quality` for the quality thresholds."
-    )]
-    pub fn with_trust_region(self, _radius: f64, min_quality: f64, good_quality: f64) -> Self {
-        self.with_step_quality(min_quality, good_quality)
-    }
-
     /// Set minimum objective function cutoff for early termination.
     ///
     /// When set, optimization terminates with MinCostThresholdReached status
@@ -577,21 +561,6 @@ impl LevenbergMarquardtConfig {
     /// a "good enough" solution is acceptable.
     pub fn with_min_cost_threshold(mut self, min_cost: f64) -> Self {
         self.min_cost_threshold = Some(min_cost);
-        self
-    }
-
-    /// No-op, retained for backward compatibility.
-    ///
-    /// This value was never read by the algorithm. Unlike Ceres, where
-    /// `min_trust_region_radius` terminates the solve when the radius collapses,
-    /// this implementation is damping-controlled and has no radius to compare
-    /// against. See <https://github.com/amin-abouee/apex-solver/issues/40>.
-    #[deprecated(
-        since = "1.5.0",
-        note = "no-op: Levenberg-Marquardt here is damping-controlled and never read this value. \
-                Use `with_damping_bounds` to bound the damping instead."
-    )]
-    pub fn with_min_trust_region_radius(self, _min_radius: f64) -> Self {
         self
     }
 
