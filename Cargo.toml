@@ -37,7 +37,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4.6", features = ["derive"] }
 chrono = "0.4"
-colored = "2.2"
 num_cpus = "1.17"
 rerun = { version = "0.26.2", features = ["sdk"] }
 ureq = "2.12"
