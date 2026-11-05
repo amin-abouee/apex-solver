@@ -13,9 +13,9 @@ jobs:
   check_and_test:
     name: Check & Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # The slowest healthy leg (Windows) takes about 30 minutes. The limit counts
+    # A cold-cache Windows leg takes 47 to 60 minutes. The limit counts
     # run time only, but it keeps a stuck leg from holding the PR for six hours.
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
