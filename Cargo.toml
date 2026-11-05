@@ -44,7 +44,7 @@ ureq = "2.12"
 bzip2 = "0.5"
 flate2 = "1"
 tar = "0.4"
-toml = "0.8"
+toml = "1.1"
 
 # rosbag optional dependencies
 serde_norway = "0.9.42"
