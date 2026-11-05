@@ -21,7 +21,7 @@ apex-camera-models = { path = "crates/apex-camera-models", version = "0.5.0" }
 
 # External dependencies (shared versions)
 slotmap = "1.1"
-nalgebra = { version = "0.33" }
+nalgebra = { version = "0.35" }
 faer = { version = "0.24", features = ["sparse"] }
 # faer's numeric sparse kernels take a `MemStack` scratch, but faer keeps
 # `MemStack` crate-private; dyn-stack is faer's own support crate (same version
@@ -67,7 +67,7 @@ futures = "0.3"
 criterion = "0.8.2"
 tempfile = "3.27"
 factrs = "0.3.0"
-tiny-solver = "0.17"
+tiny-solver = "0.18"
 csv = "1.4"
 
 [workspace.lints.rust]

@@ -351,9 +351,12 @@ fn graph_size(graph: &apex_io::Graph, is_3d: bool) -> (usize, usize) {
 // for final cost, but use unified cost for initial cost to ensure fair comparison baseline.
 
 /// Update SE2 graph vertices from tiny-solver optimization result
-fn update_se2_graph_from_tiny_solver(
+///
+/// Generic over the vector type, because tiny-solver may link a different
+/// `nalgebra` release than this crate.
+fn update_se2_graph_from_tiny_solver<V: std::ops::Index<usize, Output = f64>>(
     graph: &mut apex_io::Graph,
-    tiny_solver_result: &std::collections::HashMap<String, nalgebra::DVector<f64>>,
+    tiny_solver_result: &std::collections::HashMap<String, V>,
 ) {
     for (var_name, var_value) in tiny_solver_result {
         // tiny-solver uses "x0", "x1", etc. as variable names
@@ -368,9 +371,9 @@ fn update_se2_graph_from_tiny_solver(
 }
 
 /// Update SE3 graph vertices from tiny-solver optimization result
-fn update_se3_graph_from_tiny_solver(
+fn update_se3_graph_from_tiny_solver<V: std::ops::Index<usize, Output = f64>>(
     graph: &mut apex_io::Graph,
-    tiny_solver_result: &std::collections::HashMap<String, nalgebra::DVector<f64>>,
+    tiny_solver_result: &std::collections::HashMap<String, V>,
 ) {
     use nalgebra::{Quaternion, Vector3};
 
