@@ -38,7 +38,7 @@ use nalgebra::{
     DVector, Matrix2xX, Matrix3, Matrix3xX, Rotation3, UnitQuaternion, Vector2, Vector3,
 };
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 const CAMERAS: usize = 20;
 const LANDMARKS: usize = 300;

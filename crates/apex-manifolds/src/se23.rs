@@ -354,7 +354,7 @@ impl LieGroup for SE23 {
     }
 
     fn random() -> Self {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         let translation = Vector3::new(
@@ -673,7 +673,7 @@ impl Tangent<SE23> for SE23Tangent {
     }
 
     fn random() -> <SE23 as LieGroup>::TangentVector {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         SE23Tangent::new(
             Vector3::new(

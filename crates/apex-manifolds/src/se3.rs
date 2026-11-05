@@ -356,7 +356,7 @@ impl LieGroup for SE3 {
     }
 
     fn random() -> Self {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         let translation = Vector3::new(
@@ -756,7 +756,7 @@ impl Tangent<SE3> for SE3Tangent {
     /// # Returns
     /// A random 6-dimensional tangent vector
     fn random() -> <SE3 as LieGroup>::TangentVector {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         SE3Tangent::from_components(
             rng.random_range(-1.0..1.0), // rho_x

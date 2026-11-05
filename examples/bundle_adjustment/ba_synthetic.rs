@@ -44,7 +44,7 @@ use apex_solver::{
 };
 use nalgebra::{DVector, Matrix2xX, Matrix3, Rotation3, UnitQuaternion, Vector2, Vector3};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use slotmap::SlotMap;
 
 const CAMERAS: usize = 20;

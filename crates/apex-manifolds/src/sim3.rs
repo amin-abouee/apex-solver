@@ -497,7 +497,7 @@ impl LieGroup for Sim3 {
     }
 
     fn random() -> Self {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         let translation = Vector3::new(
@@ -815,7 +815,7 @@ impl Tangent<Sim3> for Sim3Tangent {
     }
 
     fn random() -> <Sim3 as LieGroup>::TangentVector {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         Sim3Tangent::new(
             Vector3::new(

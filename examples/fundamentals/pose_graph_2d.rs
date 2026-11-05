@@ -32,7 +32,7 @@ use apex_solver::{
 };
 use nalgebra::DVector;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use slotmap::SlotMap;
 
 /// Steps per side of the square, one metre each.
