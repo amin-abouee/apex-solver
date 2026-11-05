@@ -53,7 +53,7 @@ bytes      = "1.11"
 hex        = "0.4"
 image      = "0.25"
 rusqlite   = { version = "0.31", features = ["bundled"] }
-zstd       = "0.13"
+zstd       = "0.14"
 mcap       = "0.23"
 md5        = "0.7"
 crc32fast  = "1.5"
