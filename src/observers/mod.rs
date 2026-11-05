@@ -159,7 +159,7 @@ pub enum ObserverError {
     RecordingSave {
         path: String,
         #[source]
-        source: rerun::RecordingStreamError,
+        source: Box<rerun::RecordingStreamError>,
     },
 
     /// An entity could not be logged to the recording.
@@ -168,7 +168,7 @@ pub enum ObserverError {
     Logging {
         entity_path: String,
         #[source]
-        source: rerun::RecordingStreamError,
+        source: Box<rerun::RecordingStreamError>,
     },
 }
 
