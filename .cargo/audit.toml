@@ -5,14 +5,18 @@
 [advisories]
 ignore = [
     # RUSTSEC-2026-0195 / RUSTSEC-2026-0194 — quick-xml DoS in NsReader.
-    # quick-xml 0.36/0.39 are pinned by rerun 0.26 (re_sdk ^0.36); the
-    # vulnerable namespace parsing is not exercised by our Rerun usage.
-    # Re-evaluate when rerun ships a release on quick-xml >= 0.41.
+    # quick-xml 0.36 and 0.39 are still in the lockfile through rerun's
+    # dependencies; the vulnerable namespace parsing is not exercised by our
+    # Rerun usage. Re-evaluate when they move to quick-xml >= 0.41.
     "RUSTSEC-2026-0195",
     "RUSTSEC-2026-0194",
-    # RUSTSEC-2026-0435 — thrift 0.17 binary protocol `read_bytes` allocates
-    # an unbounded buffer. Pinned by parquet 55 via rerun 0.26 (re_data_loader);
-    # we never read untrusted Parquet. Re-evaluate on a rerun release whose
-    # parquet depends on thrift >= 0.23.
-    "RUSTSEC-2026-0435",
+    # RUSTSEC-2026-0367 / 0368 / 0369 / 0429 — zip 8.6 `extract` issues (symlink
+    # and SUID handling). zip is in the lockfile only through
+    # re_web_viewer_server, rerun's optional web viewer, which no feature of
+    # ours enables (`cargo tree -i zip` is empty), and we never extract archives
+    # with it. Re-evaluate when rerun moves to zip >= 9.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
 ]

@@ -25,7 +25,7 @@ use apex_solver::{JacobianMode, LevenbergMarquardt, LevenbergMarquardtConfig, Ma
 use faer::mat::MatMut;
 use nalgebra::DVector;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// The curve the samples are drawn from.
 const TRUE_M: f64 = 0.3;

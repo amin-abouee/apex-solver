@@ -434,7 +434,7 @@ impl LieGroup for SGal3 {
     }
 
     fn random() -> Self {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         let translation = Vector3::new(
@@ -756,7 +756,7 @@ impl Tangent<SGal3> for SGal3Tangent {
     }
 
     fn random() -> <SGal3 as LieGroup>::TangentVector {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         SGal3Tangent::new(
             Vector3::new(

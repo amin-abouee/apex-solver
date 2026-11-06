@@ -181,7 +181,8 @@ fn run_reader_loop(
 
         loop {
             match stream.next().await {
-                Some(Ok(RawBytes(raw_data))) => {
+                Some(Ok(sample)) => {
+                    let RawBytes(raw_data) = sample.into_value();
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_nanos() as u64)

@@ -37,7 +37,7 @@ use apex_solver::{
     factors::lidar::{LidarEdgeFactor, lidar_plane_factor_isotropic},
 };
 use nalgebra::{DMatrix, DVector, Matrix3, UnitQuaternion, Vector3};
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 

@@ -17,12 +17,12 @@ pub struct RawBytes(pub Vec<u8>);
 #[derive(Clone)]
 pub struct RawBytesDecoder;
 
-impl no_key::Decode<RawBytes> for RawBytesDecoder {
+impl<'de> no_key::Decode<'de, RawBytes> for RawBytesDecoder {
     type Error = std::convert::Infallible;
 
     fn decode_bytes(
         self,
-        input_bytes: &[u8],
+        input_bytes: &'de [u8],
         encoding: RepresentationIdentifier,
     ) -> Result<RawBytes, Self::Error> {
         // Reconstruct the 4-byte CDR encapsulation header from the encoding.

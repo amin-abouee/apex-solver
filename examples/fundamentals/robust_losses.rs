@@ -41,7 +41,7 @@ use apex_solver::{
 };
 use nalgebra::DVector;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 const SIDE: usize = 10;
 const LAPS: usize = 5;

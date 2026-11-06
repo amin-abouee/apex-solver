@@ -69,11 +69,14 @@ pub(super) fn download(url: &str, dest: &Path, policy: &Policy) -> DatasetResult
         fs::create_dir_all(parent).map_err(|e| DatasetError::write(parent, e).log())?;
     }
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(policy.connect)
-        .timeout_read(policy.read)
-        .timeout_write(policy.read)
-        .build();
+    // `timeout_per_read` is an idle limit: it restarts with every read, so a slow
+    // but moving transfer of a large file is fine and a stalled one is not.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(policy.connect))
+        .timeout_per_read(Some(policy.read))
+        .timeout_per_write(Some(policy.read))
+        .build()
+        .into();
     let staged = staging_path(dest);
 
     let mut attempt = 1;
@@ -126,8 +129,11 @@ fn fetch(agent: &ureq::Agent, url: &str, staged: &Path) -> Result<(), Failure> {
     let response = agent.get(url).call().map_err(|e| {
         // A 4xx other than "slow down" will answer the same way next time.
         let transient = match &e {
-            ureq::Error::Status(code, _) => matches!(*code, 408 | 429 | 500..=599),
-            ureq::Error::Transport(_) => true,
+            ureq::Error::StatusCode(code) => matches!(*code, 408 | 429 | 500..=599),
+            // A malformed URL or request will fail the same way again.
+            ureq::Error::BadUri(_) | ureq::Error::Http(_) => false,
+            // Timeouts, resets, DNS and TLS failures can clear up.
+            _ => true,
         };
         let error = DatasetError::Request {
             url: url.to_string(),
@@ -137,7 +143,9 @@ fn fetch(agent: &ureq::Agent, url: &str, staged: &Path) -> Result<(), Failure> {
     })?;
 
     let promised = response
-        .header("Content-Length")
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     let mut file =
         fs::File::create(staged).map_err(|e| Failure::permanent(DatasetError::write(staged, e)))?;
@@ -149,7 +157,7 @@ fn fetch(agent: &ureq::Agent, url: &str, staged: &Path) -> Result<(), Failure> {
         })
     };
 
-    let mut reader = response.into_reader();
+    let mut reader = response.into_body().into_reader();
     let mut chunk = vec![0u8; CHUNK];
     let mut received: u64 = 0;
     loop {

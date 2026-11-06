@@ -316,7 +316,7 @@ impl LieGroup for SE2 {
     }
 
     fn random() -> Self {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         let x = rng.random_range(-1.0..1.0);
@@ -662,7 +662,7 @@ impl Tangent<SE2> for SE2Tangent {
 
     /// Random tangent vector (useful for testing).
     fn random() -> <SE2 as LieGroup>::TangentVector {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         SE2Tangent::new(
             rng.random_range(-1.0..1.0),

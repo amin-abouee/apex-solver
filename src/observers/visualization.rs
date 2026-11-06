@@ -583,7 +583,7 @@ impl RerunObserver {
                     .map_err(|e| {
                         ObserverError::RecordingSave {
                             path: path.to_string(),
-                            source: e,
+                            source: Box::new(e),
                         }
                         .log()
                     })?
@@ -605,7 +605,7 @@ impl RerunObserver {
                             .map_err(|e2| {
                                 ObserverError::RecordingSave {
                                     path: "optimization.rrd".to_string(),
-                                    source: e2,
+                                    source: Box::new(e2),
                                 }
                                 .log()
                             })?
@@ -776,7 +776,7 @@ impl RerunObserver {
                 rec.log(entity_path.as_str(), &transform).map_err(|e| {
                     ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        source: e,
+                        source: Box::new(e),
                     }
                     .log()
                 })?;
@@ -793,7 +793,7 @@ impl RerunObserver {
                 .map_err(|e| {
                     ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        source: e,
+                        source: Box::new(e),
                     }
                     .log()
                 })?;
@@ -823,7 +823,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "initial_graph/se2_poses".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -853,7 +853,7 @@ impl RerunObserver {
         .map_err(|e| {
             ObserverError::Logging {
                 entity_path: "optimization/status".to_string(),
-                source: e,
+                source: Box::new(e),
             }
             .log()
         })?;
@@ -946,7 +946,7 @@ impl RerunObserver {
                     rec.log(entity_path.as_str(), &transform).map_err(|e| {
                         ObserverError::Logging {
                             entity_path: entity_path.clone(),
-                            source: e,
+                            source: Box::new(e),
                         }
                         .log()
                     })?;
@@ -962,7 +962,7 @@ impl RerunObserver {
                     .map_err(|e| {
                         ObserverError::Logging {
                             entity_path: entity_path.clone(),
-                            source: e,
+                            source: Box::new(e),
                         }
                         .log()
                     })?;
@@ -994,7 +994,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "initial_graph/landmarks".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1074,7 +1074,7 @@ impl RerunObserver {
                 rec.log(entity_path.as_str(), &transform).map_err(|e| {
                     ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        source: e,
+                        source: Box::new(e),
                     }
                     .log()
                 })?;
@@ -1090,7 +1090,7 @@ impl RerunObserver {
                 .map_err(|e| {
                     ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        source: e,
+                        source: Box::new(e),
                     }
                     .log()
                 })?;
@@ -1131,7 +1131,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "final_graph/landmarks".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1155,7 +1155,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "final_graph/se2_poses".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1290,7 +1290,7 @@ impl RerunObserver {
                 .map_err(|e| {
                     ObserverError::Logging {
                         entity_path: "cost_plot/value".to_string(),
-                        source: e,
+                        source: Box::new(e),
                     }
                     .log()
                 })?;
@@ -1304,7 +1304,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "gradient_plot/norm".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1318,7 +1318,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "damping_plot/lambda".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1332,7 +1332,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "step_plot/norm".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1346,7 +1346,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "quality_plot/rho".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1378,7 +1378,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "optimization/matrices/hessian".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1395,7 +1395,7 @@ impl RerunObserver {
                 .map_err(|e| {
                     ObserverError::Logging {
                         entity_path: "optimization/matrices/gradient".to_string(),
-                        source: e,
+                        source: Box::new(e),
                     }
                     .log()
                 })?;
@@ -1458,7 +1458,7 @@ impl RerunObserver {
                 rec.log(entity_path.as_str(), &transform).map_err(|e| {
                     ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        source: e,
+                        source: Box::new(e),
                     }
                     .log()
                 })?;
@@ -1474,7 +1474,7 @@ impl RerunObserver {
                 .map_err(|e| {
                     ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        source: e,
+                        source: Box::new(e),
                     }
                     .log()
                 })?;
@@ -1507,7 +1507,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "initial_graph/landmarks".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1527,7 +1527,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "initial_graph/se2_poses".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1588,7 +1588,7 @@ impl RerunObserver {
                 rec.log(entity_path.as_str(), &transform).map_err(|e| {
                     ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        source: e,
+                        source: Box::new(e),
                     }
                     .log()
                 })?;
@@ -1604,7 +1604,7 @@ impl RerunObserver {
                 .map_err(|e| {
                     ObserverError::Logging {
                         entity_path: entity_path.clone(),
-                        source: e,
+                        source: Box::new(e),
                     }
                     .log()
                 })?;
@@ -1640,7 +1640,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "optimized_graph/landmarks".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
@@ -1661,7 +1661,7 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::Logging {
                     entity_path: "optimized_graph/se2_poses".to_string(),
-                    source: e,
+                    source: Box::new(e),
                 }
                 .log()
             })?;
